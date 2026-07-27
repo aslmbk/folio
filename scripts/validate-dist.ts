@@ -232,6 +232,12 @@ const runtimeExpect: Record<string, Record<string, string[]>> = {
       "serializeDocumentToDocx",
       "validateDocxPackage",
     ],
+    "@stll/docx-core/projection": [
+      "DocxProjectionError",
+      "DocxProjectionInitializationError",
+      "initializeDocxProjection",
+      "projectCompressedDocx",
+    ],
   },
   core: {
     "@stll/folio-core": ["createEmptyDocument", "createDocx", "deriveBlockId"],
@@ -338,9 +344,20 @@ import {
   type Document,
 } from "@stll/docx-core";
 import type { Paragraph, Run } from "@stll/docx-core/model";
+import {
+  initializeDocxProjection,
+  projectCompressedDocx,
+  type DocxProjectionWire,
+} from "@stll/docx-core/projection";
 
-export const used = [compileLegalSourceToDocx, serializeDocumentToDocx, validateDocxPackage];
-export type Surface = [Document, Paragraph, Run];
+export const used = [
+  compileLegalSourceToDocx,
+  serializeDocumentToDocx,
+  validateDocxPackage,
+  initializeDocxProjection,
+  projectCompressedDocx,
+];
+export type Surface = [Document, Paragraph, Run, DocxProjectionWire];
 `,
   core: `
 import { createEmptyDocument, createDocx, type Document } from "@stll/folio-core";
@@ -701,6 +718,20 @@ record(
 );
 
 if (target === "docx-core") {
+  // Do not call the default initializer in this Node process: wasm-bindgen's
+  // browser target resolves a package-relative file URL and loads it with
+  // `fetch`, while Node does not fetch `file:` URLs. The packed-consumer browser
+  // smoke invokes `projectCompressedDocx` without an override, covering the
+  // real default URL, bundler, server, MIME fallback, and execution path.
+  const wasmPath = path.join(installedDist, "docx_kernel_bg.wasm");
+  const wasmBytes = existsSync(wasmPath) ? await readFile(wasmPath) : null;
+  const validWasm = wasmBytes !== null && WebAssembly.validate(wasmBytes);
+  record(
+    "wasm: projection runtime ships as valid WebAssembly",
+    validWasm,
+    validWasm ? `${wasmBytes.byteLength} byte artifact present` : "missing or invalid artifact",
+  );
+
   const missingAttribution = ["LICENSE", "NOTICE.md"].filter(
     (file) => !existsSync(path.join(installedDir, file)),
   );

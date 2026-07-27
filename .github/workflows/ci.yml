@@ -28,6 +28,8 @@ jobs:
         uses: stella/.github/.github/actions/changeset-policy@c47bb87cc82047b5fdc2540983148d4e3efa9a37 # v1.3.0
         with:
           release-paths: |
+            crates/docx-kernel/Cargo.toml
+            crates/docx-kernel/src/**
             packages/docx-core/src/**
             packages/core/src/**
             packages/react/src/**
@@ -35,6 +37,8 @@ jobs:
             packages/vue/src/**
             packages/nuxt/src/**
           generated-paths: |
+            Cargo.lock
+            Cargo.toml
             bun.lock
             packages/docx-core/CHANGELOG.md
             packages/docx-core/package.json
@@ -119,6 +123,70 @@ jobs:
 
       - name: Validate dist
         run: bun run validate-dist
+
+  docx-kernel:
+    name: DOCX kernel (Rust and WebAssembly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: "package.json"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Install pinned Rust toolchain and WebAssembly target
+        run: rustup show active-toolchain && rustup target add wasm32-unknown-unknown
+
+      - name: Install matching wasm-bindgen CLI
+        run: |
+          mapfile -t versions < <(cargo metadata --locked --format-version 1 --features wasm | jq -r '[.packages[] | select(.name == "wasm-bindgen") | .version] | unique | .[]')
+          if (( ${#versions[@]} != 1 )); then
+            echo "expected exactly one wasm-bindgen version, found: ${versions[*]:-none}" >&2
+            exit 1
+          fi
+          cargo install wasm-bindgen-cli --version "${versions[0]}" --locked
+
+      - name: Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Rust tests
+        run: cargo test -p stella-docx-kernel
+
+      - name: Rust lint
+        run: |
+          cargo clippy -p stella-docx-kernel --all-targets -- -D warnings
+          cargo clippy -p stella-docx-kernel --lib --features wasm --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Registry package
+        run: cargo package -p stella-docx-kernel --locked
+
+      - name: npm and Cargo version parity
+        run: bun run check:docx-kernel-version
+
+      - name: Generate canonical single-thread WebAssembly and enforce size budgets
+        run: bun --filter '@stll/docx-core' wasm:generate
+
+      - name: Verify canonical WebAssembly artifacts are committed
+        run: |
+          drift="$(git status --porcelain=v1 --untracked-files=all -- packages/docx-core/src/generated)"
+          if [[ -n "${drift}" ]]; then
+            echo "canonical WebAssembly artifacts are stale or untracked:" >&2
+            echo "${drift}" >&2
+            exit 1
+          fi
+
+      - name: Upload canonical WebAssembly artifacts after a drift failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canonical-docx-kernel-wasm
+          path: packages/docx-core/src/generated/
+          retention-days: 1
+          if-no-files-found: error
 
   interactions:
     name: Interaction e2e (playground)
