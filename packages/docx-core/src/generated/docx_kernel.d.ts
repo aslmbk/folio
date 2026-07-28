@@ -96,6 +96,90 @@ paragraphs: readonly DocxProjectionParagraph[],
 structuralFacts: DocxProjectionStructuralFacts,
 revisionStatus: DocxProjectionRevisionStatus,
 ];
+export type DocxReviewUnknownReason =
+| "invalid-document"
+| "invalid-comments"
+| "invalid-comments-extended"
+| "resource-limit"
+| "unsupported-location";
+export type DocxReviewFactSet<T> =
+| readonly [status: "known", items: readonly T[]]
+| readonly [status: "unknown", reason: DocxReviewUnknownReason];
+export type DocxReviewDetail<T> =
+| readonly [status: "known", value: T]
+| readonly [status: "unknown", reason: DocxReviewUnknownReason];
+export type DocxReviewPoint = readonly [
+paragraphOrdinal: number,
+utf8: number,
+utf16: number,
+];
+export type DocxReviewSpan = readonly [
+start: DocxReviewPoint,
+end: DocxReviewPoint,
+];
+/** Compact versioned boundary tuple. Field order is stable within schema version 1. */
+export type DocxRevisionContent = readonly [
+span: DocxReviewSpan,
+text: string,
+contentKind: "text" | "formatting-only",
+];
+export type DocxCommentContent = readonly [
+anchor: DocxReviewSpan,
+commentText: string,
+referencedText: string,
+];
+/** Attributed revision wire tuple; positions are named and versioned by its container. */
+export type DocxAttributedRevision = readonly [
+type:
+| "insertion"
+| "deletion"
+| "moveFrom"
+| "moveTo"
+| "cellIns"
+| "cellDel"
+| "cellMerge"
+| "pPrChange"
+| "rPrChange"
+| "sectPrChange"
+| "tblPrChange"
+| "trPrChange"
+| "tcPrChange"
+| "tblGridChange"
+| "customXmlDelRangeStart"
+| "customXmlDelRangeEnd"
+| "customXmlInsRangeStart"
+| "customXmlInsRangeEnd"
+| "customXmlMoveFromRangeStart"
+| "customXmlMoveFromRangeEnd"
+| "customXmlMoveToRangeStart"
+| "customXmlMoveToRangeEnd",
+author: string,
+date: string | null,
+revisionId: string | null,
+content: DocxReviewDetail<DocxRevisionContent>,
+];
+/** Attributed comment wire tuple; positions are named and versioned by its container. */
+export type DocxAttributedComment = readonly [
+commentId: string,
+author: string,
+initials: string | null,
+date: string | null,
+parentCommentId: string | null,
+threadState: "open" | "resolved",
+content: DocxReviewDetail<DocxCommentContent>,
+];
+/** Review-fact wire schema. A new tuple layout requires a schema-version bump. */
+export type DocxReviewFactsWire = readonly [
+schemaVersion: 1,
+revisions: DocxReviewFactSet<DocxAttributedRevision>,
+comments: DocxReviewFactSet<DocxAttributedComment>,
+];
+/** Fused package wire schema. A new tuple layout requires a schema-version bump. */
+export type DocxPackageProjectionWire = readonly [
+schemaVersion: 1,
+document: DocxProjectionWire,
+reviewFacts: DocxReviewFactsWire,
+];
 
 
 
@@ -115,11 +199,23 @@ revisionStatus: DocxProjectionRevisionStatus,
  */
 export function projectCompressedDocx(bytes: Uint8Array): DocxProjectionWire;
 
+/**
+ * Projects the document snapshot and attributed review facts from one bounded
+ * package-directory scan.
+ *
+ * # Errors
+ *
+ * Returns a JavaScript `Error` when the document package itself cannot be
+ * projected. Invalid optional review parts are represented as unknown facts.
+ */
+export function projectCompressedDocxWithReviewFacts(bytes: Uint8Array): DocxPackageProjectionWire;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly projectCompressedDocx: (a: number, b: number, c: number) => void;
+    readonly projectCompressedDocxWithReviewFacts: (a: number, b: number, c: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export: (a: number, b: number) => number;
 }

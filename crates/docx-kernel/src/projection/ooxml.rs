@@ -8,6 +8,9 @@ use quick_xml::reader::NsReader;
 use crate::ProjectionError;
 use crate::projection::compatibility::{CompatibilityAction, MarkupCompatibility};
 use crate::projection::namespaces::OoxmlNamespace;
+use crate::projection::review::{
+    AttributedRevision, ReviewDetail, ReviewFactSet, ReviewFactUnknownReason, RevisionFactKind,
+};
 use crate::projection::structure::{
     ParagraphProperties, RawBlockPoint, RawBookmarkRange, RawInternalReference,
     StructuralFactUnknownReason,
@@ -145,6 +148,7 @@ pub(super) struct RawDocumentProjection {
     pub bookmarks: Result<Vec<RawBookmarkRange>, StructuralFactUnknownReason>,
     pub references: Result<Vec<RawInternalReference>, StructuralFactUnknownReason>,
     pub revision_status: RevisionProjectionStatus,
+    pub review_revisions: Option<ReviewFactSet<AttributedRevision>>,
 }
 
 struct ParagraphBuilder {
@@ -277,6 +281,17 @@ struct FieldFrame {
     separated: bool,
 }
 
+#[derive(Default)]
+enum ReviewRevisionCollection {
+    #[default]
+    Disabled,
+    Complete {
+        maximum_facts: usize,
+        revisions: Vec<AttributedRevision>,
+    },
+    LimitExceeded,
+}
+
 enum Frame {
     Other,
     Body,
@@ -304,6 +319,7 @@ pub(super) fn project_document_xml(
     maximum_paragraphs: usize,
     revision_view: RevisionView,
     text_materialization: TextMaterialization,
+    maximum_review_facts: Option<usize>,
 ) -> Result<RawDocumentProjection, ProjectionError> {
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().check_end_names = true;
@@ -313,6 +329,13 @@ pub(super) fn project_document_xml(
         text_materialization,
         bookmarks_complete: true,
         references_complete: true,
+        review_revisions: maximum_review_facts.map_or(
+            ReviewRevisionCollection::Disabled,
+            |maximum_facts| ReviewRevisionCollection::Complete {
+                maximum_facts,
+                revisions: Vec::new(),
+            },
+        ),
         ..ProjectionState::default()
     };
     let mut compatibility = MarkupCompatibility::default();
@@ -437,6 +460,15 @@ pub(super) fn project_document_xml(
         } else {
             RevisionProjectionStatus::Incomplete(state.revision_unsupported.into_iter().collect())
         },
+        review_revisions: match state.review_revisions {
+            ReviewRevisionCollection::Disabled => None,
+            ReviewRevisionCollection::Complete { revisions, .. } => {
+                Some(ReviewFactSet::Known(revisions))
+            }
+            ReviewRevisionCollection::LimitExceeded => Some(ReviewFactSet::Unknown(
+                ReviewFactUnknownReason::ResourceLimit,
+            )),
+        },
     })
 }
 
@@ -459,6 +491,7 @@ struct ProjectionState {
     revision_view: RevisionView,
     text_materialization: TextMaterialization,
     revision_unsupported: BTreeSet<RevisionUnsupportedReason>,
+    review_revisions: ReviewRevisionCollection,
 }
 
 impl ProjectionState {
@@ -503,15 +536,16 @@ impl ProjectionState {
             self.frames.push(Frame::Other);
             return Ok(());
         }
+        if self.inside_change_snapshot() {
+            self.frames.push(Frame::Other);
+            return Ok(());
+        }
+        self.record_attributed_revision(reader, element, name)?;
         if name == b"txbxContent" {
             self.frames.push(Frame::Textbox);
             return Ok(());
         }
         if self.inside_textbox() {
-            self.frames.push(Frame::Other);
-            return Ok(());
-        }
-        if self.inside_change_snapshot() {
             self.frames.push(Frame::Other);
             return Ok(());
         }
@@ -862,6 +896,36 @@ impl ProjectionState {
         Ok(())
     }
 
+    fn record_attributed_revision(
+        &mut self,
+        reader: &NsReader<&[u8]>,
+        element: &BytesStart<'_>,
+        name: &[u8],
+    ) -> Result<(), ProjectionError> {
+        let Some(kind) = revision_fact_kind(name) else {
+            return Ok(());
+        };
+        let ReviewRevisionCollection::Complete {
+            maximum_facts,
+            revisions,
+        } = &mut self.review_revisions
+        else {
+            return Ok(());
+        };
+        if revisions.len() >= *maximum_facts {
+            self.review_revisions = ReviewRevisionCollection::LimitExceeded;
+            return Ok(());
+        }
+        revisions.push(AttributedRevision {
+            kind,
+            author: attribute(reader, element, b"author")?.unwrap_or_default(),
+            date: attribute(reader, element, b"date")?,
+            revision_id: attribute(reader, element, b"id")?,
+            content: ReviewDetail::Unknown(ReviewFactUnknownReason::UnsupportedLocation),
+        });
+        Ok(())
+    }
+
     fn inside_body(&self) -> bool {
         self.frames.iter().any(|frame| matches!(frame, Frame::Body))
     }
@@ -1172,6 +1236,34 @@ impl ProjectionState {
         if let Some(Frame::Run(run)) = self.frames.get_mut(run_frame) {
             run.highlighted = true;
         }
+    }
+}
+
+const fn revision_fact_kind(name: &[u8]) -> Option<RevisionFactKind> {
+    match name {
+        b"ins" => Some(RevisionFactKind::Insertion),
+        b"del" => Some(RevisionFactKind::Deletion),
+        b"moveFrom" => Some(RevisionFactKind::MoveFrom),
+        b"moveTo" => Some(RevisionFactKind::MoveTo),
+        b"cellIns" => Some(RevisionFactKind::CellInsertion),
+        b"cellDel" => Some(RevisionFactKind::CellDeletion),
+        b"cellMerge" => Some(RevisionFactKind::CellMerge),
+        b"pPrChange" => Some(RevisionFactKind::ParagraphPropertiesChange),
+        b"rPrChange" => Some(RevisionFactKind::RunPropertiesChange),
+        b"sectPrChange" => Some(RevisionFactKind::SectionPropertiesChange),
+        b"tblPrChange" => Some(RevisionFactKind::TablePropertiesChange),
+        b"trPrChange" => Some(RevisionFactKind::TableRowPropertiesChange),
+        b"tcPrChange" => Some(RevisionFactKind::TableCellPropertiesChange),
+        b"tblGridChange" => Some(RevisionFactKind::TableGridChange),
+        b"customXmlDelRangeStart" => Some(RevisionFactKind::CustomXmlDeletionRangeStart),
+        b"customXmlDelRangeEnd" => Some(RevisionFactKind::CustomXmlDeletionRangeEnd),
+        b"customXmlInsRangeStart" => Some(RevisionFactKind::CustomXmlInsertionRangeStart),
+        b"customXmlInsRangeEnd" => Some(RevisionFactKind::CustomXmlInsertionRangeEnd),
+        b"customXmlMoveFromRangeStart" => Some(RevisionFactKind::CustomXmlMoveFromRangeStart),
+        b"customXmlMoveFromRangeEnd" => Some(RevisionFactKind::CustomXmlMoveFromRangeEnd),
+        b"customXmlMoveToRangeStart" => Some(RevisionFactKind::CustomXmlMoveToRangeStart),
+        b"customXmlMoveToRangeEnd" => Some(RevisionFactKind::CustomXmlMoveToRangeEnd),
+        _ => None,
     }
 }
 

@@ -2,6 +2,11 @@ import { TaggedError } from "better-result";
 
 import initializeRuntime, {
   projectCompressedDocx as projectCompressedDocxInWasm,
+  projectCompressedDocxWithReviewFacts as projectCompressedDocxWithReviewFactsInWasm,
+  type DocxAttributedComment,
+  type DocxAttributedRevision,
+  type DocxCommentContent,
+  type DocxPackageProjectionWire,
   type DocxProjectionBookmarkFact,
   type DocxProjectionFactSet,
   type DocxProjectionFormattingSpan,
@@ -16,9 +21,20 @@ import initializeRuntime, {
   type DocxProjectionStructure,
   type DocxProjectionUnknownReason,
   type DocxProjectionWire,
+  type DocxReviewFactsWire,
+  type DocxReviewFactSet,
+  type DocxReviewDetail,
+  type DocxReviewPoint,
+  type DocxReviewSpan,
+  type DocxReviewUnknownReason,
+  type DocxRevisionContent,
 } from "./generated/docx_kernel.js";
 
 export type {
+  DocxAttributedComment,
+  DocxAttributedRevision,
+  DocxCommentContent,
+  DocxPackageProjectionWire,
   DocxProjectionBookmarkFact,
   DocxProjectionFactSet,
   DocxProjectionFormattingSpan,
@@ -33,6 +49,13 @@ export type {
   DocxProjectionStructure,
   DocxProjectionUnknownReason,
   DocxProjectionWire,
+  DocxReviewFactsWire,
+  DocxReviewFactSet,
+  DocxReviewDetail,
+  DocxReviewPoint,
+  DocxReviewSpan,
+  DocxReviewUnknownReason,
+  DocxRevisionContent,
 };
 
 export class DocxProjectionInitializationError extends TaggedError(
@@ -63,6 +86,8 @@ export type InitializeDocxProjectionOptions = {
 };
 
 let initialization: Promise<void> | undefined;
+const DOCUMENT_PROJECTION_FAILURE_MESSAGE = "Could not project the DOCX document";
+const PACKAGE_PROJECTION_FAILURE_MESSAGE = "Could not project the DOCX package with review facts";
 
 /** Loads and caches the single-threaded WebAssembly runtime. */
 export const initializeDocxProjection = ({
@@ -85,14 +110,40 @@ export const initializeDocxProjection = ({
  * The TypeScript boundary initializes WebAssembly and preserves its versioned
  * result; it does not contain an alternate OOXML parser.
  */
-export const projectCompressedDocx = async (bytes: Uint8Array): Promise<DocxProjectionWire> => {
+const projectWith = async <T>({
+  bytes,
+  project,
+  message,
+}: {
+  bytes: Uint8Array;
+  project: (input: Uint8Array) => T;
+  message: string;
+}): Promise<T> => {
   await initializeDocxProjection();
   try {
-    return projectCompressedDocxInWasm(bytes);
+    return project(bytes);
   } catch (cause) {
-    throw new DocxProjectionError({
-      message: "Could not project the DOCX package",
-      cause,
-    });
+    throw new DocxProjectionError({ message, cause });
   }
 };
+
+export const projectCompressedDocx = (bytes: Uint8Array): Promise<DocxProjectionWire> =>
+  projectWith({
+    bytes,
+    project: projectCompressedDocxInWasm,
+    message: DOCUMENT_PROJECTION_FAILURE_MESSAGE,
+  });
+
+/**
+ * Projects the document snapshot and attributed review facts through one
+ * bounded package scan. Optional review-part failures remain explicit unknown
+ * fact families rather than invalidating the document snapshot.
+ */
+export const projectCompressedDocxWithReviewFacts = (
+  bytes: Uint8Array,
+): Promise<DocxPackageProjectionWire> =>
+  projectWith({
+    bytes,
+    project: projectCompressedDocxWithReviewFactsInWasm,
+    message: PACKAGE_PROJECTION_FAILURE_MESSAGE,
+  });

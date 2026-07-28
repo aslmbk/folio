@@ -1,13 +1,17 @@
-use miniz_oxide::inflate::decompress_to_vec_with_limit;
+use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_with_limit};
 use rawzip::{CompressionMethod, ZipArchive, ZipSliceArchive, crc32};
 
 use crate::ProjectionError;
-use crate::projection::relationships::main_document_path;
+use crate::projection::relationships::{
+    document_relationships_path, main_document_path, review_part_paths,
+};
+use crate::projection::review::{ReviewFactLimits, ReviewFactUnknownReason};
 
 const DOCUMENT_XML_PATH: &[u8] = b"word/document.xml";
 const STYLES_XML_PATH: &[u8] = b"word/styles.xml";
 const ROOT_RELATIONSHIPS_PATH: &[u8] = b"_rels/.rels";
 const MAXIMUM_ROOT_RELATIONSHIPS_BYTES: usize = 1024 * 1024;
+const MAXIMUM_DOCUMENT_RELATIONSHIPS_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DocxLimits {
@@ -79,6 +83,24 @@ pub struct DocumentParts {
     pub styles_xml: Option<Vec<u8>>,
 }
 
+pub(super) struct ProjectionPackageParts {
+    pub document: Vec<u8>,
+    pub styles: Option<Vec<u8>>,
+    pub comments: Result<Option<Vec<u8>>, ReviewFactUnknownReason>,
+    pub comments_extended: Result<Option<Vec<u8>>, ReviewFactUnknownReason>,
+}
+
+struct RequiredPackageParts {
+    document_path: Vec<u8>,
+    document: Vec<u8>,
+    styles: Option<Vec<u8>>,
+}
+
+struct ReviewPackageParts {
+    comments: Result<Option<Vec<u8>>, ReviewFactUnknownReason>,
+    comments_extended: Result<Option<Vec<u8>>, ReviewFactUnknownReason>,
+}
+
 /// Extracts the relationship-resolved main document part from a bounded DOCX package.
 ///
 /// # Errors
@@ -104,15 +126,60 @@ pub fn extract_document_parts(
     bytes: &[u8],
     limits: DocxLimits,
 ) -> Result<DocumentParts, ProjectionError> {
+    extract_required_parts(bytes, limits)
+}
+
+pub(super) fn extract_projection_parts(
+    bytes: &[u8],
+    limits: DocxLimits,
+    review_limits: ReviewFactLimits,
+) -> Result<ProjectionPackageParts, ProjectionError> {
+    if bytes.len() > limits.maximum_archive_bytes {
+        return Err(ProjectionError::ArchiveTooLarge);
+    }
+    let archive = ZipArchive::from_slice(bytes).map_err(|_| ProjectionError::InvalidArchive)?;
+    let package_entries = scan_package_entries(&archive, limits)?;
+    let required = extract_required_parts_from_archive(&archive, &package_entries, limits)?;
+    let review = extract_review_parts(
+        &archive,
+        &package_entries,
+        &required.document_path,
+        review_limits,
+        limits,
+    );
+    Ok(ProjectionPackageParts {
+        document: required.document,
+        styles: required.styles,
+        comments: review.comments,
+        comments_extended: review.comments_extended,
+    })
+}
+
+fn extract_required_parts(
+    bytes: &[u8],
+    limits: DocxLimits,
+) -> Result<DocumentParts, ProjectionError> {
     if bytes.len() > limits.maximum_archive_bytes {
         return Err(ProjectionError::ArchiveTooLarge);
     }
     let archive = ZipArchive::from_slice(bytes).map_err(|_| ProjectionError::InvalidArchive)?;
     let package_entries = scan_package_entries(&archive, limits)?;
 
-    let document_path = resolve_document_path(&archive, &package_entries, limits)?;
+    let required = extract_required_parts_from_archive(&archive, &package_entries, limits)?;
+    Ok(DocumentParts {
+        document_xml: required.document,
+        styles_xml: required.styles,
+    })
+}
+
+fn extract_required_parts_from_archive(
+    archive: &ZipSliceArchive<&[u8]>,
+    package_entries: &[PackageEntry],
+    limits: DocxLimits,
+) -> Result<RequiredPackageParts, ProjectionError> {
+    let document_path = resolve_document_path(archive, package_entries, limits)?;
     let document = unique_entry(
-        &package_entries,
+        package_entries,
         &document_path,
         ProjectionError::DuplicateDocumentXml,
     )?
@@ -125,14 +192,14 @@ pub fn extract_document_parts(
         limits,
     )?;
     let document_xml = extract_entry(
-        &archive,
+        archive,
         document,
         &document_path,
         limits.maximum_document_xml_bytes,
         EntryExtractionErrors::DOCUMENT_XML,
     )?;
     let styles_xml = unique_entry(
-        &package_entries,
+        package_entries,
         STYLES_XML_PATH,
         ProjectionError::DuplicateStylesXml,
     )?
@@ -145,7 +212,7 @@ pub fn extract_document_parts(
             limits,
         )?;
         extract_entry(
-            &archive,
+            archive,
             styles,
             STYLES_XML_PATH,
             limits.maximum_styles_xml_bytes,
@@ -153,9 +220,134 @@ pub fn extract_document_parts(
         )
     })
     .transpose()?;
-    Ok(DocumentParts {
-        document_xml,
-        styles_xml,
+    Ok(RequiredPackageParts {
+        document_path,
+        document: document_xml,
+        styles: styles_xml,
+    })
+}
+
+fn extract_review_parts(
+    archive: &ZipSliceArchive<&[u8]>,
+    entries: &[PackageEntry],
+    document_path: &[u8],
+    review_limits: ReviewFactLimits,
+    limits: DocxLimits,
+) -> ReviewPackageParts {
+    let Ok(relationships_path) = document_relationships_path(document_path) else {
+        return ReviewPackageParts {
+            comments: Err(ReviewFactUnknownReason::InvalidComments),
+            comments_extended: Err(ReviewFactUnknownReason::InvalidCommentsExtended),
+        };
+    };
+    let relationships = match extract_optional_review_entry(
+        archive,
+        entries,
+        &relationships_path,
+        MAXIMUM_DOCUMENT_RELATIONSHIPS_BYTES,
+        ReviewFactUnknownReason::InvalidComments,
+        limits,
+    ) {
+        Ok(Some(xml)) => xml,
+        Ok(None) => {
+            return ReviewPackageParts {
+                comments: Ok(None),
+                comments_extended: Ok(None),
+            };
+        }
+        Err(ReviewFactUnknownReason::ResourceLimit) => {
+            return ReviewPackageParts {
+                comments: Err(ReviewFactUnknownReason::ResourceLimit),
+                comments_extended: Err(ReviewFactUnknownReason::ResourceLimit),
+            };
+        }
+        Err(_) => {
+            return ReviewPackageParts {
+                comments: Err(ReviewFactUnknownReason::InvalidComments),
+                comments_extended: Err(ReviewFactUnknownReason::InvalidCommentsExtended),
+            };
+        }
+    };
+    let Ok(paths) = review_part_paths(&relationships, document_path) else {
+        return ReviewPackageParts {
+            comments: Err(ReviewFactUnknownReason::InvalidComments),
+            comments_extended: Err(ReviewFactUnknownReason::InvalidCommentsExtended),
+        };
+    };
+    let comments = paths.comments.map_or(Ok(None), |path| {
+        extract_optional_review_entry(
+            archive,
+            entries,
+            &path,
+            review_limits.maximum_comments_xml_bytes,
+            ReviewFactUnknownReason::InvalidComments,
+            limits,
+        )
+        .and_then(|value| {
+            value
+                .ok_or(ReviewFactUnknownReason::InvalidComments)
+                .map(Some)
+        })
+    });
+    let comments_extended = paths.comments_extended.map_or(Ok(None), |path| {
+        extract_optional_review_entry(
+            archive,
+            entries,
+            &path,
+            review_limits.maximum_comments_extended_xml_bytes,
+            ReviewFactUnknownReason::InvalidCommentsExtended,
+            limits,
+        )
+        .and_then(|value| {
+            value
+                .ok_or(ReviewFactUnknownReason::InvalidCommentsExtended)
+                .map(Some)
+        })
+    });
+    ReviewPackageParts {
+        comments,
+        comments_extended,
+    }
+}
+
+fn extract_optional_review_entry(
+    archive: &ZipSliceArchive<&[u8]>,
+    entries: &[PackageEntry],
+    path: &[u8],
+    maximum_bytes: usize,
+    invalid: ReviewFactUnknownReason,
+    limits: DocxLimits,
+) -> Result<Option<Vec<u8>>, ReviewFactUnknownReason> {
+    let selected =
+        unique_entry(entries, path, ProjectionError::InvalidArchive).map_err(|_| invalid)?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let validation = validate_selected_entry(
+        selected,
+        maximum_bytes,
+        ProjectionError::DocumentXmlTooLarge,
+        ProjectionError::InvalidDocumentXmlEntry,
+        limits,
+    );
+    validation.map_err(|error| match error {
+        ProjectionError::DocumentXmlTooLarge | ProjectionError::SuspiciousCompressionRatio => {
+            ReviewFactUnknownReason::ResourceLimit
+        }
+        _ => invalid,
+    })?;
+    let extracted = extract_entry(
+        archive,
+        selected,
+        path,
+        maximum_bytes,
+        EntryExtractionErrors::DOCUMENT_XML,
+    );
+    extracted.map(Some).map_err(|error| match error {
+        ProjectionError::DocumentXmlTooLarge | ProjectionError::SuspiciousCompressionRatio => {
+            ReviewFactUnknownReason::ResourceLimit
+        }
+        _ => invalid,
     })
 }
 
@@ -285,7 +477,13 @@ fn extract_entry(
     let output = match entry.method {
         CompressionMethod::STORE => local.data().to_vec(),
         CompressionMethod::DEFLATE => decompress_to_vec_with_limit(local.data(), maximum_bytes)
-            .map_err(|_| errors.invalid_entry.clone())?,
+            .map_err(|error| {
+                if error.status == TINFLStatus::HasMoreOutput {
+                    errors.too_large.clone()
+                } else {
+                    errors.invalid_entry.clone()
+                }
+            })?,
         _ => {
             return Err(ProjectionError::UnsupportedCompression(
                 entry.method.as_u16(),

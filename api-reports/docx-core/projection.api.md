@@ -6,6 +6,18 @@
 
 import { TaggedErrorClass } from 'better-result';
 
+// @public
+export type DocxAttributedComment = readonly [commentId: string, author: string, initials: string | null, date: string | null, parentCommentId: string | null, threadState: "open" | "resolved", content: DocxReviewDetail<DocxCommentContent>];
+
+// @public
+export type DocxAttributedRevision = readonly [type: "insertion" | "deletion" | "moveFrom" | "moveTo" | "cellIns" | "cellDel" | "cellMerge" | "pPrChange" | "rPrChange" | "sectPrChange" | "tblPrChange" | "trPrChange" | "tcPrChange" | "tblGridChange" | "customXmlDelRangeStart" | "customXmlDelRangeEnd" | "customXmlInsRangeStart" | "customXmlInsRangeEnd" | "customXmlMoveFromRangeStart" | "customXmlMoveFromRangeEnd" | "customXmlMoveToRangeStart" | "customXmlMoveToRangeEnd", author: string, date: string | null, revisionId: string | null, content: DocxReviewDetail<DocxRevisionContent>];
+
+// @public (undocumented)
+export type DocxCommentContent = readonly [anchor: DocxReviewSpan, commentText: string, referencedText: string];
+
+// @public
+export type DocxPackageProjectionWire = readonly [schemaVersion: 1, document: DocxProjectionWire, reviewFacts: DocxReviewFactsWire];
+
 // @public (undocumented)
 export type DocxProjectionBookmarkFact = readonly [paragraphOrdinal: number, bookmarkId: number, name: string, span: DocxProjectionStructuralSpan];
 
@@ -57,6 +69,27 @@ export type DocxProjectionWasmSource = RequestInfo | URL | Response | BufferSour
 // @public (undocumented)
 export type DocxProjectionWire = readonly [schemaVersion: 2, paragraphs: readonly DocxProjectionParagraph[], structuralFacts: DocxProjectionStructuralFacts, revisionStatus: DocxProjectionRevisionStatus];
 
+// @public (undocumented)
+export type DocxReviewDetail<T> = readonly [status: "known", value: T] | readonly [status: "unknown", reason: DocxReviewUnknownReason];
+
+// @public (undocumented)
+export type DocxReviewFactSet<T> = readonly [status: "known", items: readonly T[]] | readonly [status: "unknown", reason: DocxReviewUnknownReason];
+
+// @public
+export type DocxReviewFactsWire = readonly [schemaVersion: 1, revisions: DocxReviewFactSet<DocxAttributedRevision>, comments: DocxReviewFactSet<DocxAttributedComment>];
+
+// @public (undocumented)
+export type DocxReviewPoint = readonly [paragraphOrdinal: number, utf8: number, utf16: number];
+
+// @public (undocumented)
+export type DocxReviewSpan = readonly [start: DocxReviewPoint, end: DocxReviewPoint];
+
+// @public (undocumented)
+export type DocxReviewUnknownReason = "invalid-document" | "invalid-comments" | "invalid-comments-extended" | "resource-limit" | "unsupported-location";
+
+// @public
+export type DocxRevisionContent = readonly [span: DocxReviewSpan, text: string, contentKind: "text" | "formatting-only"];
+
 // @public
 export const initializeDocxProjection: (input?: InitializeDocxProjectionOptions) => Promise<void>;
 
@@ -65,8 +98,11 @@ export type InitializeDocxProjectionOptions = {
     wasm?: DocxProjectionWasmSource;
 };
 
-// @public
+// @public (undocumented)
 export const projectCompressedDocx: (bytes: Uint8Array) => Promise<DocxProjectionWire>;
+
+// @public
+export const projectCompressedDocxWithReviewFacts: (bytes: Uint8Array) => Promise<DocxPackageProjectionWire>;
 
 // (No @packageDocumentation comment for this package)
 
