@@ -13,7 +13,7 @@ mod review;
 mod structure;
 mod styles;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 pub use archive::{DocumentParts, DocxLimits, extract_document_parts, extract_document_xml};
@@ -250,22 +250,32 @@ where
             styles::parse_styles(styles).map_err(|_| StructuralFactUnknownReason::UnsupportedStyles)
         },
     );
-    let (document, revisions) = project_document_xml_with_limit_and_review(
+    let ProjectedDocumentWithReview {
+        document,
+        revisions,
+        comment_anchors,
+    } = project_document_xml_with_limit_and_review(
         &parts.document,
         limits.maximum_paragraphs,
         limits.maximum_structural_facts,
         options,
         styles.as_ref().map_err(|reason| *reason),
-        Some(review_limits.maximum_facts_per_family),
+        Some(ooxml::ReviewProjectionLimits {
+            maximum_facts: review_limits.maximum_facts_per_family,
+            maximum_detail_bytes: review_limits.maximum_review_detail_bytes,
+        }),
         allocate_id,
     )?;
     let review_facts = review::project_review_facts(
         revisions.unwrap_or(ReviewFactSet::Unknown(
             ReviewFactUnknownReason::InvalidDocument,
         )),
+        comment_anchors.as_ref(),
+        &document,
         parts.comments,
         parts.comments_extended,
         review_limits,
+        options.text_materialization,
     );
     Ok(DocumentPackageProjection {
         document,
@@ -333,7 +343,13 @@ where
         None,
         allocate_id,
     )
-    .map(|(projection, _)| projection)
+    .map(|projection| projection.document)
+}
+
+struct ProjectedDocumentWithReview {
+    document: DocumentProjection,
+    revisions: Option<ReviewFactSet<AttributedRevision>>,
+    comment_anchors: Option<HashMap<String, ReviewSpan>>,
 }
 
 fn project_document_xml_with_limit_and_review<F>(
@@ -342,15 +358,9 @@ fn project_document_xml_with_limit_and_review<F>(
     maximum_structural_facts: usize,
     options: ProjectionOptions,
     styles: Result<&structure::StyleSheet, StructuralFactUnknownReason>,
-    maximum_review_facts: Option<usize>,
+    review_limits: Option<ooxml::ReviewProjectionLimits>,
     mut allocate_id: F,
-) -> Result<
-    (
-        DocumentProjection,
-        Option<ReviewFactSet<AttributedRevision>>,
-    ),
-    ProjectionError,
->
+) -> Result<ProjectedDocumentWithReview, ProjectionError>
 where
     F: FnMut(ParagraphIdentityFacts<'_>) -> Result<InternalParagraphId, ProjectionError>,
 {
@@ -359,9 +369,12 @@ where
         maximum_paragraphs,
         options.revision_view,
         options.text_materialization,
-        maximum_review_facts,
+        review_limits,
     )?;
     let review_revisions = projected.review_revisions;
+    let review_comment_anchors = review_limits
+        .is_some()
+        .then_some(projected.review_comment_anchors);
     let mut seen_ids = HashSet::with_capacity(projected.paragraphs.len());
     let mut ids = Vec::with_capacity(projected.paragraphs.len());
     for paragraph in &projected.paragraphs {
@@ -407,12 +420,13 @@ where
             structure: paragraph.structure,
         });
     }
-    Ok((
-        DocumentProjection {
+    Ok(ProjectedDocumentWithReview {
+        document: DocumentProjection {
             paragraphs,
             revision_status: projected.revision_status,
             structural_facts,
         },
-        review_revisions,
-    ))
+        revisions: review_revisions,
+        comment_anchors: review_comment_anchors,
+    })
 }

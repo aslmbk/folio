@@ -71,9 +71,103 @@ describe("DOCX projection TypeScript binding", () => {
     expect(projection[1][1][0]?.[1]).toBe("new");
     const expectedReviewFacts = [
       1,
-      ["known", [["insertion", "Ada", null, "7", ["unknown", "unsupported-location"]]]],
+      [
+        "known",
+        [
+          [
+            "insertion",
+            "Ada",
+            null,
+            "7",
+            [
+              "known",
+              [
+                [
+                  [0, 0, 0],
+                  [0, 3, 3],
+                ],
+                "new",
+                "text",
+              ],
+            ],
+          ],
+        ],
+      ],
       ["known", [["1", "Lin", null, null, null, "resolved", ["unknown", "unsupported-location"]]]],
     ] as const satisfies DocxReviewFactsWire;
     expect(projection[2]).toEqual(expectedReviewFacts);
+  });
+
+  test("materializes footnote markers consistently in paragraphs and comment references", async () => {
+    const archive = new JSZip();
+    archive.file(
+      "word/document.xml",
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Title</w:t><w:footnoteReference w:id="1"/></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p></w:body></w:document>`,
+    );
+    archive.file(
+      "word/comments.xml",
+      `<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="1" w:author="Ada"><w:p><w:r><w:t>Review</w:t></w:r></w:p></w:comment></w:comments>`,
+    );
+    archive.file(
+      "word/_rels/document.xml.rels",
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>`,
+    );
+    const bytes = await archive.generateAsync({ compression: "DEFLATE", type: "uint8array" });
+
+    const host = await projectCompressedDocxWithReviewFacts(bytes);
+    const readable = await projectCompressedDocxWithReviewFacts(bytes, {
+      textMaterialization: "readable-plain-text",
+    });
+
+    expect(host[1][1][0]?.[1]).toBe("Title\u0002");
+    expect(readable[1][1][0]?.[1]).toBe("Title");
+    expect(host[2][2]).toEqual([
+      "known",
+      [
+        [
+          "1",
+          "Ada",
+          null,
+          null,
+          null,
+          "open",
+          [
+            "known",
+            [
+              [
+                [0, 0, 0],
+                [0, 6, 6],
+              ],
+              "Review",
+              "Title\u0002",
+            ],
+          ],
+        ],
+      ],
+    ]);
+    expect(readable[2][2]).toEqual([
+      "known",
+      [
+        [
+          "1",
+          "Ada",
+          null,
+          null,
+          null,
+          "open",
+          [
+            "known",
+            [
+              [
+                [0, 0, 0],
+                [0, 5, 5],
+              ],
+              "Review",
+              "Title",
+            ],
+          ],
+        ],
+      ],
+    ]);
   });
 });
