@@ -16,7 +16,9 @@ use crate::projection::structure::{
     ParagraphProperties, RawBlockPoint, RawBookmarkRange, RawInternalReference,
     StructuralFactUnknownReason,
 };
-use crate::projection::styles::{parse_indentation, parse_level_attribute, parse_u32_attribute};
+use crate::projection::styles::{
+    parse_indentation, parse_level_attribute, parse_outline_level_attribute, parse_u32_attribute,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PackageParagraphId(u32);
@@ -713,6 +715,13 @@ impl ProjectionState {
             b"ind" if matches!(self.frames.last(), Some(Frame::ParagraphProperties)) => {
                 if let Some(paragraph) = self.current_paragraph.as_mut() {
                     paragraph.properties.indentation = parse_indentation(reader, element)?;
+                }
+                Frame::Other
+            }
+            b"outlineLvl" if matches!(self.frames.last(), Some(Frame::ParagraphProperties)) => {
+                if let Some(paragraph) = self.current_paragraph.as_mut() {
+                    paragraph.properties.outline_level =
+                        Some(parse_outline_level_attribute(reader, element)?);
                 }
                 Frame::Other
             }
