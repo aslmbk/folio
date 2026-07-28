@@ -97,6 +97,56 @@ describe("canonical DOCX document model validation", () => {
     expect(result.issues).toEqual([]);
   });
 
+  test.each([
+    { font: "", char: "F041", invalidPath: "font" },
+    { font: "   ", char: "F041", invalidPath: "font" },
+    { font: "Wingdings", char: "041", invalidPath: "char" },
+    { font: "Wingdings", char: "F0410", invalidPath: "char" },
+  ])("rejects malformed symbol attributes: $invalidPath", ({ font, char, invalidPath }) => {
+    const result = validateDocumentModel(
+      createDocument({
+        content: [
+          paragraph([
+            {
+              type: "run",
+              content: [{ type: "symbol", font, char }],
+            },
+          ]),
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.issues).toEqual([
+      {
+        path: `package.document.content[0].content[0].content[0].${invalidPath}`,
+        message:
+          invalidPath === "font"
+            ? "Symbol content must include a font name."
+            : "Symbol character must be exactly four hexadecimal digits.",
+        severity: "error",
+      },
+    ]);
+  });
+
+  test("accepts a mixed-case four-digit symbol character", () => {
+    const result = validateDocumentModel(
+      createDocument({
+        content: [
+          paragraph([
+            {
+              type: "run",
+              content: [{ type: "symbol", font: "Wingdings", char: "aF4B" }],
+            },
+          ]),
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(true);
+    expect(result.issues).toEqual([]);
+  });
+
   test("rejects a whitespace-only comment author", () => {
     const result = validateDocumentModel(
       createDocument({
