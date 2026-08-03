@@ -180,12 +180,52 @@ const buildCollapsedTrailingSpaceContainer = (): HTMLElement => {
   spaces.dataset["pmStart"] = "6";
   spaces.dataset["pmEnd"] = "8";
   spaces.dataset["collapsedTrailingSpaces"] = "true";
+  spaces.dataset["collapsedSpaceAdvance"] = "4";
   spaces.firstChild = { nodeType: 3, length: 2 };
 
   container.append(page);
   page.append(content);
   content.append(line);
   line.append(visible, spaces);
+
+  return container as unknown as HTMLElement;
+};
+
+const buildCollapsedLeadingSpaceContainer = (): HTMLElement => {
+  const container = new FakeHTMLElement();
+  const page = new FakeHTMLElement(["layout-page"]);
+  page.dataset["pageNumber"] = "1";
+  const content = new FakeHTMLElement(["layout-page-content"]);
+  const line = new FakeHTMLElement(
+    ["layout-line"],
+    { left: 10, top: 15, width: 80, height: 80 },
+    80,
+  );
+  const spaces = new FakeHTMLElement(["layout-run-text"], {
+    left: 10,
+    top: 70,
+    right: 10,
+    bottom: 70,
+    width: 0,
+    height: 0,
+  });
+  spaces.dataset["pmStart"] = "1";
+  spaces.dataset["pmEnd"] = "3";
+  spaces.dataset["collapsedLeadingSpaces"] = "true";
+  spaces.firstChild = { nodeType: 3, length: 2 };
+  const visible = new FakeHTMLElement(
+    ["layout-run-text"],
+    { left: 10, top: 20, right: 30, bottom: 38, width: 20, height: 18 },
+    18,
+  );
+  visible.dataset["pmStart"] = "3";
+  visible.dataset["pmEnd"] = "8";
+  visible.firstChild = textNode;
+
+  container.append(page);
+  page.append(content);
+  content.append(line);
+  line.append(spaces, visible);
 
   return container as unknown as HTMLElement;
 };
@@ -232,6 +272,26 @@ describe("getCaretPositionFromDom caret height", () => {
     rangeTop = 70;
     const caret = getCaretPositionFromDom(buildCollapsedTrailingSpaceContainer(), 7, rect({}));
 
+    expect(caret).toEqual({ x: 34, y: 20, height: 18, pageIndex: 0 });
+  });
+
+  test("prefers collapsed trailing-space geometry at the shared run boundary", () => {
+    rangeTop = 70;
+    const caret = getCaretPositionFromDom(buildCollapsedTrailingSpaceContainer(), 6, rect({}));
+
     expect(caret).toEqual({ x: 30, y: 20, height: 18, pageIndex: 0 });
+  });
+
+  test("advances once for every collapsed trailing space", () => {
+    const caret = getCaretPositionFromDom(buildCollapsedTrailingSpaceContainer(), 8, rect({}));
+
+    expect(caret).toEqual({ x: 38, y: 20, height: 18, pageIndex: 0 });
+  });
+
+  test("keeps collapsed leading-space geometry at the shared run boundary", () => {
+    rangeTop = 70;
+    const caret = getCaretPositionFromDom(buildCollapsedLeadingSpaceContainer(), 3, rect({}));
+
+    expect(caret).toEqual({ x: 10, y: 20, height: 18, pageIndex: 0 });
   });
 });

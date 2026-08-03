@@ -1905,6 +1905,45 @@ describe("toFlowBlocks list numbering", () => {
     expect(blocks.at(1)?.attrs?.listMarker).toBe("I.a)");
   });
 
+  test("restarts a child counter after returning to its parent level", () => {
+    const paragraph = (level: number, text: string) =>
+      schema.node("paragraph", { numPr: { numId: 3, ilvl: level } }, [schema.text(text)]);
+    const doc = schema.node("doc", null, [
+      paragraph(0, "First parent"),
+      paragraph(1, "First child"),
+      paragraph(0, "Second parent"),
+      paragraph(1, "Second child"),
+    ]);
+
+    const blocks = toFlowBlocks(doc);
+
+    expect(blocks.map((block) => block.attrs?.listMarker)).toEqual(["1.", "1.1.", "2.", "2.1."]);
+  });
+
+  test("never emits a non-finite list marker", () => {
+    const nonFiniteCounters = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    const doc = schema.node(
+      "doc",
+      null,
+      nonFiniteCounters.map((listStartOverride, index) =>
+        schema.node(
+          "paragraph",
+          {
+            numPr: { numId: index + 10, ilvl: 0 },
+            listLevelStarts: [4],
+            listStartOverride,
+          },
+          [schema.text(`Item ${index + 1}`)],
+        ),
+      ),
+    );
+
+    const markers = toFlowBlocks(doc).map((block) => block.attrs?.listMarker);
+
+    expect(markers).toEqual(["4.", "4.", "4."]);
+    expect(markers.every((marker) => !/NaN|Infinity/.test(marker ?? ""))).toBe(true);
+  });
+
   test("uses authored starts when a nested list begins without parent paragraphs", () => {
     const doc = schema.node("doc", null, [
       schema.node(

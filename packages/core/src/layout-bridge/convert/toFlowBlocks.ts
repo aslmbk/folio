@@ -207,7 +207,7 @@ function formatNumberedMarker(counters: number[], level: number): string {
   const parts: number[] = [];
   for (let i = 0; i <= level; i += 1) {
     const value = counters[i] ?? 0;
-    if (value <= 0) {
+    if (!Number.isFinite(value) || value <= 0) {
       break;
     }
     parts.push(value);
@@ -363,11 +363,11 @@ function computeListMarker(
   if (level > 0) {
     const latestAbstractCounters =
       abstractNumId === undefined ? undefined : abstractCounters.get(abstractNumId);
-    if (counters.slice(0, level).every(Number.isNaN)) {
+    if (counters.slice(0, level).every((counter) => !Number.isFinite(counter))) {
       for (let i = 0; i < level; i += 1) {
         const latestCounter = latestAbstractCounters?.[i];
         counters[i] =
-          latestCounter !== undefined && !Number.isNaN(latestCounter)
+          latestCounter !== undefined && Number.isFinite(latestCounter)
             ? latestCounter
             : (pmAttrs.listLevelStarts?.[i] ?? 1);
       }
@@ -379,9 +379,13 @@ function computeListMarker(
     seenNumIds.add(seenKey);
     if (pmAttrs.listStartOverride != null) {
       counters[level] = pmAttrs.listStartOverride - 1;
-    } else if (Number.isNaN(counters[level])) {
-      counters[level] = (pmAttrs.listLevelStarts?.[level] ?? 1) - 1;
     }
+  }
+  // Returning to a parent level clears every deeper counter. A later child at
+  // a level seen earlier must therefore restart from its authored start; the
+  // lifetime `seenNumIds` set cannot stand in for live counter state.
+  if (!Number.isFinite(counters[level])) {
+    counters[level] = (pmAttrs.listLevelStarts?.[level] ?? 1) - 1;
   }
 
   counters[level] = (counters[level] ?? 0) + 1;
@@ -396,7 +400,8 @@ function computeListMarker(
   if (childAdvances > 0 && level + 1 < counters.length) {
     const childCounter = counters[level + 1];
     counters[level + 1] =
-      (childCounter === undefined || Number.isNaN(childCounter) ? 0 : childCounter) + childAdvances;
+      (childCounter === undefined || !Number.isFinite(childCounter) ? 0 : childCounter) +
+      childAdvances;
   }
   listCounters.set(numId, counters);
   if (abstractNumId !== undefined) {
