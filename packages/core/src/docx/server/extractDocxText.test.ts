@@ -5,6 +5,7 @@ import { RELATIONSHIP_TYPES } from "../relsParser";
 import { extractDocxText } from "./extractDocxText";
 
 const W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const STRICT_W_NS = "http://purl.oclc.org/ooxml/wordprocessingml/main";
 const R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PACKAGE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships";
 
@@ -19,6 +20,7 @@ type MakeDocxOptions = {
    * actually wires up, the way a stale or planted part would look.
    */
   orphanParts?: Record<string, "header" | "footer">;
+  wordNamespace?: string;
 };
 
 /**
@@ -33,6 +35,7 @@ const makeDocx = async ({
   headers = {},
   footers = {},
   orphanParts = {},
+  wordNamespace = W_NS,
 }: MakeDocxOptions): Promise<Uint8Array> => {
   const zip = new JSZip();
   const relationships: string[] = [];
@@ -46,7 +49,7 @@ const makeDocx = async ({
   ): void => {
     const rootName = kind === "header" ? "hdr" : "ftr";
     for (const [path, content] of Object.entries(parts)) {
-      zip.file(path, `<w:${rootName} xmlns:w="${W_NS}">${content}</w:${rootName}>`);
+      zip.file(path, `<w:${rootName} xmlns:w="${wordNamespace}">${content}</w:${rootName}>`);
       const rId = `rId${nextRId++}`;
       const target = path.replace(/^word\//, "");
       relationships.push(
@@ -61,7 +64,10 @@ const makeDocx = async ({
 
   for (const [path, kind] of Object.entries(orphanParts)) {
     const rootName = kind === "header" ? "hdr" : "ftr";
-    zip.file(path, `<w:${rootName} xmlns:w="${W_NS}">${paragraph("Orphan")}</w:${rootName}>`);
+    zip.file(
+      path,
+      `<w:${rootName} xmlns:w="${wordNamespace}">${paragraph("Orphan")}</w:${rootName}>`,
+    );
     // Deliberately no Relationship entry and no section reference — this
     // part exists in the archive but nothing wires it up.
   }
@@ -70,7 +76,7 @@ const makeDocx = async ({
     sectionReferences.length > 0 ? `<w:sectPr>${sectionReferences.join("")}</w:sectPr>` : "";
   zip.file(
     "word/document.xml",
-    `<w:document xmlns:w="${W_NS}" xmlns:r="${R_NS}"><w:body>${body}${sectPr}</w:body></w:document>`,
+    `<w:document xmlns:w="${wordNamespace}" xmlns:r="${R_NS}"><w:body>${body}${sectPr}</w:body></w:document>`,
   );
   if (relationships.length > 0) {
     zip.file(
@@ -206,6 +212,24 @@ describe("extractDocxText", () => {
     expect(result.paragraphs.at(1)?.alignment).toBe("left");
   });
 
+  test("ignores controls and foreign text when calculating run formatting metadata", async () => {
+    const bytes = await makeDocx({
+      body:
+        `<w:p><w:r><w:rPr><w:b/><w:sz w:val="99"/></w:rPr><w:br/><w:tab/></w:r>` +
+        `<w:r><w:t>Plain text</w:t></w:r><w:r><w:rPr><w:b/><w:sz w:val="99"/></w:rPr>` +
+        `<x:t xmlns:x="urn:not-wordprocessingml">Foreign text that must not affect metrics</x:t>` +
+        `</w:r></w:p>`,
+    });
+
+    const result = await extractDocxText(bytes);
+
+    expect(result.paragraphs.at(0)).toEqual({
+      index: 0,
+      text: "\n\tPlain text",
+      source: "body",
+    });
+  });
+
   test("supports alternate prefixes for the main OOXML namespace", async () => {
     const zip = new JSZip();
     zip.file(
@@ -218,6 +242,43 @@ describe("extractDocxText", () => {
 
     expect(result.paragraphs.at(0)?.text).toBe("Alternate");
     expect(result.paragraphs.at(0)?.style).toBe("Title");
+  });
+
+  test("accepts Strict WordprocessingML and ignores foreign local-name collisions", async () => {
+    const bytes = await makeDocx({
+      body:
+        `<x:p xmlns:x="urn:not-wordprocessingml"><x:r><x:t>foreign prose</x:t></x:r></x:p>` +
+        table(
+          row(
+            `<w:tc>` +
+              `<x:tcPr xmlns:x="urn:not-wordprocessingml"><x:gridSpan x:val="256"/><x:vMerge/></x:tcPr>` +
+              `<w:tcPr/>` +
+              `<x:p xmlns:x="urn:not-wordprocessingml"><x:r><x:t>foreign cell</x:t></x:r></x:p>` +
+              paragraph("strict cell") +
+              `</w:tc>` +
+              `<w:tc><w:tcPr><w:gridSpan xmlns:x="urn:not-wordprocessingml" x:val="256" w:val="1"/></w:tcPr>` +
+              paragraph("strict attributes") +
+              `</w:tc>`,
+          ),
+        ),
+      wordNamespace: STRICT_W_NS,
+    });
+
+    const result = await extractDocxText(bytes);
+
+    expect(result.paragraphs.map(({ text }) => text)).toEqual([
+      "|  |  |",
+      "| --- | --- |",
+      "| strict cell | strict attributes |",
+    ]);
+    expect(result.paragraphs.at(2)?.tableRow).toEqual({
+      table: 0,
+      kind: "cells",
+      cells: [
+        { paragraphs: [{ text: "strict cell" }] },
+        { paragraphs: [{ text: "strict attributes" }] },
+      ],
+    });
   });
 
   test("emits table cells as markdown rows, not a flat row-major paragraph list", async () => {
@@ -257,14 +318,14 @@ describe("extractDocxText", () => {
     expect(result.paragraphs.map(({ text, tableRow }) => [text, tableRow])).toEqual([
       ["|  |", { table: 0, kind: "syntheticHeader" }],
       ["| --- |", { table: 0, kind: "delimiter" }],
-      ["| x |", { table: 0, kind: "cells" }],
+      ["| x |", { table: 0, kind: "cells", cells: [{ paragraphs: [{ text: "x" }] }] }],
       ["Prose", undefined],
       ["|  |", { table: 1, kind: "syntheticHeader" }],
       ["| --- |", { table: 1, kind: "delimiter" }],
-      ["| x |", { table: 1, kind: "cells" }],
+      ["| x |", { table: 1, kind: "cells", cells: [{ paragraphs: [{ text: "x" }] }] }],
       ["|  |", { table: 2, kind: "syntheticHeader" }],
       ["| --- |", { table: 2, kind: "delimiter" }],
-      ["| x |", { table: 2, kind: "cells" }],
+      ["| x |", { table: 2, kind: "cells", cells: [{ paragraphs: [{ text: "x" }] }] }],
     ]);
   });
 
@@ -294,7 +355,11 @@ describe("extractDocxText", () => {
       "| H1 | H2 |",
       "| v1 | v2 |",
     ]);
-    expect(declared.paragraphs.at(0)?.tableRow).toEqual({ table: 0, kind: "cells" });
+    expect(declared.paragraphs.at(0)?.tableRow).toEqual({
+      table: 0,
+      kind: "cells",
+      cells: [{ paragraphs: [{ text: "H1" }] }, { paragraphs: [{ text: "H2" }] }],
+    });
     expect(undeclared.paragraphs.at(0)?.tableRow).toEqual({ table: 0, kind: "syntheticHeader" });
   });
 
@@ -314,6 +379,33 @@ describe("extractDocxText", () => {
       "| Spans two |  | C |",
       "| a1 | a2 | a3 |",
     ]);
+  });
+
+  test("preserves leading and trailing grid omissions", async () => {
+    const bytes = await makeDocx({
+      body: table(
+        row(cell(paragraph("H2")), `<w:trPr><w:gridBefore w:val="1"/><w:tblHeader/></w:trPr>`) +
+          row(cell(paragraph("v1")), `<w:trPr><w:gridAfter w:val="1"/></w:trPr>`),
+      ),
+    });
+
+    const result = await extractDocxText(bytes);
+
+    expect(result.paragraphs.map(({ text }) => text)).toEqual([
+      "|  | H2 |",
+      "| --- | --- |",
+      "| v1 |  |",
+    ]);
+    expect(result.paragraphs.at(0)?.tableRow).toEqual({
+      table: 0,
+      kind: "cells",
+      cells: [{ paragraphs: [] }, { paragraphs: [{ text: "H2" }] }],
+    });
+    expect(result.paragraphs.at(2)?.tableRow).toEqual({
+      table: 0,
+      kind: "cells",
+      cells: [{ paragraphs: [{ text: "v1" }] }, { paragraphs: [] }],
+    });
   });
 
   test("renders a vertical-merge continuation as an empty column", async () => {
@@ -359,13 +451,28 @@ describe("extractDocxText", () => {
       "| --- | --- |",
       "| outer | in1 / in2<br>in3 / in4 |",
     ]);
+    expect(result.paragraphs.at(2)?.tableRow).toEqual({
+      table: 0,
+      kind: "cells",
+      cells: [
+        { paragraphs: [{ text: "outer" }] },
+        {
+          paragraphs: [{ text: "in1" }, { text: "in2" }, { text: "in3" }, { text: "in4" }],
+        },
+      ],
+    });
   });
 
   test("keeps a multi-paragraph cell on one row and escapes what would split it", async () => {
     const bytes = await makeDocx({
       body: table(
         row(
-          cell(paragraph("first") + `<w:p/>` + paragraph("second")) +
+          cell(
+            `<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:jc w:val="center"/></w:pPr>` +
+              `<w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>first</w:t></w:r></w:p>` +
+              `<w:p/>` +
+              paragraph("second"),
+          ) +
             cell("") +
             cell(paragraph("pipe|inside")) +
             cell(`<w:p><w:r><w:t>break</w:t><w:br/><w:t>after</w:t></w:r></w:p>`),
@@ -380,6 +487,27 @@ describe("extractDocxText", () => {
       "| --- | --- | --- | --- |",
       "| first<br>second |  | pipe&#124;inside | break<br>after |",
     ]);
+    expect(result.paragraphs.at(2)?.tableRow).toEqual({
+      table: 0,
+      kind: "cells",
+      cells: [
+        {
+          paragraphs: [
+            {
+              text: "first",
+              style: "Heading2",
+              bold: true,
+              fontSize: 32,
+              alignment: "center",
+            },
+            { text: "second" },
+          ],
+        },
+        { paragraphs: [] },
+        { paragraphs: [{ text: "pipe|inside" }] },
+        { paragraphs: [{ text: "break\nafter" }] },
+      ],
+    });
   });
 
   test("gives every row of a table the same column count", async () => {
@@ -403,6 +531,16 @@ describe("extractDocxText", () => {
       "| a | b |  |",
       "| only |  |  |",
       "|  |  |  |",
+    ]);
+    expect(
+      result.paragraphs
+        .slice(2)
+        .map(({ tableRow }) => (tableRow?.kind === "cells" ? tableRow.cells : undefined)),
+    ).toEqual([
+      [{ paragraphs: [{ text: "wide" }] }, { paragraphs: [] }, { paragraphs: [] }],
+      [{ paragraphs: [{ text: "a" }] }, { paragraphs: [{ text: "b" }] }, { paragraphs: [] }],
+      [{ paragraphs: [{ text: "only" }] }, { paragraphs: [] }, { paragraphs: [] }],
+      [{ paragraphs: [] }, { paragraphs: [] }, { paragraphs: [] }],
     ]);
   });
 

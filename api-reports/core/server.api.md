@@ -142,7 +142,11 @@ export type DocxTableRowKind = "cells" | "syntheticHeader" | "delimiter";
 // @public
 export type DocxTableRowPosition = {
     table: number;
-    kind: DocxTableRowKind;
+    kind: "cells";
+    cells: readonly ExtractedDocxTableCell[];
+} | {
+    table: number;
+    kind: "syntheticHeader" | "delimiter";
 };
 
 // @public
@@ -205,6 +209,20 @@ export type ExtractedDocxParagraph = {
     fontSize?: number;
     alignment?: "left" | "center" | "right" | "both";
     tableRow?: DocxTableRowPosition;
+};
+
+// @public
+export type ExtractedDocxTableCell = {
+    paragraphs: readonly ExtractedDocxTableCellParagraph[];
+};
+
+// @public
+export type ExtractedDocxTableCellParagraph = {
+    text: string;
+    style?: string;
+    bold?: boolean;
+    fontSize?: number;
+    alignment?: "left" | "center" | "right" | "both";
 };
 
 // @public

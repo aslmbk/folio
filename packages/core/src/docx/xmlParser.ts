@@ -40,7 +40,17 @@ export type XmlElement = {
   text?: string | number | boolean;
   type?: string;
   name?: string;
+  /** Resolved namespace URI; non-enumerable so legacy structural comparisons stay stable. */
+  namespaceUri?: string;
+  /** In-scope namespace declarations; non-enumerable so legacy comparisons stay stable. */
+  namespaceScope?: XmlNamespaceScope;
   elements?: XmlElement[];
+};
+
+/** Parent-linked XML namespace declarations; each scope stores only local overrides. */
+export type XmlNamespaceScope = {
+  bindings: ReadonlyMap<string, string>;
+  parent?: XmlNamespaceScope;
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +111,23 @@ const XML_CARRIAGE_RETURN_REFERENCE = "&#13;";
 
 type MutableFxpNode = XmlElement & Record<string, unknown>;
 
+const EMPTY_NAMESPACE_SCOPE: XmlNamespaceScope = { bindings: new Map() };
+
+const resolveNamespaceUri = (
+  scope: XmlNamespaceScope | undefined,
+  prefix: string,
+): string | undefined => {
+  let current = scope;
+  while (current) {
+    const value = current.bindings.get(prefix);
+    if (value !== undefined) {
+      return value;
+    }
+    current = current.parent;
+  }
+  return undefined;
+};
+
 /**
  * Convert a fast-xml-parser preserveOrder node into an XmlElement.
  *
@@ -108,7 +135,10 @@ type MutableFxpNode = XmlElement & Record<string, unknown>;
  * (the tag name or `#text`) whose value is the children array, plus an
  * optional `:@` key holding the attributes object.
  */
-function fxpNodeToElement(node: Record<string, unknown>): MutableFxpNode {
+function fxpNodeToElement(
+  node: Record<string, unknown>,
+  inheritedNamespaceScope: XmlNamespaceScope = EMPTY_NAMESPACE_SCOPE,
+): MutableFxpNode {
   // Text node: { "#text": "some text" }
   if (TEXT_KEY in node) {
     return { type: "text", text: node[TEXT_KEY] as string };
@@ -133,9 +163,44 @@ function fxpNodeToElement(node: Record<string, unknown>): MutableFxpNode {
       element.attributes = attrs;
     }
 
+    let localBindings: Map<string, string> | null = null;
+    if (attrs) {
+      for (const [attribute, value] of Object.entries(attrs)) {
+        if (attribute !== "xmlns" && !attribute.startsWith("xmlns:")) {
+          continue;
+        }
+        localBindings ??= new Map();
+        const prefix = attribute === "xmlns" ? "" : attribute.slice("xmlns:".length);
+        localBindings.set(prefix, value);
+      }
+    }
+    const namespaceScope =
+      localBindings === null
+        ? inheritedNamespaceScope
+        : { bindings: localBindings, parent: inheritedNamespaceScope };
+
+    Object.defineProperty(element, "namespaceScope", {
+      configurable: false,
+      enumerable: false,
+      value: namespaceScope,
+      writable: false,
+    });
+
+    const colonIndex = key.indexOf(":");
+    const prefix = colonIndex === -1 ? "" : key.slice(0, colonIndex);
+    const namespaceUri = resolveNamespaceUri(namespaceScope, prefix);
+    if (namespaceUri !== undefined) {
+      Object.defineProperty(element, "namespaceUri", {
+        configurable: false,
+        enumerable: false,
+        value: namespaceUri,
+        writable: false,
+      });
+    }
+
     if (children.length > 0) {
       for (let index = 0; index < children.length; index += 1) {
-        children[index] = fxpNodeToElement(children[index]!);
+        children[index] = fxpNodeToElement(children[index]!, namespaceScope);
       }
       element.elements = children;
     }
@@ -265,6 +330,35 @@ export function getNamespacePrefix(name: string): string | null {
   }
   const colonIndex = name.indexOf(":");
   return colonIndex !== -1 ? name.slice(0, colonIndex) : null;
+}
+
+/** Namespace URI resolved from the element's in-scope XML declarations. */
+export const getNamespaceUri = (element: XmlElement): string | undefined => element.namespaceUri;
+
+/** Get an attribute whose prefix resolves to one of the accepted namespace URIs. */
+export function getAttributeByNamespaceUri(
+  element: XmlElement | null | undefined,
+  namespaceUris: ReadonlySet<string>,
+  localName: string,
+): string | null {
+  if (!element?.attributes) {
+    return null;
+  }
+
+  for (const [name, value] of Object.entries(element.attributes)) {
+    if (value === undefined || getLocalName(name) !== localName) {
+      continue;
+    }
+    const prefix = getNamespacePrefix(name);
+    if (
+      prefix !== null &&
+      namespaceUris.has(resolveNamespaceUri(element.namespaceScope, prefix) ?? "")
+    ) {
+      return String(value);
+    }
+  }
+
+  return null;
 }
 
 function hasLocalName(name: string | undefined, localName: string): boolean {
