@@ -12,6 +12,10 @@
 import type { Node as PMNode } from "prosemirror-model";
 
 import { expectRunPropertyChangeMarkAttrs } from "../prosemirror/attrs";
+import {
+  getFolioNodeRevisionCarriers,
+  type FolioNodeRevisionKind,
+} from "../prosemirror/revisionCarriers";
 import { getTableCellMergeChange } from "../prosemirror/tableCellMergeRevision";
 import { createFolioAIEditSnapshot } from "./snapshot";
 
@@ -23,7 +27,8 @@ export type FolioReviewChangeKind =
   | "rowDeleted"
   | "cellInserted"
   | "cellDeleted"
-  | "cellMerged";
+  | "cellMerged"
+  | FolioNodeRevisionKind;
 
 /** A tracked change discovered in the document body. */
 export type FolioReviewChange = {
@@ -101,6 +106,25 @@ export const getTrackedChangesFromDoc = (doc: PMNode): FolioReviewChange[] => {
   let currentBlockId: string | null = null;
 
   doc.descendants((node, pos) => {
+    const nodeRevisionCarriers = getFolioNodeRevisionCarriers(node, pos);
+    if (nodeRevisionCarriers.length > 0) {
+      const blockId = node.isTextblock
+        ? (blockStarts.get(pos) ?? null)
+        : firstBlockIdWithin({ node, nodePos: pos, blockStarts });
+      nodeRevisionCarriers.forEach((carrier, carrierIndex) => {
+        grouped.set(
+          `node:${String(pos)}:${carrier.type}:${String(carrier.id)}:${String(carrierIndex)}`,
+          {
+            id: carrier.id,
+            type: carrier.type,
+            author: carrier.author,
+            date: carrier.date,
+            text: carrier.text,
+            blockId,
+          },
+        );
+      });
+    }
     if (node.type.name === "tableRow") {
       for (const [attrName, kind] of [
         ["trIns", "rowInserted"],
