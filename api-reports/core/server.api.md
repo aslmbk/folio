@@ -49,11 +49,66 @@ export const applyFolioVersionDiffPrivacy: (diff: FolioVersionDiff, options: Fol
 // @public (undocumented)
 export const assertSupportedFolioDocumentOperationVersion: (value: unknown) => typeof FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION;
 
+// @public (undocumented)
+export type BilingualBorders = "none" | "grid";
+
+// @public
+export type BilingualParagraphRef = {
+    sourceParaId: string | undefined;
+    targetParaId: string;
+    sourceText: string;
+};
+
+// @public (undocumented)
+export type BilingualRow = ({
+    kind: BilingualRowKind;
+    rowId: string;
+} & BilingualParagraphRef) | {
+    kind: "table";
+    rowId: string;
+    paragraphs: BilingualTableParagraphRef[];
+};
+
+// @public (undocumented)
+export type BilingualRowKind = "paragraph" | "heading" | "listItem";
+
+// @public (undocumented)
+export type BilingualTableParagraphRef = {
+    paraId: string | undefined;
+    sourceText: string;
+};
+
 // @public
 export const bookmark: (input: BookmarkOptions) => ParagraphContent[];
 
 // @public
 export const compareDocxVersions: (base: ArrayBuffer, revised: ArrayBuffer, options?: FolioCompareDocxVersionsOptions) => Promise<FolioVersionDiff>;
+
+// @public (undocumented)
+export function createBilingualDocument(source: import__stll_docx_core_model.Document, options: CreateBilingualDocumentOptions): CreateBilingualDocumentResult;
+
+// @public (undocumented)
+export type CreateBilingualDocumentOptions = {
+    targetStyleSuffix: string;
+    borders?: BilingualBorders;
+};
+
+// @public (undocumented)
+export type CreateBilingualDocumentResult = {
+    document: import__stll_docx_core_model.Document;
+    rows: BilingualRow[];
+    warnings: string[];
+};
+
+// @public
+export function createBilingualDocx(input: ArrayBuffer | Uint8Array, options: CreateBilingualDocumentOptions): Promise<CreateBilingualDocxResult>;
+
+// @public (undocumented)
+export type CreateBilingualDocxResult = {
+    buffer: ArrayBuffer;
+    rows: BilingualRow[];
+    warnings: string[];
+};
 
 // @public (undocumented)
 export type CreateCommentReplyInput = {
@@ -1295,6 +1350,9 @@ export type InspectDocxPackageOptions = {
 };
 
 // @public (undocumented)
+export class InvalidBilingualDocumentOptionsError extends InvalidBilingualDocumentOptionsError_base {}
+
+// @public (undocumented)
 export class InvalidFolioDocumentOperationBatchError extends InvalidFolioDocumentOperationBatchError_base {}
 
 // @public (undocumented)
@@ -1371,6 +1429,12 @@ export type ParseOptions = {
     unzipLimits?: DocxUnzipOptions;
     mediaResolver?: MediaResolver;
 };
+
+// @public
+export function readBilingualDocument(document: import__stll_docx_core_model.Document): BilingualRow[];
+
+// @public
+export function readBilingualDocx(input: ArrayBuffer | Uint8Array): Promise<BilingualRow[]>;
 
 // @public
 export const readFolioDocumentSection: (snapshot: FolioAIEditSnapshot, handle: FolioDocumentSectionHandle) => FolioDocumentSectionReadResult;
