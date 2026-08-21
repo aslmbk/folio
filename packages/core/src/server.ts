@@ -39,6 +39,7 @@ export {
   type FolioBlockId,
 } from "./types/block-id";
 export { createDocx } from "./docx/rezip";
+export { parseDocx, type ParseOptions } from "./docx/parser";
 export {
   ensureParaIds,
   EnsureParaIdsError,
@@ -47,6 +48,21 @@ export {
 } from "./docx/ensureParaIds";
 export { replyToComment, type CreateCommentReplyInput } from "./docx/replyToComment";
 export { createEmptyDocument, type CreateEmptyDocumentOptions } from "./utils/createDocument";
+export {
+  bookmark,
+  createTableOfContentsField,
+  endnote,
+  heading,
+  HEADING_LEVELS,
+  hyperlink,
+  InvalidFolioReportBuilderOptionsError,
+  pageBreak,
+  paragraph,
+  run,
+  table,
+  type HeadingLevel,
+  type TableCellSpec,
+} from "./docx/server/build";
 export {
   extractDocumentStyleSet,
   extractDocumentStyleSetFromDocx,
