@@ -260,6 +260,7 @@ function withFakeTextMeasure(runTest: () => void): void {
 
 const page: Page = {
   number: 1,
+  logicalNumber: 1,
   margins: { top: 72, right: 72, bottom: 72, left: 72 },
   size: { w: 816, h: 1056 },
   fragments: [
@@ -368,6 +369,12 @@ function textBoxMeasure(width: number, height: number): TextBoxMeasure {
 }
 
 describe("render page fingerprint", () => {
+  test("changes when the authored page number changes", () => {
+    expect(computePageFingerprint(page)).not.toBe(
+      computePageFingerprint({ ...page, logicalNumber: 13 }),
+    );
+  });
+
   test("changes when the authored margin frame changes without changing effective margins", () => {
     const withAuthoredMargins = {
       ...page,
@@ -685,12 +692,13 @@ describe("header and footer rendering", () => {
     });
   });
 
-  test("resolves even footers from the section page number when enabled", () => {
+  test("resolves even footers from the logical page number when enabled", () => {
     const pageOptions = {};
     const applied = applySectionHeaderFooterOptions(
       {
         ...page,
         number: 2,
+        logicalNumber: 14,
         sectionPageNumber: 2,
         headerFooterRefs: {
           evenAndOddHeaders: true,
@@ -714,6 +722,33 @@ describe("header and footer rendering", () => {
     });
   });
 
+  test("uses first-page furniture by section ordinal even when its logical number is even", () => {
+    const pageOptions = {};
+    applySectionHeaderFooterOptions(
+      {
+        ...page,
+        logicalNumber: 14,
+        sectionPageNumber: 1,
+        headerFooterRefs: {
+          titlePg: true,
+          evenAndOddHeaders: true,
+          footerFirst: "first-footer",
+          footerEven: "even-footer",
+        },
+        fragments: [],
+      },
+      pageOptions,
+      {
+        footerContentByRId: new Map([
+          ["first-footer", headerFooterTextContent("First footer")],
+          ["even-footer", headerFooterTextContent("Even footer")],
+        ]),
+      },
+    );
+
+    expect(pageOptions).toEqual({ footerContent: headerFooterTextContent("First footer") });
+  });
+
   test("leaves enabled even-page slots blank when no even part exists", () => {
     const pageOptions = {
       headerContent: headerFooterTextContent("Odd header"),
@@ -723,6 +758,7 @@ describe("header and footer rendering", () => {
       {
         ...page,
         number: 2,
+        logicalNumber: 2,
         sectionPageNumber: 2,
         headerFooterRefs: {
           evenAndOddHeaders: true,
@@ -1046,7 +1082,12 @@ describe("footnote rendering", () => {
         footnoteReservedHeight: 24,
         fragments: [],
       },
-      { pageNumber: 7, totalPages: 9, section: "body" },
+      {
+        pageNumber: 7,
+        pageNumberFormat: "upperRoman",
+        totalPages: 9,
+        section: "body",
+      },
       {
         document: fakeDocument,
         footnoteArea: [
@@ -1062,7 +1103,7 @@ describe("footnote rendering", () => {
       },
     );
 
-    expect(pageEl.textContent).toContain("Page 7 of 9");
+    expect(pageEl.textContent).toContain("Page VII of 9");
   });
 
   test("renders structured table footnote content without body PM anchors", () => {
