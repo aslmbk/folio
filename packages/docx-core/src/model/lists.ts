@@ -154,6 +154,20 @@ export type NumberingInstance = {
   }[];
 };
 
+/** Typography from numbering-level `w:rPr` that applies to the marker glyphs. */
+export type ListMarkerFormatting = Pick<
+  TextFormatting,
+  | "fontFamily"
+  | "fontSize"
+  | "fontSizeCs"
+  | "bold"
+  | "boldCs"
+  | "italic"
+  | "italicCs"
+  | "rtl"
+  | "cs"
+>;
+
 /**
  * Computed list rendering info
  */
@@ -172,12 +186,8 @@ export type ListRendering = {
   numFmt?: NumberFormat;
   /** Whether the list marker is hidden (w:vanish on level rPr) */
   markerHidden?: boolean;
-  /** Marker font family from numbering level rPr (ascii name) */
-  markerFontFamily?: string;
-  /** Marker font size from numbering level rPr, in points */
-  markerFontSize?: number;
-  /** Marker bold state from numbering level rPr */
-  markerBold?: boolean;
+  /** Canonical numbering-level marker typography, in OOXML units. */
+  markerFormatting?: ListMarkerFormatting;
   /** Horizontal alignment of the marker around the paragraph's list anchor. */
   markerAlignment?: "left" | "center" | "right";
   /**
