@@ -36,6 +36,10 @@ import {
   type FolioDocumentPrivacyOptions,
   type FolioDocumentPrivacyReport,
 } from "./docx/metadataPrivacy";
+import {
+  GenerateRedlineDocxOperationLimitError,
+  MAX_GENERATED_REDLINE_OPERATIONS,
+} from "./redlineOperationLimit";
 import { alignFolioBlocks, type FolioAlignedBlockEvent } from "./version-comparison";
 
 /** Options for {@link generateRedlineDocx}. */
@@ -186,6 +190,11 @@ const formattingSegments = (
       ) {
         previous.endOffset += length;
       } else {
+        if (segments.length >= MAX_GENERATED_REDLINE_OPERATIONS) {
+          throw new GenerateRedlineDocxOperationLimitError({
+            message: "The document comparison exceeds the generated operation limit.",
+          });
+        }
         segments.push({
           startOffset: textOffset,
           endOffset: textOffset + length,
@@ -371,7 +380,14 @@ export const generateRedlineDocx = async (
   const skipped: FolioAIEditSkippedOperation[] = [];
   const unprocessedStories: GenerateRedlineUnprocessedStory[] = [];
   let operationSequence = 0;
-  const nextOperationId = () => `redline-${++operationSequence}`;
+  const nextOperationId = () => {
+    if (operationSequence >= MAX_GENERATED_REDLINE_OPERATIONS) {
+      throw new GenerateRedlineDocxOperationLimitError({
+        message: "The document comparison exceeds the generated operation limit.",
+      });
+    }
+    return `redline-${++operationSequence}`;
+  };
 
   for (const pair of pairFolioDocumentStories(baseStories, revisedStories)) {
     if (!pair.baseStory) {
