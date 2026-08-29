@@ -559,6 +559,8 @@ export type PageState = {
     contentBottom: number;
     rawContentBottom: number;
     footnoteHeight: number;
+    footnoteHeightFloor: number;
+    footnoteDemandHeight: number;
     trailingSpacing: number;
 };
 
@@ -1024,6 +1026,7 @@ export type TextBoxFlowAttrs = Pick<TextBoxBlock, "displayMode" | "wrapType">;
 export type TextBoxFragment = FragmentBase & {
     kind: "textBox";
     height: number;
+    isPositioned?: true;
 };
 
 // @public
