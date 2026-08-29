@@ -22,6 +22,7 @@
 import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { TaggedError } from "better-result";
 import { DEFAULT_CORPUS_DIRS } from "./config";
 import {
   attributeDivergences,
@@ -32,6 +33,8 @@ import {
 import type { ParagraphFeatures } from "./features";
 import { createFolioExtractor } from "./folioExtract";
 import type { FolioExtractor } from "./folioExtract";
+import { cacheDirFor } from "./pdfReference";
+import { comparePageRasters } from "./rasterCompare";
 import { compareGeoms } from "./compare";
 import { getReferenceRenderer, isReferenceRendererId } from "./referenceRenderer";
 import type { ReferenceRenderer } from "./referenceRenderer";
@@ -55,6 +58,23 @@ const EXIT_INFRA_FAILURE = 2;
 const TOP_CLUSTER_LIMIT = 10;
 const PERFECT_SCORE = 1;
 const DEFAULT_REFERENCE_RENDERER: ReferenceRendererId = "libreoffice";
+const SHA256_PATTERN = /^[a-f\d]{64}$/;
+const SOURCE_SHA256_METADATA_KEY = "sha256";
+
+class ReferenceMetadataError extends TaggedError("ReferenceMetadataError")<{
+  message: string;
+}> {}
+
+/** Read the content hash used to namespace reference-renderer artifacts. */
+const requireSourceSha256 = (geometry: DocGeom) => {
+  const sha256 = geometry.meta[SOURCE_SHA256_METADATA_KEY];
+  if (sha256 === undefined || !SHA256_PATTERN.test(sha256)) {
+    throw new ReferenceMetadataError({
+      message: "Reference renderer did not expose a valid source hash",
+    });
+  }
+  return sha256;
+};
 
 /** Word lock files ("~$name.docx") and dotfiles are never real documents. */
 const DOCX_GLOB = "**/*.docx";
@@ -289,22 +309,34 @@ const runPipeline = async (
         } else if (fontEnvironment.status === "unverified") {
           process.stderr.write(`(${referenceRenderer.displayName}/Folio font parity unverified) `);
         }
-        const attributed = {
-          ...attributeDivergences(result, docFeatures),
-          fontEnvironment,
-        };
-
         // oxlint-disable-next-line no-await-in-loop -- sequential per-doc pipeline
         const referencePagePngs = limitPaths(
           await referenceRenderer.getPagePngs(doc, pageLimit),
           flags.maxPages,
         );
+        // oxlint-disable-next-line no-await-in-loop -- the content hash owns every cached artifact for this document
+        const rasterDiffDir = path.join(
+          cacheDirFor(requireSourceSha256(referenceGeom)),
+          `${referenceRenderer.id}-folio-diffs`,
+        );
+        // oxlint-disable-next-line no-await-in-loop -- page rasters are compared sequentially to bound memory
+        const raster = await comparePageRasters({
+          referencePagePngs,
+          folioPagePngs: folio.screenshotPaths,
+          outputDir: rasterDiffDir,
+        });
+        const attributed = {
+          ...attributeDivergences(result, docFeatures),
+          fontEnvironment,
+          rasterComparison: raster.comparison,
+        };
 
         results.push(attributed);
         paragraphsByDoc.push(docFeatures.paragraphs);
         assets.set(doc, {
           referencePagePngs,
           folioPagePngs: folio.screenshotPaths,
+          rasterDiffPagePngs: raster.diffPagePngs,
           referenceGeom,
           folioGeom: folio.geom,
         });
@@ -312,7 +344,11 @@ const runPipeline = async (
         const scoreLabel = isGeometryScoreReliable(fontEnvironment)
           ? result.score.toFixed(2)
           : `unscored (raw diagnostic ${result.score.toFixed(2)})`;
-        process.stderr.write(`score ${scoreLabel}\n`);
+        const rasterScoreLabel =
+          raster.comparison.status === "compared"
+            ? `, raster ${(raster.comparison.score * 100).toFixed(1)}%`
+            : "";
+        process.stderr.write(`score ${scoreLabel}${rasterScoreLabel}\n`);
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         process.stderr.write(`\n${label}: FAILED — ${err.name}: ${err.message}\n`);
@@ -391,10 +427,16 @@ const printHumanSummary = (report: CorpusReport, failures: DocFailure[]): void =
   }
 };
 
-const isFullyClean = (report: CorpusReport, failures: DocFailure[]): boolean =>
+/** Return whether a report is clean, including every available raster check. */
+export const isFullyClean = (report: CorpusReport, failures: DocFailure[]): boolean =>
   failures.length === 0 &&
   report.results.every(
-    (result) => result.score === PERFECT_SCORE && result.divergences.length === 0,
+    (result) =>
+      result.score === PERFECT_SCORE &&
+      result.divergences.length === 0 &&
+      (result.rasterComparison === undefined ||
+        (result.rasterComparison.status === "compared" &&
+          result.rasterComparison.score === PERFECT_SCORE)),
   );
 
 const writeJsonReport = async (report: CorpusReport, outputPath: string): Promise<string> => {

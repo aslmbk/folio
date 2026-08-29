@@ -2092,10 +2092,10 @@ function convertParagraph(
 }
 
 /**
- * Word keeps terminal empty body paragraphs after a final table as editable
- * anchors, but they do not create a page of their own. Preserve every block
- * and PM range while collapsing only the contiguous, run-free suffix; empty
- * paragraphs elsewhere still retain their normal line height.
+ * Word keeps a final empty body paragraph after a table as an editable anchor,
+ * but that final anchor does not create a page of its own. Earlier authored
+ * empty paragraphs retain their height and may carry the document onto a blank
+ * page. Preserve every block and PM range while collapsing only the final one.
  */
 function isPaintlessTerminalParagraph(block: FlowBlock | undefined): block is ParagraphBlock {
   if (block?.kind !== "paragraph" || block.runs.length !== 0) {
@@ -2119,7 +2119,7 @@ function isPaintlessTerminalParagraph(block: FlowBlock | undefined): block is Pa
   );
 }
 
-function suppressTerminalEmptyParagraphsAfterTable(blocks: FlowBlock[]): void {
+function suppressFinalEmptyParagraphAfterTable(blocks: FlowBlock[]): void {
   let suffixStart = blocks.length;
   while (suffixStart > 0 && isPaintlessTerminalParagraph(blocks[suffixStart - 1])) {
     suffixStart -= 1;
@@ -2133,11 +2133,9 @@ function suppressTerminalEmptyParagraphsAfterTable(blocks: FlowBlock[]): void {
     return;
   }
 
-  for (let index = suffixStart; index < blocks.length; index += 1) {
-    const block = blocks[index];
-    if (isPaintlessTerminalParagraph(block)) {
-      block.attrs = { ...block.attrs, suppressEmptyParagraphHeight: true };
-    }
+  const finalBlock = blocks.at(-1);
+  if (isPaintlessTerminalParagraph(finalBlock)) {
+    finalBlock.attrs = { ...finalBlock.attrs, suppressEmptyParagraphHeight: true };
   }
 }
 
@@ -3140,7 +3138,7 @@ export function toFlowBlocks(doc: PMNode, options: ToFlowBlocksOptions = {}): Fl
   });
 
   reserveLeadingEmptyOutlineHeight(blocks);
-  suppressTerminalEmptyParagraphsAfterTable(blocks);
+  suppressFinalEmptyParagraphAfterTable(blocks);
   suppressFinalParagraphInRepeatedEmptySuffix(blocks);
   const mergedBlocks = mergeRunInParagraphs(blocks);
   const griddedBlocks = applySectionDocumentGrid(
