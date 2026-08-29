@@ -228,6 +228,18 @@ const SUGGESTION_TINT_CSS = "var(--suggestion-bg, color-mix(in oklch, #6d3bd6 12
 // painted via background-color earlier in applyRunStyles — stay visible
 // underneath the proposal wash instead of being replaced by it.
 const SUGGESTION_TINT_LAYER_CSS = `linear-gradient(${SUGGESTION_TINT_CSS}, ${SUGGESTION_TINT_CSS})`;
+const RUN_BACKGROUND_TEXT_COLOR_VAR = "--doc-run-background-text-color";
+
+const setRunBackgroundTextColor = (element: HTMLElement, color: string): void => {
+  element.classList.add("docx-run-background-text");
+  element.style.setProperty(RUN_BACKGROUND_TEXT_COLOR_VAR, color);
+};
+
+const hasRunBackgroundTextSurface = (run: TextRun | TabRun): boolean =>
+  Boolean(run.highlight ?? run.shading) &&
+  !run.isInsertion &&
+  !run.isDeletion &&
+  !(run.commentIds !== undefined && run.commentIds.length > 0);
 
 function normalizeTextColorValue(color: string): string {
   return color.trim().toLowerCase().replace(/^#/u, "");
@@ -428,6 +440,15 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
         : getAutomaticTextColorForBackground(runBackground);
     if (automaticTextColor) {
       element.style.color = automaticTextColor;
+    }
+    const backgroundTextColor = hasExplicitTextColor ? textColor : automaticTextColor;
+    if (backgroundTextColor && hasRunBackgroundTextSurface(run)) {
+      // Dark-mode canvas rules deliberately invert ordinary run colors, but an
+      // authored highlight/shading is its own local color surface. Preserve the
+      // foreground chosen for that surface so a bright yellow highlight does
+      // not turn direct/theme black (or automatic contrast black) into white.
+      // The CSS custom property is presentation-only; saved OOXML is untouched.
+      setRunBackgroundTextColor(element, backgroundTextColor);
     }
   }
 
@@ -674,6 +695,12 @@ function renderTextRun(
       // the paragraph's inverted colour.
       anchor.style.setProperty("--doc-run-color", hyperlinkColor);
       span.style.setProperty("--doc-run-color", hyperlinkColor);
+      if (hasRunBackgroundTextSurface(run)) {
+        // The anchor paints over the run span, so it must carry the same local
+        // surface foreground contract as the span after hyperlink styling wins.
+        setRunBackgroundTextColor(span, hyperlinkColor);
+        setRunBackgroundTextColor(anchor, hyperlinkColor);
+      }
     }
     span.append(anchor);
   } else {
@@ -713,15 +740,22 @@ function removeUnderlineTextDecoration(element: HTMLElement): void {
   element.style.textDecorationLine = textDecorationLines.join(" ");
 }
 
+function applyContinuousUnderline(
+  element: HTMLElement,
+  underline: NonNullable<TextRun["underline"]>,
+): void {
+  removeUnderlineTextDecoration(element);
+  const color = typeof underline === "object" && underline.color ? underline.color : "currentColor";
+  // Paint inside the inline box. A bottom border grows the box by one pixel;
+  // fixed line boxes then let the following line paint over that border.
+  element.style.boxShadow = `inset 0 -1px 0 ${color}`;
+}
+
 function applyWhitespaceUnderline(element: HTMLElement, run: TextRun): void {
   if (!run.underline || run.text.trim().length > 0) {
     return;
   }
-  removeUnderlineTextDecoration(element);
-  element.style.borderBottom = "1px solid currentColor";
-  if (typeof run.underline === "object" && run.underline.color) {
-    element.style.borderBottomColor = run.underline.color;
-  }
+  applyContinuousUnderline(element, run.underline);
 }
 
 /**
@@ -799,11 +833,7 @@ function applyTabUnderline(element: HTMLElement, run: TabRun): void {
   if (!run.underline) {
     return;
   }
-  removeUnderlineTextDecoration(element);
-  element.style.borderBottom = "1px solid currentColor";
-  if (typeof run.underline === "object" && run.underline.color) {
-    element.style.borderBottomColor = run.underline.color;
-  }
+  applyContinuousUnderline(element, run.underline);
 }
 
 /**
