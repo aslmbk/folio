@@ -59,6 +59,7 @@ import {
   validateFolioDocumentModel,
 } from "./modelValidation";
 import { extractMetafileRaster, isMetafileMimeType } from "./metafileRaster";
+import { renderEmfSvg } from "./metafileSvg";
 import { parseNumbering } from "./numberingParser";
 import { parseFontTable } from "./fontTableParser";
 import type { NumberingMap } from "./numberingParser";
@@ -74,6 +75,10 @@ import { DocxEncryptionError } from "./encryption/errors";
 import { unzipDocx, getMediaMimeType, mediaToDataUrl } from "./unzip";
 import type { DocxUnzipOptions, RawDocxContent } from "./unzip";
 
+const EMF_MIME_TYPE = "image/x-emf";
+const SVG_MIME_TYPE = "image/svg+xml";
+const MAX_PACKAGE_EMF_PREVIEW_BYTES = 8 * 1024 * 1024;
+
 // ============================================================================
 // PROGRESS CALLBACK
 // ============================================================================
@@ -88,8 +93,8 @@ export type ProgressCallback = (stage: string, percent: number) => void;
  * (EMF/WMF/TIFF) into a displayable `data:` or `blob:` URL. Receives the
  * parsed {@link MediaFile} (original bytes on `.data`); return the replacement
  * URL, or `null`/`undefined` to keep the built-in handling. Built-in handling
- * already extracts an embedded PNG/JPEG from EMF/WMF when one exists; this
- * hook is for vector-only metafiles where the host rasterizes server-side.
+ * extracts embedded PNG/JPEG previews and renders a bounded filled-path EMF
+ * subset; this hook covers remaining formats and unsupported vector records.
  */
 export type MediaResolver = (file: MediaFile) => Promise<string | null | undefined>;
 
@@ -517,6 +522,7 @@ async function buildMediaMap(
   const media = new Map<string, MediaFile>();
   const referenced = collectReferencedMediaPaths(raw, rels);
   let remainingTiffPixels = MAX_PACKAGE_TIFF_PIXELS;
+  let remainingEmfPreviewBytes = MAX_PACKAGE_EMF_PREVIEW_BYTES;
 
   // Process each media file
   for (const [path, data] of raw.media.entries()) {
@@ -568,6 +574,32 @@ async function buildMediaMap(
         media.set(normalizedPath, mediaFile);
       }
       continue;
+    }
+
+    const emfSvg =
+      isReferenced && mimeType === EMF_MIME_TYPE && remainingEmfPreviewBytes > 0
+        ? renderEmfSvg(data)
+        : null;
+    if (emfSvg) {
+      const svgBytes = new TextEncoder().encode(emfSvg);
+      if (svgBytes.byteLength <= remainingEmfPreviewBytes) {
+        remainingEmfPreviewBytes -= svgBytes.byteLength;
+        const mediaFile: MediaFile = {
+          path,
+          filename,
+          mimeType,
+          data,
+          dataUrl: mediaToDataUrl(copyBytesToArrayBuffer(svgBytes), SVG_MIME_TYPE),
+        };
+        media.set(path, mediaFile);
+        const normalizedPath = path.replace(/^word\//u, "");
+        if (normalizedPath !== path) {
+          media.set(normalizedPath, mediaFile);
+        }
+        continue;
+      }
+      // Do not repeatedly render previews that cannot fit the retained package budget.
+      remainingEmfPreviewBytes = 0;
     }
 
     const mediaFile: MediaFile = {
