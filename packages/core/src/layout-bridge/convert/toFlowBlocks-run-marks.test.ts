@@ -272,6 +272,35 @@ describe("toFlowBlocks run-level OOXML marks", () => {
     expect(run.kerningMinPt).toBeUndefined();
   });
 
+  test.each([-50, 601, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "normalizes malformed character scale %p at the layout boundary",
+    (scale) => {
+      const blocks = toFlowBlocks(buildSingleRunDoc("text", "characterSpacing", { scale }), {});
+
+      expect(firstRun(blocks).horizontalScale).toBeUndefined();
+    },
+  );
+
+  test("preserves zero-width character scale", () => {
+    const blocks = toFlowBlocks(buildSingleRunDoc("text", "characterSpacing", { scale: 0 }), {});
+
+    expect(firstRun(blocks).horizontalScale).toBe(0);
+  });
+
+  test("explicit 100% scale suppresses paragraph-default horizontal scale", () => {
+    const mark = schema.marks.characterSpacing?.create({ scale: 100 });
+    if (!mark) {
+      throw new Error("characterSpacing mark is unavailable");
+    }
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", { defaultTextFormatting: { scale: 150 } }, [
+        schema.text("Signature name", [mark]),
+      ]),
+    ]);
+
+    expect(firstRun(toFlowBlocks(doc, {})).horizontalScale).toBe(100);
+  });
+
   test("explicit zero spacing suppresses paragraph-default character spacing", () => {
     const mark = schema.marks.characterSpacing?.create({ spacing: 0 });
     if (!mark) {

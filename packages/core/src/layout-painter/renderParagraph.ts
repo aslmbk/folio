@@ -56,6 +56,7 @@ import {
 import { planCursiveJoiners, withCursiveJoiners } from "./cursiveJoiners";
 import { resolveFontFamily } from "../utils/fontResolver";
 import { DOCX_BOLD_FONT_WEIGHT } from "../utils/fontWeights";
+import { getHorizontalScaleFactor } from "../utils/horizontalScale";
 import { applySanitizedImageSrc } from "../utils/sanitizeImageSrc";
 import { sanitizeExternalUrl } from "../utils/urlSecurity";
 import {
@@ -303,6 +304,19 @@ function getRaisedRunFontSize(run: TextRun | TabRun): string {
   return `${DOCX_SCRIPT_FONT_SCALE}em`;
 }
 
+function applyHorizontalScaleTransform(
+  element: HTMLElement,
+  horizontalScale: number | undefined,
+): void {
+  const horizontalScaleFactor = getHorizontalScaleFactor(horizontalScale);
+  if (horizontalScaleFactor === 1) {
+    return;
+  }
+  element.style.display = "inline-block";
+  element.style.transform = `scaleX(${horizontalScaleFactor})`;
+  element.style.transformOrigin = "left center";
+}
+
 /**
  * Apply text run styles to an element
  */
@@ -359,11 +373,7 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
   if (run.positionPx) {
     element.style.verticalAlign = `${run.positionPx}px`;
   }
-  if (run.horizontalScale && run.horizontalScale !== 100) {
-    element.style.display = "inline-block";
-    element.style.transform = `scaleX(${run.horizontalScale / 100})`;
-    element.style.transformOrigin = "left center";
-  }
+  applyHorizontalScaleTransform(element, run.horizontalScale);
   element.style.fontKerning = getRunFontKerningMode(run, DEFAULT_FONT_SIZE);
   if (run.emboss) {
     element.style.textShadow = "1px 1px 1px rgba(255,255,255,0.5), -1px -1px 1px rgba(0,0,0,0.3)";
@@ -612,10 +622,11 @@ function reserveScaledAdvance(
   unscaledWidth: number,
   horizontalScale: number | undefined,
 ): void {
-  if (horizontalScale === undefined || horizontalScale === 100) {
+  const horizontalScaleFactor = getHorizontalScaleFactor(horizontalScale);
+  if (horizontalScaleFactor === 1) {
     return;
   }
-  element.style.width = `${unscaledWidth * (horizontalScale / 100)}px`;
+  element.style.width = `${unscaledWidth * horizontalScaleFactor}px`;
 }
 
 /**
@@ -1234,11 +1245,7 @@ function renderFieldRun(run: FieldRun, doc: Document, context: RenderContext): H
     // horizontalScale lives on the wrapper (inline-block so the reserved width
     // the render loop sets via reserveScaledAdvance applies, scaleX so the
     // segments scale uniformly); the segments drop it to avoid double-scaling.
-    if (resolvedRun.horizontalScale && resolvedRun.horizontalScale !== 100) {
-      wrapper.style.display = "inline-block";
-      wrapper.style.transform = `scaleX(${resolvedRun.horizontalScale / 100})`;
-      wrapper.style.transformOrigin = "left center";
-    }
+    applyHorizontalScaleTransform(wrapper, resolvedRun.horizontalScale);
     // The pm range lives on the wrapper; segments carry none (the field is one
     // atomic unit), so drop pmStart/pmEnd (and the wrapper-applied scale) before
     // spreading into each segment.
@@ -1306,6 +1313,7 @@ function renderMathRun(run: MathRun, doc: Document): HTMLElement {
 
   // Cambria Math fallback chain for browsers that don't ship a math font.
   host.style.fontFamily = '"Cambria Math", "Latin Modern Math", "STIX Two Math", serif';
+  applyHorizontalScaleTransform(host, run.horizontalScale);
 
   try {
     // safe-html: mathml is built by ommlToMathml(), which escapes every text token via escapeXml() and emits only a fixed MathML tag vocabulary
@@ -1341,6 +1349,7 @@ function renderMathFallback(
   }
   span.style.fontStyle = "italic";
   span.style.fontFamily = '"Cambria Math", "Latin Modern Math", "STIX Two Math", serif';
+  applyHorizontalScaleTransform(span, run.horizontalScale);
   span.textContent = fallbackText;
   applyPmPositions(span, run.pmStart, run.pmEnd);
   return span;
@@ -1755,17 +1764,13 @@ function measureFollowingContentWidth(
     if (isTabRun(run) || isLineBreakRun(run)) {
       break;
     }
-    // Apply horizontalScale to match what the renderer's main loop does to
-    // currentX (`measuredWidth * (run.horizontalScale ?? 100) / 100`). Without
-    // this, expanded/compressed text after a tab over/under-estimates the
-    // trailing width and the right-edge check fires (or doesn't) at the wrong
-    // threshold, causing alignment drift on scaled TOC entries.
-    const scale = (run as { horizontalScale?: number }).horizontalScale ?? 100;
+    // Mirror the main render loop's scale so tab-aligned trailing content
+    // reserves the same width it paints.
     if (isTextRun(run)) {
       const text = run.allCaps ? run.text.toLocaleUpperCase() : run.text;
       width +=
         measureText(text, run.fontSize ?? 11, run.fontFamily ?? "Calibri", runMeasureStyle(run)) *
-        (scale / 100);
+        getHorizontalScaleFactor(run.horizontalScale);
     } else if (isFieldRun(run)) {
       const fieldText = resolveFieldText(run, context);
       width +=
@@ -1774,8 +1779,7 @@ function measureFollowingContentWidth(
           run.fontSize ?? 11,
           run.fontFamily ?? "Calibri",
           runMeasureStyle(run),
-        ) *
-        (scale / 100);
+        ) * getHorizontalScaleFactor(run.horizontalScale);
     } else if (isImageRun(run) && !isFloatingImageRun(run)) {
       // Inline images aren't horizontally scaled by w:w on the surrounding
       // text run; their own width attribute is authoritative. Rotated images
@@ -1789,8 +1793,7 @@ function measureFollowingContentWidth(
           run.fontSize ?? 11,
           run.fontFamily ?? "Cambria Math",
           runMeasureStyle(run),
-        ) *
-        (scale / 100);
+        ) * getHorizontalScaleFactor(run.horizontalScale);
     }
   }
   return width;
@@ -1841,15 +1844,14 @@ function measureDecimalPrefixWidth(
 
     const take = Math.min(runText.length, decimalIndex - consumed);
     if (take > 0) {
-      const scale = run.horizontalScale ?? 100;
+      const horizontalScaleFactor = getHorizontalScaleFactor(run.horizontalScale);
       width +=
         measureText(
           runText.slice(0, take),
           run.fontSize ?? 11,
           run.fontFamily ?? "Calibri",
           runMeasureStyle(run),
-        ) *
-        (scale / 100);
+        ) * horizontalScaleFactor;
     }
     consumed += runText.length;
   }
@@ -2128,8 +2130,7 @@ export function renderLine(
           run.fontSize || 11,
           run.fontFamily || "Calibri",
           runMeasureStyle(run),
-        ) ?? 0) *
-        ((run.horizontalScale ?? 100) / 100);
+        ) ?? 0) * getHorizontalScaleFactor(run.horizontalScale);
       runEl.dataset["collapsedSpaceAdvance"] = String(spaceAdvance);
       runEl.style.fontSize = "0";
       runEl.style.letterSpacing = "0";
@@ -2312,8 +2313,7 @@ export function renderLine(
   const hasScaledTextRun = runsForLine.some(
     (run) =>
       (isTextRun(run) || isFieldRun(run) || isMathRun(run)) &&
-      run.horizontalScale !== undefined &&
-      run.horizontalScale !== 100,
+      getHorizontalScaleFactor(run.horizontalScale) !== 1,
   );
   const measureText =
     collapsedSpaceMeasureText ??
@@ -2562,7 +2562,7 @@ export function renderLine(
         runMeasureStyle(run),
       );
       reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
-      currentX += measuredWidth * ((run.horizontalScale ?? 100) / 100);
+      currentX += measuredWidth * getHorizontalScaleFactor(run.horizontalScale);
     } else if (isImageRun(run)) {
       // Skip floating images - they're rendered separately at page level.
       // Exception: inside table cells, floating images must render in-flow
@@ -2608,7 +2608,7 @@ export function renderLine(
         runMeasureStyle(run),
       );
       reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
-      currentX += measuredWidth * ((run.horizontalScale ?? 100) / 100);
+      currentX += measuredWidth * getHorizontalScaleFactor(run.horizontalScale);
     } else if (isMathRun(run)) {
       const runEl = renderMathRun(run, doc);
       lineEl.append(runEl);
@@ -2622,7 +2622,7 @@ export function renderLine(
         runMeasureStyle(run),
       );
       reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
-      currentX += measuredWidth * ((run.horizontalScale ?? 100) / 100);
+      currentX += measuredWidth * getHorizontalScaleFactor(run.horizontalScale);
     } else {
       // Fallback for unknown run types
       const runEl = renderRun(run, doc, options?.context);

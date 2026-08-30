@@ -8,6 +8,11 @@
  */
 
 import { twipsToPixels, formatPx } from "../../../utils/units";
+import {
+  getHorizontalScaleFactor,
+  normalizeHorizontalScalePercent,
+  parseHorizontalScalePercent,
+} from "../../../utils/horizontalScale";
 import { expectCharacterSpacingMarkAttrs } from "../../attrs";
 import { createMarkExtension } from "../create";
 
@@ -31,13 +36,19 @@ export const CharacterSpacingExtension = createMarkExtension({
         getAttrs: (dom) => ({
           spacing: dom.dataset["spacing"] ? Number(dom.dataset["spacing"]) : null,
           position: dom.dataset["position"] ? Number(dom.dataset["position"]) : null,
-          scale: dom.dataset["scale"] ? Number(dom.dataset["scale"]) : null,
+          scale: parseHorizontalScalePercent(dom.dataset["scale"]),
           kerning: dom.dataset["kerning"] ? Number(dom.dataset["kerning"]) : null,
         }),
       },
     ],
     toDOM(mark) {
-      const { spacing, position, scale, kerning } = expectCharacterSpacingMarkAttrs(mark);
+      const {
+        spacing,
+        position,
+        scale: authoredScale,
+        kerning,
+      } = expectCharacterSpacingMarkAttrs(mark);
+      const scale = normalizeHorizontalScalePercent(authoredScale);
 
       const styles: string[] = [];
       const dataAttrs: Record<string, string> = {
@@ -55,10 +66,12 @@ export const CharacterSpacingExtension = createMarkExtension({
         dataAttrs["data-position"] = String(position);
       }
 
-      if (scale !== undefined && scale !== 100) {
-        styles.push(`transform: scaleX(${scale / 100})`);
-        styles.push("display: inline-block");
+      if (scale !== undefined) {
         dataAttrs["data-scale"] = String(scale);
+        if (scale !== 100) {
+          styles.push(`transform: scaleX(${getHorizontalScaleFactor(scale)})`);
+          styles.push("display: inline-block");
+        }
       }
 
       if (kerning !== undefined) {
