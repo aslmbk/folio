@@ -202,6 +202,10 @@ describe("createBilingualDocument", () => {
 
   test("projects direct and inherited full-page geometry into each column", async () => {
     const source = createEmptyDocument({ preset: createStellaStyleDocumentPreset() });
+    const bulletNumId = findStyle(source, "ListParagraph")?.pPr?.numPr?.numId;
+    if (bulletNumId === undefined) {
+      throw new Error("preset lost its bullet numbering");
+    }
     source.package.styles?.styles.push({
       styleId: "FormLine",
       type: "paragraph",
@@ -223,6 +227,18 @@ describe("createBilingualDocument", () => {
           indentFirstLine: 540,
         },
       },
+      {
+        ...paragraph("Numbered clause", undefined, { numId: bulletNumId, ilvl: 0 }),
+        formatting: {
+          indentFirstLine: -360,
+          hangingIndent: true,
+          tabs: [{ position: 360, alignment: "left" }],
+        },
+      },
+      {
+        ...paragraph("Extreme hanging clause"),
+        formatting: { indentFirstLine: -20_000, hangingIndent: true },
+      },
     ];
     const stamped = await ensureParaIds(await createDocx(source));
     const parsed = await parseDocx(stamped.docx, { preloadFonts: false });
@@ -239,6 +255,20 @@ describe("createBilingualDocument", () => {
           { position: 4153, alignment: "left" },
         ],
       });
+    }
+    for (const projected of [left.at(1), right.at(1)]) {
+      expect(projected?.formatting).toMatchObject({
+        indentLeft: 180,
+        indentFirstLine: -180,
+        hangingIndent: true,
+        tabs: [{ position: 180, alignment: "left" }],
+      });
+    }
+    for (const projected of [left.at(2), right.at(2)]) {
+      expect(projected).toBeDefined();
+      const indentLeft = projected?.formatting?.indentLeft ?? 0;
+      const indentFirstLine = projected?.formatting?.indentFirstLine ?? 0;
+      expect(indentLeft + indentFirstLine).toBe(0);
     }
     expect(getParagraphText(left.at(0)!)).toBe("Signature field");
     expect(getParagraphText(right.at(0)!)).toBe("Signature field");
