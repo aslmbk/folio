@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ParagraphBlock, Run } from "../types";
+import type { ParagraphAttrs, ParagraphBlock, Run } from "../types";
 import {
   smallCapsAwareCharWidth,
   withFakeTextMeasure,
@@ -1552,7 +1552,7 @@ describe("measureParagraph justified shrink tolerance", () => {
               indent: { left: 36, hanging: 36 },
             },
           },
-          136,
+          138.5,
         );
         const overflowingMeasure = measureParagraph(
           {
@@ -1569,7 +1569,7 @@ describe("measureParagraph justified shrink tolerance", () => {
               indent: { left: 36, hanging: 36 },
             },
           },
-          135.8,
+          138.2,
         );
 
         expect(fittingMeasure.lines).toHaveLength(2);
@@ -1578,10 +1578,248 @@ describe("measureParagraph justified shrink tolerance", () => {
       {
         charWidth: (char) => {
           if (char === "b") return 5.3;
-          if (char === " ") return 0.55;
+          if (char === " ") return 0.9;
           return 8;
         },
       },
+    );
+  });
+
+  test("allows wider bounded contraction only for the paragraph-tail token", () => {
+    const prefix = "a ".repeat(50);
+
+    withFakeTextMeasure(
+      () => {
+        const finalTokenMeasure = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-final-token-contraction",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: `${prefix}bbb` },
+            ],
+            attrs: {
+              alignment: "justify",
+              listMarker: "1.",
+              indent: { left: 36, hanging: 18 },
+            },
+          },
+          136,
+        );
+        const intermediateTokenMeasure = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-intermediate-token-contraction",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: `${prefix}bbb c` },
+            ],
+            attrs: {
+              alignment: "justify",
+              listMarker: "1.",
+              indent: { left: 36, hanging: 18 },
+            },
+          },
+          136,
+        );
+
+        expect(finalTokenMeasure.lines).toHaveLength(2);
+        expect(finalTokenMeasure.lines.at(-1)?.justificationPaint?.type).toBe("space-contraction");
+        expect(finalTokenMeasure.lines.at(-1)?.justificationPaint?.contractionPx).toBeCloseTo(2.4);
+        expect(intermediateTokenMeasure.lines).toHaveLength(3);
+        expect(intermediateTokenMeasure.lines.at(1)?.justificationPaint).toBeUndefined();
+      },
+      { charWidth: (char) => (char === "b" ? 0.8 : 1) },
+    );
+  });
+
+  test("keeps an admitted plan on the final line before an ignorable cached boundary suffix", () => {
+    const prefix = "a ".repeat(50);
+
+    withFakeTextMeasure(
+      () => {
+        const measure = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-final-token-cached-boundary",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: `${prefix}bbb` },
+              { kind: "renderedPageBreak" },
+              { kind: "text", text: "" },
+            ],
+            attrs: {
+              alignment: "justify",
+              listMarker: "1.",
+              indent: { left: 36, hanging: 18 },
+            },
+          },
+          136,
+        );
+
+        expect(measure.lines).toHaveLength(2);
+        const plannedLineIndex = measure.lines.findIndex(
+          (line) => line.justificationPaint?.type === "space-contraction",
+        );
+        expect(plannedLineIndex).toBe(measure.lines.length - 1);
+        expect(measure.lines.at(-1)?.justificationPaint?.contractionPx).toBeCloseTo(2.4);
+      },
+      { charWidth: (char) => (char === "b" ? 0.8 : 1) },
+    );
+  });
+
+  test("separates CJK hanging punctuation from admitted final-list space contraction", () => {
+    const finalText = `${"a ".repeat(50)}bb。`;
+
+    withFakeTextMeasure(
+      () => {
+        const paragraph = (overflowPunctuation: boolean): ParagraphBlock => ({
+          kind: "paragraph",
+          id: `justified-list-cjk-hanging-${String(overflowPunctuation)}`,
+          runs: [
+            { kind: "text", text: "first line" },
+            { kind: "lineBreak" },
+            { kind: "text", text: finalText, language: { eastAsia: "zh-CN" } },
+          ],
+          attrs: {
+            alignment: "justify",
+            listMarker: "1.",
+            indent: { left: 36, hanging: 18 },
+            overflowPunctuation,
+          },
+        });
+
+        const hanging = measureParagraph(paragraph(true), 136);
+        const contained = measureParagraph(paragraph(false), 136);
+
+        expect(hanging.lines).toHaveLength(2);
+        expect(hanging.lines.at(-1)?.width).toBe(103);
+        expect(hanging.lines.at(-1)?.justificationPaint).toEqual({
+          type: "space-contraction",
+          contractionPx: 2,
+        });
+        expect(contained.lines).toHaveLength(3);
+        expect(contained.lines.at(-1)?.justificationPaint).toBeUndefined();
+      },
+      { charWidth: fixedCharWidth(1) },
+    );
+  });
+
+  test("wraps an unbreakable paragraph tail beyond its sparse ASCII-space budget", () => {
+    withFakeTextMeasure(
+      () => {
+        const measure = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-sparse-final-tail",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: `${"a".repeat(96)} bbb` },
+            ],
+            attrs: {
+              alignment: "justify",
+              listMarker: "1.",
+              indent: { left: 36, hanging: 18 },
+            },
+          },
+          136,
+        );
+
+        expect(measure.lines).toHaveLength(3);
+        expect(measure.lines.at(1)?.toChar).toBe(97);
+        expect(measure.lines.at(-1)?.justificationPaint).toBeUndefined();
+      },
+      { charWidth: (char) => (char === "b" ? 1.2 : 1) },
+    );
+  });
+
+  test("does not expose a contraction paint plan when a sparse tail needs only rounding", () => {
+    withFakeTextMeasure(
+      () => {
+        const measure = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-rounded-final-tail",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: `${"a".repeat(96)} bbb` },
+            ],
+            attrs: {
+              alignment: "justify",
+              listMarker: "1.",
+              indent: { left: 36, hanging: 18 },
+            },
+          },
+          136,
+        );
+
+        expect(measure.lines).toHaveLength(2);
+        expect(measure.lines.at(-1)?.justificationPaint).toBeUndefined();
+      },
+      { charWidth: (char) => (char === "b" ? 1.1 : 1) },
+    );
+  });
+
+  test("does not expose a final-text paint plan for single-line lists or opaque final runs", () => {
+    withFakeTextMeasure(
+      () => {
+        const attrs = {
+          alignment: "justify",
+          listMarker: "1.",
+          indent: { left: 36, hanging: 18 },
+        } as const satisfies ParagraphAttrs;
+        const singleLine = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-single-line-list-no-final-budget",
+            runs: [{ kind: "text", text: "alpha beta" }],
+            attrs,
+          },
+          300,
+        );
+        const fieldTail = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-field-tail-no-final-budget",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "field", fieldType: "OTHER", fallback: "alpha beta" },
+            ],
+            attrs,
+          },
+          300,
+        );
+        const mathTail = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-list-math-tail-no-final-budget",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: "alpha beta " },
+              {
+                kind: "math",
+                display: "inline",
+                ommlXml: "<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>",
+                plainText: "x",
+              },
+            ],
+            attrs,
+          },
+          300,
+        );
+
+        expect(singleLine.lines.at(-1)?.justificationPaint).toBeUndefined();
+        expect(fieldTail.lines.at(-1)?.justificationPaint).toBeUndefined();
+        expect(mathTail.lines.at(-1)?.justificationPaint).toBeUndefined();
+      },
+      { charWidth: fixedCharWidth(1) },
     );
   });
 
@@ -1761,13 +1999,30 @@ describe("measureParagraph justified shrink tolerance", () => {
     );
   });
 
-  test("keeps inset list continuation lines on the conservative tolerance", () => {
+  test("bases inset list continuation fitting on compressible spaces", () => {
     withFakeTextMeasure(
       () => {
-        const measure = measureParagraph(
+        const spaceRichMeasure = measureParagraph(
           {
             kind: "paragraph",
-            id: "justified-inset-list-continuation",
+            id: "justified-inset-list-space-budget",
+            runs: [
+              { kind: "text", text: "first line" },
+              { kind: "lineBreak" },
+              { kind: "text", text: `${"a ".repeat(10)}${"a".repeat(60)}bbb` },
+            ],
+            attrs: {
+              alignment: "justify",
+              listMarker: "1.",
+              indent: { left: 36, hanging: 18 },
+            },
+          },
+          136,
+        );
+        const spacePoorMeasure = measureParagraph(
+          {
+            kind: "paragraph",
+            id: "justified-inset-list-small-space-budget",
             runs: [
               { kind: "text", text: "first line" },
               { kind: "lineBreak" },
@@ -1782,7 +2037,8 @@ describe("measureParagraph justified shrink tolerance", () => {
           136,
         );
 
-        expect(measure.lines).toHaveLength(3);
+        expect(spaceRichMeasure.lines).toHaveLength(2);
+        expect(spacePoorMeasure.lines).toHaveLength(3);
       },
       {
         charWidth: fractionalWidth,

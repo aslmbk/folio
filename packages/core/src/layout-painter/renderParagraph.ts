@@ -617,16 +617,28 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
   }
 }
 
-function reserveScaledAdvance(
-  element: HTMLElement,
-  unscaledWidth: number,
-  horizontalScale: number | undefined,
-): void {
+type ReserveScaledAdvanceOptions = {
+  element: HTMLElement;
+  unscaledWidth: number;
+  horizontalScale?: number;
+  visualSpaceContractionPx?: number;
+};
+
+function reserveScaledAdvance({
+  element,
+  unscaledWidth,
+  horizontalScale,
+  visualSpaceContractionPx,
+}: ReserveScaledAdvanceOptions): number {
   const horizontalScaleFactor = getHorizontalScaleFactor(horizontalScale);
-  if (horizontalScaleFactor === 1) {
-    return;
+  const visualAdvance = Math.max(
+    0,
+    unscaledWidth * horizontalScaleFactor - (visualSpaceContractionPx ?? 0),
+  );
+  if (horizontalScaleFactor !== 1) {
+    element.style.width = `${visualAdvance}px`;
   }
-  element.style.width = `${unscaledWidth * horizontalScaleFactor}px`;
+  return visualAdvance;
 }
 
 /**
@@ -644,11 +656,56 @@ function applyPmPositions(element: HTMLElement, pmStart?: number, pmEnd?: number
 /**
  * Render a text run
  */
-function renderTextRun(
-  run: TextRun,
-  doc: Document,
-  hyperlinkDirection?: typeof LEFT_TO_RIGHT_DIRECTION,
-): HTMLElement {
+type RenderTextRunOptions = {
+  hyperlinkDirection?: typeof LEFT_TO_RIGHT_DIRECTION;
+  visualSpaceContractionPx?: number;
+  ancestorHorizontalScaleFactor?: number;
+};
+
+const NON_COMPRESSIBLE_WHITESPACE_PATTERN = /([^\S ]+)/gu;
+const HAS_NON_COMPRESSIBLE_WHITESPACE_PATTERN = /[^\S ]/u;
+
+type AppendPaintedTextOptions = {
+  host: HTMLElement;
+  text: string;
+  doc: Document;
+  contractedWordSpacing?: string;
+};
+
+function appendPaintedText({
+  host,
+  text,
+  doc,
+  contractedWordSpacing,
+}: AppendPaintedTextOptions): void {
+  if (!contractedWordSpacing) {
+    host.textContent = text;
+    return;
+  }
+
+  if (!HAS_NON_COMPRESSIBLE_WHITESPACE_PATTERN.test(text)) {
+    host.textContent = text;
+    host.style.wordSpacing = countCompressibleSpaces(text) > 0 ? contractedWordSpacing : "0";
+    return;
+  }
+
+  // CSS word-spacing also reaches fixed separators in some engines. Keep the
+  // host neutral, then opt only segments containing ordinary ASCII spaces
+  // into the contraction measured for this line.
+  host.style.wordSpacing = "0";
+  for (const segment of text.split(NON_COMPRESSIBLE_WHITESPACE_PATTERN)) {
+    if (segment.length === 0) {
+      continue;
+    }
+    const segmentEl = doc.createElement("span");
+    segmentEl.textContent = segment;
+    segmentEl.style.wordSpacing =
+      countCompressibleSpaces(segment) > 0 ? contractedWordSpacing : "0";
+    host.append(segmentEl);
+  }
+}
+
+function renderTextRun(run: TextRun, doc: Document, options?: RenderTextRunOptions): HTMLElement {
   const span = doc.createElement("span");
   span.className = `${PARAGRAPH_CLASS_NAMES.run} ${PARAGRAPH_CLASS_NAMES.text}`;
 
@@ -673,6 +730,16 @@ function renderTextRun(
   applyRunStyles(span, run);
   applyPmPositions(span, run.pmStart, run.pmEnd);
   const paintedText = toPaintedText(run.text);
+  const visualSpaceContractionPx = options?.visualSpaceContractionPx;
+  const effectiveHorizontalScaleFactor =
+    getHorizontalScaleFactor(run.horizontalScale) * (options?.ancestorHorizontalScaleFactor ?? 1);
+  // CSS transforms scale word-spacing with the glyphs. Convert the visual
+  // per-space plan back into the pre-transform length so every counted space
+  // contributes exactly the contraction admitted by measurement.
+  const contractedWordSpacing =
+    visualSpaceContractionPx === undefined || effectiveHorizontalScaleFactor === 0
+      ? undefined
+      : `${-visualSpaceContractionPx / effectiveHorizontalScaleFactor}px`;
 
   const isBookmarkTarget = run.hyperlink?.href.startsWith("#") === true;
   const hyperlinkHref = resolveHyperlinkHref(run.hyperlink?.href, isBookmarkTarget);
@@ -681,7 +748,7 @@ function renderTextRun(
   if (run.hyperlink && hyperlinkHref !== undefined) {
     const anchor = doc.createElement("a");
     anchor.href = hyperlinkHref;
-    if (hyperlinkDirection || DISPLAYED_URL_PATTERN.test(paintedText.trim())) {
+    if (options?.hyperlinkDirection || DISPLAYED_URL_PATTERN.test(paintedText.trim())) {
       anchor.dir = LEFT_TO_RIGHT_DIRECTION;
     }
     // External links should open in a new tab
@@ -692,7 +759,12 @@ function renderTextRun(
     if (run.hyperlink.tooltip) {
       anchor.title = run.hyperlink.tooltip;
     }
-    anchor.textContent = paintedText;
+    appendPaintedText({
+      host: anchor,
+      text: paintedText,
+      doc,
+      ...(contractedWordSpacing !== undefined ? { contractedWordSpacing } : {}),
+    });
     // TOC entries opt out of the Hyperlink character style — Word renders
     // them in the paragraph's own colour, no underline. The bridge sets
     // `noDefaultStyle: true` and strips resolved colour/underline; here we
@@ -719,8 +791,12 @@ function renderTextRun(
     }
     span.append(anchor);
   } else {
-    // Set text content
-    span.textContent = paintedText;
+    appendPaintedText({
+      host: span,
+      text: paintedText,
+      doc,
+      ...(contractedWordSpacing !== undefined ? { contractedWordSpacing } : {}),
+    });
   }
   applyWhitespaceUnderline(span, run);
 
@@ -1214,7 +1290,16 @@ function resolveFieldText(run: FieldRun, context: RenderContext | undefined): st
   });
 }
 
-function renderFieldRun(run: FieldRun, doc: Document, context: RenderContext): HTMLElement {
+type RenderFieldRunOptions = {
+  context: RenderContext;
+  visualSpaceContractionPx?: number;
+};
+
+function renderFieldRun(
+  run: FieldRun,
+  doc: Document,
+  { context, visualSpaceContractionPx }: RenderFieldRunOptions,
+): HTMLElement {
   const text = resolveFieldText(run, context);
 
   // Spread the whole FieldRun so every RunFormatting field carries through —
@@ -1229,7 +1314,9 @@ function renderFieldRun(run: FieldRun, doc: Document, context: RenderContext): H
     text,
   };
   if (resolvedRun.forceComplexScript && hasComplexScriptFormatting(resolvedRun)) {
-    return renderTextRun(applyComplexScriptFormatting(resolvedRun, resolvedRun), doc);
+    return renderTextRun(applyComplexScriptFormatting(resolvedRun, resolvedRun), doc, {
+      ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+    });
   }
 
   // A CJK field result is generated text inside one atomic pm range, so the
@@ -1245,6 +1332,7 @@ function renderFieldRun(run: FieldRun, doc: Document, context: RenderContext): H
     // horizontalScale lives on the wrapper (inline-block so the reserved width
     // the render loop sets via reserveScaledAdvance applies, scaleX so the
     // segments scale uniformly); the segments drop it to avoid double-scaling.
+    const horizontalScaleFactor = getHorizontalScaleFactor(resolvedRun.horizontalScale);
     applyHorizontalScaleTransform(wrapper, resolvedRun.horizontalScale);
     // The pm range lives on the wrapper; segments carry none (the field is one
     // atomic unit), so drop pmStart/pmEnd (and the wrapper-applied scale) before
@@ -1263,12 +1351,19 @@ function renderFieldRun(run: FieldRun, doc: Document, context: RenderContext): H
         },
         segment.script,
       );
-      wrapper.append(renderTextRun(segmentRun, doc));
+      wrapper.append(
+        renderTextRun(segmentRun, doc, {
+          ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+          ancestorHorizontalScaleFactor: horizontalScaleFactor,
+        }),
+      );
     }
     return wrapper;
   }
 
-  return renderTextRun(resolvedRun, doc);
+  return renderTextRun(resolvedRun, doc, {
+    ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+  });
 }
 
 /**
@@ -1374,7 +1469,7 @@ function renderRun(run: Run, doc: Document, context?: RenderContext): HTMLElemen
     return renderLineBreakRun(run, doc);
   }
   if (isFieldRun(run) && context) {
-    return renderFieldRun(run, doc, context);
+    return renderFieldRun(run, doc, { context });
   }
   if (isMathRun(run)) {
     return renderMathRun(run, doc);
@@ -1697,12 +1792,35 @@ function countShrinkableSpaces(runs: Run[], context: RenderContext | undefined):
   let count = 0;
   for (const run of runs) {
     if (isTextRun(run)) {
+      if (getHorizontalScaleFactor(run.horizontalScale) === 0) {
+        continue;
+      }
       count += countCompressibleSpaces(run.text ?? "");
     } else if (isFieldRun(run)) {
+      if (getHorizontalScaleFactor(run.horizontalScale) === 0) {
+        continue;
+      }
       count += countCompressibleSpaces(resolveFieldText(run, context));
     }
   }
   return count;
+}
+
+type RunVisualSpaceContractionOptions = {
+  text: string;
+  horizontalScale?: number;
+  visualSpaceContractionPx?: number;
+};
+
+function runVisualSpaceContraction({
+  text,
+  horizontalScale,
+  visualSpaceContractionPx,
+}: RunVisualSpaceContractionOptions): number {
+  if (visualSpaceContractionPx === undefined || getHorizontalScaleFactor(horizontalScale) === 0) {
+    return 0;
+  }
+  return countCompressibleSpaces(text) * visualSpaceContractionPx;
 }
 
 /**
@@ -2111,12 +2229,16 @@ export function renderLine(
     }
     return withCursiveJoiners(runEl, run, cursiveJoinerPlan, applyJoinerRunStyles, doc);
   };
+  let visualSpaceContractionPx: number | undefined;
   const renderLineTextRun = (run: TextRun): HTMLElement => {
     const hyperlinkDirection =
       run.hyperlink && options?.leftToRightDisplayedUrlHyperlinks?.has(run.hyperlink)
         ? LEFT_TO_RIGHT_DIRECTION
         : undefined;
-    const runEl = renderTextRun(run, doc, hyperlinkDirection);
+    const runEl = renderTextRun(run, doc, {
+      ...(hyperlinkDirection !== undefined ? { hyperlinkDirection } : {}),
+      ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+    });
     if (collapsedLeadingSpaceRuns.has(run)) {
       runEl.dataset["collapsedLeadingSpaces"] = "true";
     }
@@ -2240,41 +2362,58 @@ export function renderLine(
   const isJustify = alignment === "justify";
 
   if (isJustify && options) {
-    // Justify all lines except the last line (unless it ends with line break)
+    const firstLineIndentPx = options.isFirstLine ? (options.firstLineIndentPx ?? 0) : 0;
+    const firstLinePositiveIndentPx = Math.max(0, firstLineIndentPx);
+    const firstLineHangingPx = Math.max(0, -firstLineIndentPx);
+    const hasVisibleListMarker =
+      options.isFirstLine && block.attrs?.listMarker && !block.attrs.listMarkerHidden;
+    // A list marker consumes the hanging slot inline. When the marker starts
+    // before the content edge, its negative margin cancels the part of that
+    // slot outside the paragraph; only the portion between the content edge
+    // and the body start can expand the line box. Letting the full hanging
+    // value expand a zero-left list pushed justified text past the right
+    // margin by exactly one hanging slot.
+    const firstLineHangingExpansionPx = hasVisibleListMarker
+      ? Math.min(firstLineHangingPx, Math.max(0, options.leftIndentPx ?? 0))
+      : firstLineHangingPx;
+    // Keep the explicit word-spacing budget identical to the measurer's
+    // first-line width. The line box itself stays at the full paragraph
+    // width because CSS text-indent consumes the positive first-line region.
+    // Counting that region again here lets tab-bearing justified lines
+    // distribute it as extra word spacing, shifting their right edge past
+    // the paragraph margin by exactly the first-line indent.
+    const justifyCapacityPx =
+      options.availableWidth - firstLinePositiveIndentPx + firstLineHangingExpansionPx;
+    const overfullPx = line.width - justifyCapacityPx;
+    const shrinkableSpaces = countShrinkableSpaces(
+      runsForLine.filter((run) => !isTextRun(run) || !isCollapsedLineEdgeSpaceRun(run)),
+      options.context,
+    );
+    // Underfull final lines remain ragged. A measured final-line paint plan
+    // contracts ordinary spaces only; any separately admitted hanging glyph
+    // remains outside the content edge.
     const shouldJustify = !options.isLastLine || options.paragraphEndsWithLineBreak;
+    const finalContractionPx =
+      line.justificationPaint?.type === "space-contraction"
+        ? line.justificationPaint.contractionPx
+        : undefined;
+    const shouldCompressFinalLine =
+      options.isLastLine &&
+      finalContractionPx !== undefined &&
+      finalContractionPx > RIGHT_EDGE_EPSILON_PX &&
+      overfullPx > RIGHT_EDGE_EPSILON_PX &&
+      shrinkableSpaces > 0;
 
-    if (shouldJustify) {
-      const firstLineIndentPx = options.isFirstLine ? (options.firstLineIndentPx ?? 0) : 0;
-      const firstLinePositiveIndentPx = Math.max(0, firstLineIndentPx);
-      const firstLineHangingPx = Math.max(0, -firstLineIndentPx);
-      const hasVisibleListMarker =
-        options.isFirstLine && block.attrs?.listMarker && !block.attrs.listMarkerHidden;
-      // A list marker consumes the hanging slot inline. When the marker starts
-      // before the content edge, its negative margin cancels the part of that
-      // slot outside the paragraph; only the portion between the content edge
-      // and the body start can expand the line box. Letting the full hanging
-      // value expand a zero-left list pushed justified text past the right
-      // margin by exactly one hanging slot.
-      const firstLineHangingExpansionPx = hasVisibleListMarker
-        ? Math.min(firstLineHangingPx, Math.max(0, options.leftIndentPx ?? 0))
-        : firstLineHangingPx;
-      // Keep the explicit word-spacing budget identical to the measurer's
-      // first-line width. The line box itself stays at the full paragraph
-      // width because CSS text-indent consumes the positive first-line region.
-      // Counting that region again here lets tab-bearing justified lines
-      // distribute it as extra word spacing, shifting their right edge past
-      // the paragraph margin by exactly the first-line indent.
-      const justifyCapacityPx =
-        options.availableWidth - firstLinePositiveIndentPx + firstLineHangingExpansionPx;
-      const overfullPx = line.width - justifyCapacityPx;
-      const shrinkableSpaces = countShrinkableSpaces(
-        runsForLine.filter((run) => !isTextRun(run) || !isCollapsedLineEdgeSpaceRun(run)),
-        options.context,
-      );
-      if (overfullPx > RIGHT_EDGE_EPSILON_PX && shrinkableSpaces > 0) {
+    if (shouldJustify || shouldCompressFinalLine) {
+      const contractionPx = shouldCompressFinalLine ? finalContractionPx : overfullPx;
+      if (contractionPx > RIGHT_EDGE_EPSILON_PX && shrinkableSpaces > 0) {
         lineEl.style.textAlign = "left";
         lineEl.style.textAlignLast = "auto";
-        lineEl.style.wordSpacing = `${-overfullPx / shrinkableSpaces}px`;
+        visualSpaceContractionPx = contractionPx / shrinkableSpaces;
+        // Keep non-text hosts (MathML, images, tabs) neutral. Text and field
+        // segments opt into this contraction only where they contain counted
+        // ASCII spaces.
+        lineEl.style.wordSpacing = "0";
       } else if (hasTabRuns && shrinkableSpaces > 0 && -overfullPx > RIGHT_EDGE_EPSILON_PX) {
         // CSS justification does not expand preserved spaces reliably when a
         // line also contains an inline tab span. The layout engine has already
@@ -2481,7 +2620,12 @@ export function renderLine(
           if (isTextRun(next)) {
             lineEl.append(...withJoiners(renderLineTextRun(next), next));
           } else if (isFieldRun(next) && options?.context) {
-            lineEl.append(renderFieldRun(next, doc, options.context));
+            lineEl.append(
+              renderFieldRun(next, doc, {
+                context: options.context,
+                ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+              }),
+            );
           } else if (isImageRun(next)) {
             // Floating images render in dedicated layers — skip here so we
             // don't double-render. Inline images render via getInlineImageRunKey
@@ -2561,8 +2705,17 @@ export function renderLine(
         fontFamily,
         runMeasureStyle(run),
       );
-      reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
-      currentX += measuredWidth * getHorizontalScaleFactor(run.horizontalScale);
+      const runContractionPx = runVisualSpaceContraction({
+        text: run.text,
+        ...(run.horizontalScale !== undefined ? { horizontalScale: run.horizontalScale } : {}),
+        ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+      });
+      currentX += reserveScaledAdvance({
+        element: runEl,
+        unscaledWidth: measuredWidth,
+        ...(run.horizontalScale !== undefined ? { horizontalScale: run.horizontalScale } : {}),
+        ...(runContractionPx > 0 ? { visualSpaceContractionPx: runContractionPx } : {}),
+      });
     } else if (isImageRun(run)) {
       // Skip floating images - they're rendered separately at page level.
       // Exception: inside table cells, floating images must render in-flow
@@ -2591,7 +2744,10 @@ export function renderLine(
       lineEl.append(runEl);
     } else if (isFieldRun(run) && options?.context) {
       // Render field run with context for PAGE/NUMPAGES substitution
-      const runEl = renderFieldRun(run, doc, options.context);
+      const runEl = renderFieldRun(run, doc, {
+        context: options.context,
+        ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+      });
       lineEl.append(runEl);
       if (!measureText) {
         continue;
@@ -2607,8 +2763,17 @@ export function renderLine(
         fontFamily,
         runMeasureStyle(run),
       );
-      reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
-      currentX += measuredWidth * getHorizontalScaleFactor(run.horizontalScale);
+      const runContractionPx = runVisualSpaceContraction({
+        text: fieldText,
+        ...(run.horizontalScale !== undefined ? { horizontalScale: run.horizontalScale } : {}),
+        ...(visualSpaceContractionPx !== undefined ? { visualSpaceContractionPx } : {}),
+      });
+      currentX += reserveScaledAdvance({
+        element: runEl,
+        unscaledWidth: measuredWidth,
+        ...(run.horizontalScale !== undefined ? { horizontalScale: run.horizontalScale } : {}),
+        ...(runContractionPx > 0 ? { visualSpaceContractionPx: runContractionPx } : {}),
+      });
     } else if (isMathRun(run)) {
       const runEl = renderMathRun(run, doc);
       lineEl.append(runEl);
@@ -2621,8 +2786,11 @@ export function renderLine(
         run.fontFamily ?? "Cambria Math",
         runMeasureStyle(run),
       );
-      reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
-      currentX += measuredWidth * getHorizontalScaleFactor(run.horizontalScale);
+      currentX += reserveScaledAdvance({
+        element: runEl,
+        unscaledWidth: measuredWidth,
+        ...(run.horizontalScale !== undefined ? { horizontalScale: run.horizontalScale } : {}),
+      });
     } else {
       // Fallback for unknown run types
       const runEl = renderRun(run, doc, options?.context);

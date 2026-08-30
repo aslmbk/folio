@@ -41,6 +41,7 @@ class FakeElement {
   className = "";
   dataset: Record<string, string> = {};
   innerHTML = "";
+  textContent = "";
   dir = "";
   style: Record<string, string> = createFakeStyle();
   children: FakeElement[] = [];
@@ -81,6 +82,18 @@ const fakeDocument = {
     return new FakeElement(tagName);
   },
 } as unknown as Document;
+
+function paintedVisualSpaceContraction(element: FakeElement, ancestorScale = 1): number {
+  const transformScale = /^scaleX\(([^)]+)\)$/u.exec(element.style.transform ?? "")?.at(1);
+  const effectiveScale = ancestorScale * (transformScale ? Number(transformScale) : 1);
+  const wordSpacing = Number.parseFloat(element.style.wordSpacing ?? "0");
+  const asciiSpaces = [...element.textContent].filter((character) => character === " ").length;
+  let contraction = -wordSpacing * asciiSpaces * effectiveScale;
+  for (const child of element.children) {
+    contraction += paintedVisualSpaceContraction(child, effectiveScale);
+  }
+  return contraction;
+}
 
 function renderJustifiedFirstLine(firstLine: number): {
   firstLineEl: HTMLElement;
@@ -185,7 +198,364 @@ describe("Issue #868 — justify first line to full content width on indented pa
     expect(lineEl.style.width).toBe("100px");
     expect(lineEl.style.textAlign).toBe("left");
     expect(lineEl.style.textAlignLast).toBe("auto");
-    expect(lineEl.style.wordSpacing).toBe("-5px");
+    expect(lineEl.style.wordSpacing).toBe("0");
+    expect((lineEl as unknown as FakeElement).children.at(0)?.style.wordSpacing).toBe("-5px");
+  });
+
+  test("compresses an overfull final justified line without expanding an underfull one", () => {
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-contraction",
+      runs: [{ kind: "text", text: "alpha beta gamma" }],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line = (width: number, admission: "admitted" | "unadmitted"): MeasuredLine => {
+      const measuredLine = {
+        fromRun: 0,
+        fromChar: 0,
+        toRun: 0,
+        toChar: 16,
+        width,
+        ascent: 10,
+        descent: 3,
+        lineHeight: 14,
+      } satisfies MeasuredLine;
+      if (admission === "unadmitted") {
+        return measuredLine;
+      }
+      return {
+        ...measuredLine,
+        justificationPaint: { type: "space-contraction", contractionPx: 2 },
+      };
+    };
+    const options = {
+      availableWidth: 100,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    };
+
+    const overfull = renderLine(block, line(102, "admitted"), "justify", fakeDocument, options);
+    const unadmitted = renderLine(block, line(103, "unadmitted"), "justify", fakeDocument, options);
+    const underfull = renderLine(block, line(90, "admitted"), "justify", fakeDocument, options);
+
+    expect(overfull.style.width).toBe("100px");
+    expect(overfull.style.wordSpacing).toBe("0");
+    expect((overfull as unknown as FakeElement).children.at(0)?.style.wordSpacing).toBe("-1px");
+    expect(unadmitted.style.width).toBeUndefined();
+    expect(unadmitted.style.wordSpacing).toBeUndefined();
+    expect(underfull.style.width).toBeUndefined();
+    expect(underfull.style.wordSpacing).toBeUndefined();
+  });
+
+  test("contracts only measured ASCII spaces when the final line also contains NBSP", () => {
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-fixed-space",
+      runs: [{ kind: "text", text: "alpha beta\u00a0gamma" }],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 0,
+      toChar: 16,
+      width: 102,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 2 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 100,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    });
+
+    expect(lineEl.style.wordSpacing).toBe("0");
+    const paintedRun = (lineEl as unknown as FakeElement).children.at(0);
+    expect(paintedRun?.children.at(0)?.style.wordSpacing).toBe("-2px");
+    expect(paintedRun?.children.at(1)?.textContent).toBe("\u00a0");
+    expect(paintedRun?.children.at(1)?.style.wordSpacing).toBe("0");
+  });
+
+  test("contracts beside hanging CJK punctuation without pulling the hanging glyph inward", () => {
+    const text = `${"a ".repeat(50)}bb。`;
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-cjk-hanging",
+      runs: [{ kind: "text", text, language: { eastAsia: "zh-CN" } }],
+      attrs: { alignment: "justify", listMarker: "1.", overflowPunctuation: true },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 0,
+      toChar: text.length,
+      width: 103,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 2 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 100,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    });
+
+    expect(lineEl.style.wordSpacing).toBe("0");
+    expect((lineEl as unknown as FakeElement).children.at(0)?.style.wordSpacing).toBe("-0.04px");
+  });
+
+  test("compensates final-list space contraction inside 50% scaled text", () => {
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-half-scale",
+      runs: [{ kind: "text", text: "alpha beta gamma", horizontalScale: 50 }],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 0,
+      toChar: 16,
+      width: 204,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 4 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 200,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    }) as unknown as FakeElement;
+
+    expect(lineEl.children.at(0)?.style.wordSpacing).toBe("-4px");
+    expect(paintedVisualSpaceContraction(lineEl)).toBeCloseTo(4);
+  });
+
+  test("compensates final-list space contraction through a 150% scaled field wrapper", () => {
+    const fieldText = "甲 alpha beta";
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-field-one-half-scale",
+      runs: [
+        {
+          kind: "field",
+          fieldType: "OTHER",
+          instruction: "REF target",
+          fallback: fieldText,
+          pmStart: 1,
+          horizontalScale: 150,
+          eastAsiaFontFamily: "Noto Sans CJK SC",
+        },
+      ],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 0,
+      toChar: 1,
+      width: 204,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 4 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 200,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+      context: {
+        pageNumber: 1,
+        totalPages: 1,
+        section: "body",
+        bookmarkText: new Map([["target", fieldText]]),
+      },
+    }) as unknown as FakeElement;
+    const fieldWrapper = lineEl.children.at(0);
+    const latinSegment = fieldWrapper?.children.at(1);
+
+    expect(fieldWrapper?.style.transform).toBe("scaleX(1.5)");
+    expect(fieldWrapper?.style.width).toBe("122px");
+    expect(latinSegment?.style.wordSpacing).toBe("-1.3333333333333333px");
+    expect(paintedVisualSpaceContraction(lineEl)).toBeCloseTo(4);
+  });
+
+  test("allocates mixed-scale final-list contraction in visual coordinates", () => {
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-mixed-scale",
+      runs: [
+        { kind: "text", text: "a b", horizontalScale: 50 },
+        { kind: "text", text: "c d", horizontalScale: 150 },
+        { kind: "text", text: "e f" },
+      ],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 2,
+      toChar: 3,
+      width: 306,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 6 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 300,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    }) as unknown as FakeElement;
+
+    expect(lineEl.children.map((child) => child.style.wordSpacing)).toEqual([
+      "-4px",
+      "-1.3333333333333333px",
+      "-2px",
+    ]);
+    expect(lineEl.children.map((child) => child.style.width)).toEqual([
+      "8.5px",
+      "29.5px",
+      undefined,
+    ]);
+    expect(paintedVisualSpaceContraction(lineEl)).toBeCloseTo(6);
+  });
+
+  test("uses contracted scaled-run advance when resolving a following tab", () => {
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-scaled-tab-advance",
+      runs: [
+        { kind: "text", text: "a b", horizontalScale: 50 },
+        { kind: "tab" },
+        { kind: "text", text: "c d" },
+      ],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 2,
+      toChar: 3,
+      width: 104,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 4 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 100,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    }) as unknown as FakeElement;
+    const scaledRun = lineEl.children.at(0);
+    const tab = lineEl.children.find((child) => child.className.includes("layout-run-tab"));
+
+    expect(scaledRun?.style.width).toBe("8.5px");
+    expect(tab?.style.width).toBe("39.5px");
+  });
+
+  test("excludes zero-scale spaces from final-list contraction", () => {
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-zero-scale",
+      runs: [
+        { kind: "text", text: "a b", horizontalScale: 0 },
+        { kind: "text", text: "c d" },
+        {
+          kind: "field",
+          fieldType: "OTHER",
+          fallback: "甲 e f",
+          eastAsiaFontFamily: "Noto Sans CJK SC",
+          horizontalScale: 0,
+        },
+      ],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 2,
+      toChar: 1,
+      width: 204,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 4 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 200,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+      context: { pageNumber: 1, totalPages: 1, section: "body" },
+    }) as unknown as FakeElement;
+
+    expect(lineEl.children.at(0)?.style.transform).toBe("scaleX(0)");
+    expect(lineEl.children.at(0)?.style.wordSpacing).toBeUndefined();
+    expect(lineEl.children.at(1)?.style.wordSpacing).toBe("-4px");
+    expect(lineEl.children.at(2)?.style.transform).toBe("scaleX(0)");
+    expect(paintedVisualSpaceContraction(lineEl)).toBeCloseTo(4);
+  });
+
+  test("keeps MathML whitespace neutral while final text opts into contraction", () => {
+    const finalText = " alpha beta";
+    const block: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p-final-line-math-neutral-spacing",
+      runs: [
+        {
+          kind: "math",
+          display: "inline",
+          ommlXml:
+            '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>m n\u00a0o\u2003p</m:t></m:r></m:oMath>',
+          plainText: "m n\u00a0o\u2003p",
+        },
+        { kind: "text", text: finalText },
+      ],
+      attrs: { alignment: "justify", listMarker: "1." },
+    };
+    const line: MeasuredLine = {
+      fromRun: 0,
+      fromChar: 0,
+      toRun: 1,
+      toChar: finalText.length,
+      width: 102,
+      ascent: 10,
+      descent: 3,
+      lineHeight: 14,
+      justificationPaint: { type: "space-contraction", contractionPx: 2 },
+    };
+
+    const lineEl = renderLine(block, line, "justify", fakeDocument, {
+      availableWidth: 100,
+      isLastLine: true,
+      isFirstLine: false,
+      paragraphEndsWithLineBreak: false,
+    });
+    const children = (lineEl as unknown as FakeElement).children;
+
+    expect(lineEl.style.wordSpacing).toBe("0");
+    expect(children.at(0)?.style.wordSpacing).not.toBe("-1px");
+    expect(children.at(1)?.style.wordSpacing).toBe("-1px");
   });
 
   test("counts resolved field text when compressing an overfull line", () => {
@@ -227,7 +597,8 @@ describe("Issue #868 — justify first line to full content width on indented pa
       },
     });
 
-    expect(lineEl.style.wordSpacing).toBe("-5px");
+    expect(lineEl.style.wordSpacing).toBe("0");
+    expect((lineEl as unknown as FakeElement).children.at(0)?.style.wordSpacing).toBe("-5px");
   });
 
   test("does not treat native math spaces as compressible line spaces", () => {

@@ -486,6 +486,10 @@ export type MeasuredLine = {
     ascent: number;
     descent: number;
     lineHeight: number;
+    justificationPaint?: {
+        type: "space-contraction";
+        contractionPx: number;
+    };
     leftOffset?: number;
     rightOffset?: number;
     floatSkipBefore?: number;

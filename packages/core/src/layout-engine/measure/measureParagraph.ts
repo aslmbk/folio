@@ -17,6 +17,11 @@ import { isRtlParagraph } from "../../utils/paragraphBaseDirection";
 import { hasCjk, hasComplexScript } from "../../utils/scriptSegments";
 import { getHorizontalScaleFactor } from "../../utils/horizontalScale";
 import { measuredLineAdvance } from "../lineFlow";
+import {
+  JUSTIFIED_LIST_FINAL_LINE_MAX_SHRINK_RATIO,
+  JUSTIFIED_LIST_SPACE_CONTRACTION_RATIO,
+  supportsJustifiedListFinalLineContraction,
+} from "../justifiedLineFit";
 import type {
   ParagraphBlock,
   ParagraphMeasure,
@@ -77,10 +82,6 @@ const JUSTIFY_SHRINK_TOLERANCE_RATIO = 0.016;
 const JUSTIFY_SPACE_CONTRACTION_RATIO = 0.075;
 const JUSTIFY_LIST_MARKER_SPACE_CONTRACTION_RATIO = 0.195;
 const JUSTIFY_DEEP_HANGING_LIST_MARKER_SHRINK_TOLERANCE_RATIO = 0.022;
-// Full-hanging continuations allow stronger space contraction with bounded total shrink.
-const JUSTIFY_LIST_CONTINUATION_SPACE_CONTRACTION_RATIO = 0.32;
-const JUSTIFY_LIST_CONTINUATION_MAX_SHRINK_TOLERANCE_RATIO = 0.015;
-const JUSTIFY_INSET_LIST_SHRINK_TOLERANCE_RATIO = 0.015;
 const JUSTIFY_LITERAL_TAB_CONTINUATION_SHRINK_TOLERANCE_RATIO = 0.017;
 const JUSTIFY_HANGING_TAB_SHRINK_TOLERANCE_RATIO = 0.021;
 const DEFAULT_LIST_HANGING_INDENT_PX = 24;
@@ -150,6 +151,8 @@ type LineState = {
   trailingWhitespaceWidth: number;
   /** Spaces the layout may compress while justifying this line. */
   regularSpaceWidth: number;
+  /** Paint plan set only when final-text contraction admits a candidate. */
+  justificationPaint?: NonNullable<MeasuredLine["justificationPaint"]>;
   maxFontSize: number;
   maxFontMetrics: FontMetrics | null;
   /** Maximum inline image height in pixels (already in px, not points) */
@@ -674,14 +677,10 @@ function resolveJustifyFitStrategy(
             ratio: JUSTIFY_DEEP_HANGING_LIST_MARKER_SHRINK_TOLERANCE_RATIO,
           };
     }
-    const left = block.attrs.indent?.left ?? 0;
-    if (hanging > 0 && left > hanging) {
-      return { type: "width", ratio: JUSTIFY_INSET_LIST_SHRINK_TOLERANCE_RATIO };
-    }
     return {
       type: "space",
-      ratio: JUSTIFY_LIST_CONTINUATION_SPACE_CONTRACTION_RATIO,
-      maxWidthRatio: JUSTIFY_LIST_CONTINUATION_MAX_SHRINK_TOLERANCE_RATIO,
+      ratio: JUSTIFIED_LIST_SPACE_CONTRACTION_RATIO,
+      maxWidthRatio: JUSTIFY_SHRINK_TOLERANCE_RATIO,
     };
   }
 
@@ -705,6 +704,118 @@ function resolveJustifyFitStrategy(
     return { type: "width", ratio: JUSTIFY_SHRINK_TOLERANCE_RATIO };
   }
   return { type: "space", ratio: JUSTIFY_SPACE_CONTRACTION_RATIO };
+}
+
+function resolveFinalLineJustifyFitStrategy(
+  block: ParagraphBlock,
+  profile: JustificationProfile,
+): JustifyFitStrategy {
+  if (supportsJustifiedListFinalLineContraction(block)) {
+    return {
+      type: "space",
+      ratio: JUSTIFIED_LIST_SPACE_CONTRACTION_RATIO,
+      maxWidthRatio: JUSTIFIED_LIST_FINAL_LINE_MAX_SHRINK_RATIO,
+    };
+  }
+  return resolveJustifyFitStrategy(block, false, profile);
+}
+
+type ResolveCandidateJustifyFitStrategyOptions = {
+  isFirstLine: boolean;
+  isFinalCandidate: boolean;
+  firstLineStrategy: JustifyFitStrategy;
+  continuationStrategy: JustifyFitStrategy;
+  finalLineStrategy: JustifyFitStrategy;
+};
+
+function resolveCandidateJustifyFitStrategy({
+  isFirstLine,
+  isFinalCandidate,
+  firstLineStrategy,
+  continuationStrategy,
+  finalLineStrategy,
+}: ResolveCandidateJustifyFitStrategyOptions): JustifyFitStrategy {
+  if (isFirstLine) {
+    return firstLineStrategy;
+  }
+  if (isFinalCandidate) {
+    return finalLineStrategy;
+  }
+  return continuationStrategy;
+}
+
+const isIgnorableFinalTailRun = (run: Run): boolean =>
+  run.kind === "renderedPageBreak" || (isTextRun(run) && run.text.length === 0);
+
+function isFinalTextCandidate(block: ParagraphBlock, runIndex: number, nextBreak: number): boolean {
+  const currentRun = block.runs[runIndex];
+  if (!currentRun || !isTextRun(currentRun) || nextBreak !== currentRun.text.length) {
+    return false;
+  }
+  for (let index = runIndex + 1; index < block.runs.length; index += 1) {
+    const run = block.runs[index];
+    if (run && isIgnorableFinalTailRun(run)) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+type TextCandidateFit =
+  | { type: "ordinary"; tolerancePx: number }
+  | { type: "final-contraction-rejected"; tolerancePx: number }
+  | {
+      type: "final-contraction-admitted";
+      tolerancePx: number;
+      paint: NonNullable<MeasuredLine["justificationPaint"]>;
+    };
+
+type ResolveTextCandidateFitOptions = {
+  block: ParagraphBlock;
+  line: LineState;
+  isFirstLine: boolean;
+  isFinalCandidate: boolean;
+  candidateWidth: number;
+  candidateSpaceWidth: number;
+  fallbackTolerancePx: number;
+  continuationStrategy: JustifyFitStrategy;
+  finalStrategy: JustifyFitStrategy;
+};
+
+function resolveTextCandidateFit({
+  block,
+  line,
+  isFirstLine,
+  isFinalCandidate,
+  candidateWidth,
+  candidateSpaceWidth,
+  fallbackTolerancePx,
+  continuationStrategy,
+  finalStrategy,
+}: ResolveTextCandidateFitOptions): TextCandidateFit {
+  if (isFirstLine || !isFinalCandidate || !supportsJustifiedListFinalLineContraction(block)) {
+    return { type: "ordinary", tolerancePx: fallbackTolerancePx };
+  }
+
+  const ordinaryTolerancePx = justifyFitTolerance(line, continuationStrategy, candidateSpaceWidth);
+  if (candidateWidth <= line.availableWidth + ordinaryTolerancePx) {
+    return { type: "ordinary", tolerancePx: ordinaryTolerancePx };
+  }
+
+  const finalTolerancePx = justifyFitTolerance(line, finalStrategy, candidateSpaceWidth);
+  if (candidateWidth > line.availableWidth + finalTolerancePx) {
+    return { type: "final-contraction-rejected", tolerancePx: finalTolerancePx };
+  }
+
+  return {
+    type: "final-contraction-admitted",
+    tolerancePx: finalTolerancePx,
+    paint: {
+      type: "space-contraction",
+      contractionPx: candidateWidth - line.availableWidth,
+    },
+  };
 }
 
 function compressibleSpaceWidth(text: string, style: FontStyle): number {
@@ -1163,6 +1274,10 @@ export function measureParagraph(
     false,
     justificationProfile,
   );
+  const finalLineJustifyFitStrategy = resolveFinalLineJustifyFitStrategy(
+    block,
+    justificationProfile,
+  );
 
   // Floating image support
   const floatingZones = options?.floatingZones;
@@ -1468,6 +1583,9 @@ export function measureParagraph(
       toChar: currentLine.toChar,
       width: Math.max(0, currentLine.width - currentLine.trailingWhitespaceWidth),
       ...finalTypography,
+      ...(currentLine.justificationPaint !== undefined
+        ? { justificationPaint: currentLine.justificationPaint }
+        : {}),
       ...(currentLine.discretionaryHyphen
         ? { discretionaryHyphen: currentLine.discretionaryHyphen }
         : {}),
@@ -1580,7 +1698,7 @@ export function measureParagraph(
     if (run.kind === "renderedPageBreak") {
       const hasFollowingContent = runs
         .slice(runIndex + 1)
-        .some((followingRun) => followingRun.kind !== "renderedPageBreak");
+        .some((followingRun) => !isIgnorableFinalTailRun(followingRun));
       if (!hasFollowingContent) {
         currentLine.toRun = runIndex;
         currentLine.toChar = 0;
@@ -1931,12 +2049,15 @@ export function measureParagraph(
         );
         const isFirstLine = lines.length === 0;
         const regularSpaceWidth = compressibleSpaceWidth(measuredWord, style);
+        const justifyFitStrategy = resolveCandidateJustifyFitStrategy({
+          isFirstLine,
+          isFinalCandidate: isFinalTextCandidate(block, runIndex, nextBreak),
+          firstLineStrategy: firstLineJustifyFitStrategy,
+          continuationStrategy: continuationJustifyFitStrategy,
+          finalLineStrategy: finalLineJustifyFitStrategy,
+        });
         const widthTolerance = isJustifiedParagraph
-          ? justifyFitTolerance(
-              currentLine,
-              isFirstLine ? firstLineJustifyFitStrategy : continuationJustifyFitStrategy,
-              regularSpaceWidth,
-            )
+          ? justifyFitTolerance(currentLine, justifyFitStrategy, regularSpaceWidth)
           : WIDTH_TOLERANCE;
 
         const automaticHyphenation = effectiveLineBreakPolicy.automaticHyphenation;
@@ -2125,6 +2246,20 @@ export function measureParagraph(
             ? rawGlueWidth
             : 0;
         const hangingAllowance = glueWidth === 0 ? hangingPunctuationWidth : 0;
+        const candidateFit = isJustifiedParagraph
+          ? resolveTextCandidateFit({
+              block,
+              line: currentLine,
+              isFirstLine,
+              isFinalCandidate: isFinalTextCandidate(block, runIndex, nextBreak),
+              candidateWidth: currentLine.width + wordWidth + glueWidth - hangingAllowance,
+              candidateSpaceWidth: regularSpaceWidth,
+              fallbackTolerancePx: widthTolerance,
+              continuationStrategy: continuationJustifyFitStrategy,
+              finalStrategy: finalLineJustifyFitStrategy,
+            })
+          : undefined;
+        const finalWrapTolerance = candidateFit?.tolerancePx ?? widthTolerance;
         // Let collapsible whitespace remain at the previous line's tail until
         // visible content decides whether to wrap. Starting a line from an
         // overflowed space creates whitespace-only soft-wrap lines.
@@ -2132,12 +2267,16 @@ export function measureParagraph(
           wordWidth > 0 &&
           currentLine.width > 0 &&
           currentLine.width + wordWidth + glueWidth >
-            currentLine.availableWidth + widthTolerance + hangingAllowance
+            currentLine.availableWidth + finalWrapTolerance + hangingAllowance
         ) {
           // Word doesn't fit, start new line
           startNewLine(runIndex, charIndex);
           // Re-apply font metrics to the new line (startNewLine resets maxFontSize)
           updateMaxFont(lineHeightStyle);
+        }
+
+        if (candidateFit?.type === "final-contraction-admitted") {
+          currentLine.justificationPaint = candidateFit.paint;
         }
 
         // Add word to current line
