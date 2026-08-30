@@ -28,7 +28,13 @@
  * Ported from eigenpal/docx-editor `vmlImageParser.ts`.
  */
 
-import type { DrawingContent, Image, MediaFile, RelationshipMap } from "../types/document";
+import type {
+  DrawingContent,
+  Image,
+  ImagePosition,
+  MediaFile,
+  RelationshipMap,
+} from "../types/document";
 import { sanitizeImageSrc } from "../utils/sanitizeImageSrc";
 import { pixelsToEmu } from "../utils/units";
 import { resolveImageData } from "./imageParser";
@@ -67,6 +73,10 @@ const SAFE_VML_COLORS = new Set([
   "teal",
   "aqua",
 ]);
+const VML_POSITION_ABSOLUTE = "absolute";
+const IMAGE_WRAP_INLINE = "inline";
+const IMAGE_WRAP_BEHIND = "behind";
+const IMAGE_WRAP_IN_FRONT = "inFront";
 
 /**
  * Convert a CSS length (pt/in/px/cm/mm/pc, default px) to pixels. Units are
@@ -86,7 +96,7 @@ function cssLengthToPx(raw: string | undefined): number | undefined {
     return undefined;
   }
   const value = Number.parseFloat(amountText);
-  if (Number.isNaN(value)) {
+  if (!Number.isFinite(value)) {
     return undefined;
   }
   switch (match?.groups?.["unit"]?.toLowerCase()) {
@@ -170,6 +180,86 @@ const safeColor = (raw: string | null, fallback: string): string => {
 const validPreviewDimension = (value: number | undefined): value is number =>
   value !== undefined && value > 0 && value <= MAX_VML_PREVIEW_DIMENSION_PX;
 
+const pixelsToSafeEmu = (pixels: number): number | undefined => {
+  const emu = pixelsToEmu(pixels);
+  return Number.isSafeInteger(emu) ? emu : undefined;
+};
+
+const horizontalRelativeTo = (
+  value: string | undefined,
+): ImagePosition["horizontal"]["relativeTo"] => {
+  switch (value?.toLowerCase()) {
+    case "char":
+      return "character";
+    case "text":
+      return "column";
+    case "margin":
+      return "margin";
+    case "page":
+      return "page";
+    case "left-margin-area":
+      return "leftMargin";
+    case "right-margin-area":
+      return "rightMargin";
+    case "inner-margin-area":
+      return "insideMargin";
+    case "outer-margin-area":
+      return "outsideMargin";
+    default:
+      return "character";
+  }
+};
+
+const verticalRelativeTo = (value: string | undefined): ImagePosition["vertical"]["relativeTo"] => {
+  switch (value?.toLowerCase()) {
+    case "line":
+      return "line";
+    case "text":
+      return "paragraph";
+    case "margin":
+      return "margin";
+    case "page":
+      return "page";
+    case "top-margin-area":
+      return "topMargin";
+    case "bottom-margin-area":
+      return "bottomMargin";
+    case "inner-margin-area":
+      return "insideMargin";
+    case "outer-margin-area":
+      return "outsideMargin";
+    default:
+      return "paragraph";
+  }
+};
+
+const vmlImageLayout = (
+  style: Record<string, string>,
+): Pick<Image, "wrap"> & { position?: ImagePosition } => {
+  if (style["position"]?.toLowerCase() !== VML_POSITION_ABSOLUTE) {
+    return { wrap: { type: IMAGE_WRAP_INLINE } };
+  }
+
+  const leftPx = cssLengthToPx(style["margin-left"] ?? style["left"]) ?? 0;
+  const topPx = cssLengthToPx(style["margin-top"] ?? style["top"]) ?? 0;
+  const zIndex = finiteNumber(style["z-index"]);
+  return {
+    wrap: {
+      type: zIndex !== undefined && zIndex < 0 ? IMAGE_WRAP_BEHIND : IMAGE_WRAP_IN_FRONT,
+    },
+    position: {
+      horizontal: {
+        relativeTo: horizontalRelativeTo(style["mso-position-horizontal-relative"]),
+        posOffset: pixelsToSafeEmu(leftPx) ?? 0,
+      },
+      vertical: {
+        relativeTo: verticalRelativeTo(style["mso-position-vertical-relative"]),
+        posOffset: pixelsToSafeEmu(topPx) ?? 0,
+      },
+    },
+  };
+};
+
 const svgDataUrl = (svg: string): string | undefined =>
   svg.length <= MAX_VML_SVG_CHARACTERS
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
@@ -215,11 +305,11 @@ const previewImage = (
     position: {
       horizontal: {
         relativeTo: horizontalRelative ? "page" : "character",
-        posOffset: pixelsToEmu(leftPx),
+        posOffset: pixelsToSafeEmu(leftPx) ?? 0,
       },
       vertical: {
         relativeTo: verticalRelative ? "page" : "paragraph",
-        posOffset: pixelsToEmu(topPx),
+        posOffset: pixelsToSafeEmu(topPx) ?? 0,
       },
     },
   };
@@ -386,17 +476,17 @@ export function parseVmlImageContent(
       continue;
     }
 
-    // VML pictures in a run are inline-flow. Absolute-positioned VML is treated
-    // as inline here too: rendering the picture in flow is far better than
-    // dropping it, and the original XML round-trips verbatim via rawXml.
+    // Static VML pictures participate in the run's inline flow. Absolute VML
+    // pictures are page artwork: preserve their authored anchor so they paint
+    // at the correct location without contributing to paragraph height.
     const image: Image = {
       type: "image",
       rId,
       size: {
-        width: widthPx != null ? pixelsToEmu(widthPx) : 0,
-        height: heightPx != null ? pixelsToEmu(heightPx) : 0,
+        width: widthPx != null ? (pixelsToSafeEmu(widthPx) ?? 0) : 0,
+        height: heightPx != null ? (pixelsToSafeEmu(heightPx) ?? 0) : 0,
       },
-      wrap: { type: "inline" },
+      ...vmlImageLayout(shapeStyle),
     };
     const safeSrc = sanitizeImageSrc(src);
     if (safeSrc) {

@@ -215,6 +215,52 @@ describe("VML w:pict inline images", () => {
     expect(drawing?.image.title).toBe("logo");
   });
 
+  test("preserves absolute VML image anchors without adding them to text flow", async () => {
+    const doc = await parseDocx(
+      await pictDocx({
+        runXml: `<w:pict><v:shape id="Footer logo" type="#_x0000_t75" style="position:absolute;margin-left:514.95pt;margin-top:774.95pt;width:44.5pt;height:45.6pt;z-index:251658240;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"><v:imagedata r:id="rIdImg" o:title="logo"/></v:shape></w:pict>`,
+      }),
+      { preloadFonts: false },
+    );
+
+    const drawing = firstDrawing(doc.package.document.content.at(0));
+    expect(drawing?.image.wrap.type).toBe("inFront");
+    expect(drawing?.image.position).toEqual({
+      horizontal: { relativeTo: "page", posOffset: 6_539_865 },
+      vertical: { relativeTo: "page", posOffset: 9_841_865 },
+    });
+  });
+
+  test("maps text-relative negative-z VML images behind text", async () => {
+    const doc = await parseDocx(
+      await pictDocx({
+        runXml: `<w:pict><v:shape type="#_x0000_t75" style="position:absolute;left:12pt;top:6pt;width:2in;height:1in;z-index:-1;mso-position-horizontal-relative:text;mso-position-vertical-relative:text"><v:imagedata r:id="rIdImg"/></v:shape></w:pict>`,
+      }),
+      { preloadFonts: false },
+    );
+
+    const drawing = firstDrawing(doc.package.document.content.at(0));
+    expect(drawing?.image.wrap.type).toBe("behind");
+    expect(drawing?.image.position).toEqual({
+      horizontal: { relativeTo: "column", posOffset: 152_400 },
+      vertical: { relativeTo: "paragraph", posOffset: 76_200 },
+    });
+  });
+
+  test("maps VML margin-area anchors to the internal coordinate spaces", async () => {
+    const doc = await parseDocx(
+      await pictDocx({
+        runXml: `<w:pict><v:shape type="#_x0000_t75" style="position:absolute;width:2in;height:1in;mso-position-horizontal-relative:left-margin-area;mso-position-vertical-relative:top-margin-area"><v:imagedata r:id="rIdImg"/></v:shape></w:pict>`,
+      }),
+      { preloadFonts: false },
+    );
+
+    expect(firstDrawing(doc.package.document.content.at(0))?.image.position).toEqual({
+      horizontal: { relativeTo: "leftMargin", posOffset: 0 },
+      vertical: { relativeTo: "topMargin", posOffset: 0 },
+    });
+  });
+
   test("preserves the original VML verbatim on save (no DrawingML conversion)", async () => {
     const original = await pictDocx({ runXml: PICT_WITH_IMAGE });
     const doc = await parseDocx(original, { preloadFonts: false });
@@ -481,6 +527,21 @@ describe("VML w:pict inline images", () => {
     // to `1.2`; the valid height still parses.
     expect(drawing?.image.size.width).toBe(0);
     expect(drawing?.image.size.height).toBe(914_400);
+  });
+
+  test("rejects VML lengths too large for finite layout coordinates", async () => {
+    const hugeLength = "9".repeat(308);
+    expect(Number.isFinite(Number.parseFloat(hugeLength))).toBe(true);
+    const doc = await parseDocx(
+      await pictDocx({
+        runXml: `<w:pict><v:shape style="position:absolute;margin-left:${hugeLength}pt;width:${hugeLength}pt;height:1in"><v:imagedata r:id="rIdImg"/></v:shape></w:pict>`,
+      }),
+      { preloadFonts: false },
+    );
+
+    const drawing = firstDrawing(doc.package.document.content.at(0));
+    expect(drawing?.image.size).toEqual({ width: 0, height: 914_400 });
+    expect(drawing?.image.position?.horizontal.posOffset).toBe(0);
   });
 
   test("resolves the relationship id from o:relid when r:id is absent", async () => {
