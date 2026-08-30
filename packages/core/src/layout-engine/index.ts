@@ -33,9 +33,10 @@ import {
   reconcileBreakBeforeBlock,
   recordReflowBoundary,
 } from "./renderedBreakReconciliation";
+import { normalizeSectionBreakType } from "./section-breaks";
 import { buildTableRowBreakInfo, getRowContinuationSkip, snapRowBreak } from "./tableRowBreak";
 import { bandFragmentX, bandTopContentY, isPageFrameRelativeAnchor } from "./textBoxFlow";
-import { resolveFloatingTableX } from "./measure/floatingTablePosition";
+import { resolveFloatingTablePageX } from "./measure/floatingTablePosition";
 import { resolveTableInlinePlacement } from "./measure/tableInlinePlacement";
 import { floatingTextBoxReservesBand } from "./types";
 import type {
@@ -71,7 +72,6 @@ export type SectionLayoutConfig = {
 };
 
 const DEFAULT_COLUMNS: ColumnLayout = { count: 1, gap: 0 };
-const DEFAULT_SECTION_BREAK_TYPE = "nextPage";
 const CONTINUE_PAGE_NUMBERING: SectionPageNumbering = { type: "continue" };
 
 export function collectSectionConfigs(
@@ -512,7 +512,7 @@ function layoutDocumentPass(
         // boundary. Looking ahead shifts every transition by one section,
         // which moves odd/even filler pages to the wrong boundary.
         const nextSectionConfig = sectionConfigs[sectionIdx + 1] ?? initialConfig;
-        const nextType = sectionBreakTypes[sectionIdx] ?? DEFAULT_SECTION_BREAK_TYPE;
+        const nextType = normalizeSectionBreakType(sectionBreakTypes[sectionIdx]);
         handleSectionBreak(
           block as SectionBreakBlock,
           paginator,
@@ -1432,12 +1432,8 @@ function layoutFloatingTable(
   const contentHeight = page.size.h - margins.top - margins.bottom;
 
   // Default anchor base (content area)
-  let baseX = margins.left;
   let baseY = margins.top;
 
-  if (floating?.horzAnchor === "page") {
-    baseX = 0;
-  }
   if (floating?.vertAnchor === "page") {
     baseY = 0;
   } else if (floating?.vertAnchor === "text") {
@@ -1450,7 +1446,16 @@ function layoutFloatingTable(
   // Determine X position
   let x = paginator.getColumnX(state.columnIndex);
   if (floating) {
-    x = baseX + resolveFloatingTableX(floating, block.justification, tableWidth, contentWidth);
+    x = resolveFloatingTablePageX({
+      anchor: floating,
+      justification: block.justification,
+      tableWidth,
+      marginWidth: contentWidth,
+      pageWidth: page.size.w,
+      marginLeft: margins.left,
+      textFrameWidth: paginator.columnWidth,
+      textFrameLeft: paginator.getColumnX(state.columnIndex),
+    });
   }
 
   // Determine Y position
@@ -1475,18 +1480,6 @@ function layoutFloatingTable(
   if (!usedExplicitY) {
     const fitState = paginator.ensureFits(tableHeight);
     y = fitState.cursorY;
-  }
-
-  // Alignment keywords stay inside their selected anchor frame. A numeric
-  // offset may deliberately move a margin-anchored table into the page margin,
-  // so clamp that resolved position only against the physical page.
-  const usesNumericOffset = floating?.tblpX !== undefined && floating.tblpXSpec === undefined;
-  const pageAnchored = floating?.horzAnchor === "page";
-  const clampToPage = pageAnchored || usesNumericOffset;
-  const minX = clampToPage ? 0 : margins.left;
-  const maxX = clampToPage ? page.size.w - tableWidth : margins.left + contentWidth - tableWidth;
-  if (Number.isFinite(maxX)) {
-    x = Math.max(minX, Math.min(x, maxX));
   }
 
   const fragment: TableFragment = {

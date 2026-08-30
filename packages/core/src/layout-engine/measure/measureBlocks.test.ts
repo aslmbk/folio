@@ -15,6 +15,19 @@ const para = (id: string, text: string): ParagraphBlock => ({
   runs: [{ kind: "text", text }],
 });
 
+const centeredMarginFloatingTable = (id: string, cellText = "cell"): TableBlock => ({
+  kind: "table",
+  id,
+  columnWidths: [200],
+  floating: { horzAnchor: "margin", tblpXSpec: "center" },
+  rows: [
+    {
+      id: `${id}-row`,
+      cells: [{ id: `${id}-cell`, blocks: [para(`${id}-content`, cellText)] }],
+    },
+  ],
+});
+
 const imageBlock: ImageBlock = {
   kind: "image",
   id: "img-1",
@@ -215,6 +228,473 @@ describe("measureBlocks", () => {
       const measures = measureBlocks(blocks, 500);
       expect(measures).toHaveLength(blocks.length);
       expect(measures.map((m) => m.kind)).toEqual(["image", "pageBreak", "image"]);
+    }, fakeMeasure);
+  });
+
+  test("wraps from a page-centered floating table translated into content coordinates", () => {
+    withFakeTextMeasure(() => {
+      const table: TableBlock = {
+        kind: "table",
+        id: "page-centered-table",
+        columnWidths: [200],
+        floating: { horzAnchor: "page", tblpXSpec: "center" },
+        rows: [
+          {
+            id: "row",
+            cells: [{ id: "cell", blocks: [para("cell", "cell")] }],
+          },
+        ],
+      };
+      const measures = measureBlocks([table, para("body", "body")], 600, 0, {
+        pageWidth: 800,
+        pageHeight: 1_000,
+        marginLeft: 40,
+        marginRight: 160,
+        marginBottom: 40,
+      });
+      const bodyMeasure = measures.at(1);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBe(472);
+    }, fakeMeasure);
+  });
+
+  test("wraps from the physically clamped position of a page-anchored floating table", () => {
+    withFakeTextMeasure(() => {
+      const table: TableBlock = {
+        kind: "table",
+        id: "page-clamped-table",
+        columnWidths: [200],
+        floating: { horzAnchor: "page", tblpX: 760 },
+        rows: [
+          {
+            id: "row",
+            cells: [{ id: "cell", blocks: [para("cell", "cell")] }],
+          },
+        ],
+      };
+      const measures = measureBlocks([table, para("body", "body")], 600, 0, {
+        pageWidth: 800,
+        pageHeight: 1_000,
+        marginLeft: 40,
+        marginRight: 160,
+        marginBottom: 40,
+      });
+      const bodyMeasure = measures.at(1);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.rightOffset).toBe(52);
+    }, fakeMeasure);
+  });
+
+  test("wraps from a text-anchored floating table in the active column frame", () => {
+    withFakeTextMeasure(() => {
+      const table = centeredMarginFloatingTable("text-frame-float");
+      table.floating = { horzAnchor: "text", tblpX: 10 };
+      const blocks: FlowBlock[] = [
+        { kind: "columnBreak", id: "second-column" },
+        table,
+        para("body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 550, 550],
+        columnIndex: [0, 1, 1],
+        columnCount: 2,
+      });
+      const bodyMeasure = measures.at(2);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBe(222);
+    }, fakeMeasure);
+  });
+
+  test("does not carry a column-local text-anchor reduction into the next column", () => {
+    withFakeTextMeasure(() => {
+      const table = centeredMarginFloatingTable("first-column-text-float");
+      table.floating = { horzAnchor: "text", tblpX: 10 };
+      const blocks: FlowBlock[] = [
+        table,
+        para("first-body", "body"),
+        { kind: "columnBreak", id: "second-column" },
+        para("second-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 100, 550],
+        columnIndex: [0, 0, 0, 1],
+        columnCount: 2,
+      });
+      const firstBody = measures.at(1);
+      const secondBody = measures.at(3);
+      if (firstBody?.kind !== "paragraph" || secondBody?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measures");
+      }
+
+      expect(firstBody.lines.at(0)?.leftOffset).toBe(222);
+      expect(secondBody.lines.at(0)?.leftOffset).toBeUndefined();
+      expect(secondBody.lines.at(0)?.rightOffset).toBeUndefined();
+    }, fakeMeasure);
+  });
+
+  test("keeps a text-relative table Y offset tied to its anchor cursor", () => {
+    withFakeTextMeasure(() => {
+      const table = centeredMarginFloatingTable("text-vertical-float");
+      table.floating = {
+        horzAnchor: "text",
+        vertAnchor: "text",
+        tblpX: 10,
+        tblpY: 10,
+      };
+      const measures = measureBlocks(
+        [para("long-prefix", "x".repeat(500)), table, para("body", "body")],
+        350,
+        0,
+        {
+          pageWidth: 1_000,
+          pageHeight: 1_000,
+          marginLeft: 100,
+          marginRight: 100,
+          marginBottom: 40,
+          contentLeft: 100,
+          columnIndex: 0,
+          columnCount: 1,
+        },
+      );
+      const bodyMeasure = measures.at(2);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBe(222);
+    }, fakeMeasure);
+  });
+
+  test("projects an over-wide text-anchored table into the next column", () => {
+    withFakeTextMeasure(() => {
+      const table = centeredMarginFloatingTable("over-wide-text-float");
+      table.columnWidths = [500];
+      table.floating = { horzAnchor: "text", tblpX: 10 };
+      const blocks: FlowBlock[] = [
+        table,
+        { kind: "columnBreak", id: "second-column" },
+        para("second-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 550],
+        columnIndex: [0, 0, 1],
+        columnCount: 2,
+      });
+      const secondBody = measures.at(2);
+      if (secondBody?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(secondBody.lines.at(0)?.leftOffset).toBe(72);
+    }, fakeMeasure);
+  });
+
+  test("reprojects one margin-anchored floating table across an explicit column break", () => {
+    withFakeTextMeasure(() => {
+      const blocks: FlowBlock[] = [
+        centeredMarginFloatingTable("shared-float"),
+        para("first-body", "body"),
+        { kind: "columnBreak", id: "column-break" },
+        para("second-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, [350, 350, 350, 350], 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 100, 550],
+        columnIndex: [0, 0, 0, 1],
+        columnCount: 2,
+      });
+      const firstBody = measures.at(1);
+      const secondBody = measures.at(3);
+      if (firstBody?.kind !== "paragraph" || secondBody?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measures");
+      }
+
+      expect(firstBody.lines.at(0)?.rightOffset).toBe(62);
+      expect(secondBody.lines.at(0)?.leftOffset).toBe(62);
+    }, fakeMeasure);
+  });
+
+  test("drops an active floating table when a column break leaves the final column", () => {
+    withFakeTextMeasure(() => {
+      const blocks: FlowBlock[] = [
+        { kind: "columnBreak", id: "enter-second-column" },
+        centeredMarginFloatingTable("second-column-float"),
+        para("second-column-body", "body"),
+        { kind: "columnBreak", id: "leave-second-column" },
+        para("next-page-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 550, 550, 550, 100],
+        columnIndex: [0, 1, 1, 1, 0],
+        columnCount: 2,
+      });
+      const samePageBody = measures.at(2);
+      const nextPageBody = measures.at(4);
+      if (samePageBody?.kind !== "paragraph" || nextPageBody?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measures");
+      }
+
+      expect(samePageBody.lines.at(0)?.leftOffset).toBe(62);
+      expect(nextPageBody.lines.at(0)?.leftOffset).toBeUndefined();
+      expect(nextPageBody.lines.at(0)?.rightOffset).toBeUndefined();
+    }, fakeMeasure);
+  });
+
+  test("drops an active floating table at a paginated section break", () => {
+    withFakeTextMeasure(() => {
+      const blocks: FlowBlock[] = [
+        centeredMarginFloatingTable("section-float"),
+        { kind: "sectionBreak", id: "next-page-section", type: "nextPage" },
+        para("next-section-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 550],
+        columnIndex: 0,
+        columnCount: 2,
+      });
+      const bodyMeasure = measures.at(2);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBeUndefined();
+      expect(bodyMeasure.lines.at(0)?.rightOffset).toBeUndefined();
+    }, fakeMeasure);
+  });
+
+  test("drops an active floating table at an explicit page break", () => {
+    withFakeTextMeasure(() => {
+      const blocks: FlowBlock[] = [
+        centeredMarginFloatingTable("page-float"),
+        { kind: "pageBreak", id: "page-break" },
+        para("next-page-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 550],
+        columnIndex: 0,
+        columnCount: 2,
+      });
+      const bodyMeasure = measures.at(2);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBeUndefined();
+      expect(bodyMeasure.lines.at(0)?.rightOffset).toBeUndefined();
+    }, fakeMeasure);
+  });
+
+  test("preserves and reprojects an active floating table across a continuous section", () => {
+    withFakeTextMeasure(() => {
+      const blocks: FlowBlock[] = [
+        centeredMarginFloatingTable("continuous-float"),
+        { kind: "sectionBreak", id: "continuous-section", type: "continuous" },
+        para("continuous-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 350, 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 550],
+        columnIndex: 0,
+        columnCount: 2,
+      });
+      const bodyMeasure = measures.at(2);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBe(62);
+    }, fakeMeasure);
+  });
+
+  test("projects a margin table from the outgoing physical top across a continuous margin change", () => {
+    withFakeTextMeasure(() => {
+      const table = centeredMarginFloatingTable("outgoing-margin-float");
+      table.floating = {
+        horzAnchor: "margin",
+        vertAnchor: "margin",
+        tblpXSpec: "center",
+        tblpY: 0,
+      };
+      const blocks: FlowBlock[] = [
+        table,
+        { kind: "sectionBreak", id: "margin-change", type: "continuous" },
+        para("shared-page-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, 600, [40, 40, 200], {
+        pageWidth: 800,
+        pageHeight: 1_000,
+        marginLeft: 40,
+        marginRight: 160,
+        marginBottom: 40,
+        contentLeft: 40,
+        physicalPage: {
+          pageWidth: 800,
+          pageHeight: 1_000,
+          marginTop: [40, 40, 40],
+          marginLeft: 40,
+          marginRight: 160,
+          marginBottom: 40,
+        },
+        columnIndex: 0,
+        columnCount: 1,
+      });
+      const bodyMeasure = measures.at(2);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBe(412);
+    }, fakeMeasure);
+  });
+
+  test("starts a continuous section below the tallest explicit column with an active float", () => {
+    withFakeTextMeasure(() => {
+      const blocks: FlowBlock[] = [
+        centeredMarginFloatingTable("column-region-float", "x".repeat(120)),
+        para("tall-first-column", "x".repeat(500)),
+        { kind: "columnBreak", id: "unequal-column-break" },
+        para("short-second-column", "body"),
+        { kind: "sectionBreak", id: "continuous-after-columns", type: "continuous" },
+        para("continuous-body", "body"),
+      ];
+      const measures = measureBlocks(blocks, [350, 350, 350, 350, 350, 800], 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100, 100, 550, 550, 100],
+        columnIndex: [0, 0, 0, 1, 1, 0],
+        columnCount: [2, 2, 2, 2, 2, 1],
+      });
+      const firstColumn = measures.at(1);
+      const secondColumn = measures.at(3);
+      const continuousBody = measures.at(5);
+      if (
+        firstColumn?.kind !== "paragraph" ||
+        secondColumn?.kind !== "paragraph" ||
+        continuousBody?.kind !== "paragraph"
+      ) {
+        throw new Error("Expected paragraph measures");
+      }
+
+      expect(firstColumn.totalHeight).toBeGreaterThan(secondColumn.totalHeight);
+      expect(continuousBody.lines.at(0)?.leftOffset).toBeUndefined();
+      expect(continuousBody.lines.at(0)?.rightOffset).toBeUndefined();
+    }, fakeMeasure);
+  });
+
+  test("does not widen lines for a floating table wholly outside the active column", () => {
+    withFakeTextMeasure(() => {
+      const table: TableBlock = {
+        kind: "table",
+        id: "outside-column",
+        columnWidths: [200],
+        floating: { horzAnchor: "margin", tblpXSpec: "left" },
+        rows: [
+          {
+            id: "row",
+            cells: [{ id: "cell", blocks: [para("cell", "cell")] }],
+          },
+        ],
+      };
+      const body = para("body", "x".repeat(100));
+      const measures = measureBlocks([table, body], [350, 350], 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [550, 550],
+      });
+      const bodyMeasure = measures.at(1);
+      if (bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected paragraph measure");
+      }
+
+      expect(bodyMeasure.lines).toHaveLength(2);
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBeUndefined();
+      expect(bodyMeasure.lines.at(0)?.rightOffset).toBeUndefined();
+    }, fakeMeasure);
+  });
+
+  test("clears below a floating table that covers the active column", () => {
+    withFakeTextMeasure(() => {
+      const table: TableBlock = {
+        kind: "table",
+        id: "full-column-cover",
+        columnWidths: [400],
+        floating: { horzAnchor: "margin", tblpXSpec: "left" },
+        rows: [
+          {
+            id: "row",
+            cells: [{ id: "cell", blocks: [para("cell", "cell")] }],
+          },
+        ],
+      };
+      const measures = measureBlocks([table, para("body", "body")], [350, 350], 0, {
+        pageWidth: 1_000,
+        pageHeight: 1_000,
+        marginLeft: 100,
+        marginRight: 100,
+        marginBottom: 40,
+        contentLeft: [100, 100],
+      });
+      const tableMeasure = measures.at(0);
+      const bodyMeasure = measures.at(1);
+      if (tableMeasure?.kind !== "table" || bodyMeasure?.kind !== "paragraph") {
+        throw new Error("Expected table and paragraph measures");
+      }
+
+      expect(bodyMeasure.lines.at(0)?.floatSkipBefore).toBe(tableMeasure.totalHeight);
+      expect(bodyMeasure.lines.at(0)?.leftOffset).toBeUndefined();
     }, fakeMeasure);
   });
 
@@ -442,7 +922,7 @@ describe("measureBlocks", () => {
     }, fakeMeasure);
   });
 
-  test("keeps an active band across an unspecified continuous section break", () => {
+  test("drops an active band at a section break whose omitted type defaults to nextPage", () => {
     withFakeTextMeasure(() => {
       const band: TextBoxBlock = {
         kind: "textBox",
@@ -466,7 +946,7 @@ describe("measureBlocks", () => {
         throw new Error("Expected paragraph after section break");
       }
 
-      expect(afterMeasure.lines.at(0)?.floatSkipBefore).toBeGreaterThan(0);
+      expect(afterMeasure.lines.at(0)?.floatSkipBefore).toBeUndefined();
     }, fakeMeasure);
   });
 

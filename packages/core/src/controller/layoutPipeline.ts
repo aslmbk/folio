@@ -635,6 +635,17 @@ export function runLayoutPipeline<THfPMs>(
         marginLeft: blockMeasureInputs.marginLefts,
         marginRight: blockMeasureInputs.marginRights,
         marginBottom: blockMeasureInputs.marginBottoms,
+        contentLeft: blockMeasureInputs.contentLefts,
+        physicalPage: {
+          pageWidth: blockMeasureInputs.physicalPageGeometry.pageWidths,
+          pageHeight: blockMeasureInputs.physicalPageGeometry.pageHeights,
+          marginTop: blockMeasureInputs.physicalPageGeometry.marginTops,
+          marginLeft: blockMeasureInputs.physicalPageGeometry.marginLefts,
+          marginRight: blockMeasureInputs.physicalPageGeometry.marginRights,
+          marginBottom: blockMeasureInputs.physicalPageGeometry.marginBottoms,
+        },
+        columnIndex: blockMeasureInputs.columnIndices,
+        columnCount: blockMeasureInputs.columnCounts,
       });
     // Match the historical post-measure suppression timing while keeping the
     // authored flow tree immutable. Layout, painting, and cached artifacts all
@@ -832,6 +843,17 @@ export function runLayoutPipeline<THfPMs>(
             marginLeft: blockMeasureInputs.marginLefts,
             marginRight: blockMeasureInputs.marginRights,
             marginBottom: blockMeasureInputs.marginBottoms,
+            contentLeft: blockMeasureInputs.contentLefts,
+            physicalPage: {
+              pageWidth: blockMeasureInputs.physicalPageGeometry.pageWidths,
+              pageHeight: blockMeasureInputs.physicalPageGeometry.pageHeights,
+              marginTop: blockMeasureInputs.physicalPageGeometry.marginTops,
+              marginLeft: blockMeasureInputs.physicalPageGeometry.marginLefts,
+              marginRight: blockMeasureInputs.physicalPageGeometry.marginRights,
+              marginBottom: blockMeasureInputs.physicalPageGeometry.marginBottoms,
+            },
+            columnIndex: blockMeasureInputs.columnIndices,
+            columnCount: blockMeasureInputs.columnCounts,
           },
           values,
         );

@@ -1175,6 +1175,25 @@ describe("RTL table placement", () => {
 });
 
 describe("floating table placement", () => {
+  test("positions a text-anchored table from the active column", () => {
+    const { block, measure } = tallTable(1);
+    block.floating = { horzAnchor: "text", tblpXSpec: "center" };
+    block.columnWidths = [60];
+    measure.columnWidths = [60];
+    measure.totalWidth = 60;
+
+    const layout = layoutDocument(
+      [{ kind: "columnBreak", id: "second-column" }, block],
+      [{ kind: "columnBreak" }, measure],
+      { ...OPTIONS, columns: { count: 2, gap: 20 } },
+    );
+    const fragment = layout.pages
+      .flatMap((page) => page.fragments)
+      .find((candidate): candidate is TableFragment => candidate.kind === "table");
+
+    expect(fragment?.x).toBe(180);
+  });
+
   test("allows a numeric margin-relative offset to enter the page margin", () => {
     const { block, measure } = tallTable(1);
     block.floating = { horzAnchor: "margin", tblpX: -20 };
@@ -1193,6 +1212,27 @@ describe("floating table placement", () => {
     expect(fragment?.x).toBe(OPTIONS.margins.left);
   });
 
+  test("centers an over-wide margin-relative table across the body margins", () => {
+    const { block, measure } = tallTable(1);
+    block.floating = { horzAnchor: "margin", tblpXSpec: "center" };
+    measure.totalWidth = 240;
+
+    const fragment = tableFragments(block, measure).at(0);
+    const contentWidth = OPTIONS.pageSize.w - OPTIONS.margins.left - OPTIONS.margins.right;
+
+    expect(fragment?.x).toBe(OPTIONS.margins.left + (contentWidth - measure.totalWidth) / 2);
+  });
+
+  test("pins a table wider than the physical page to its left edge", () => {
+    const { block, measure } = tallTable(1);
+    block.floating = { horzAnchor: "margin", tblpXSpec: "center" };
+    measure.totalWidth = OPTIONS.pageSize.w + 20;
+
+    const fragment = tableFragments(block, measure).at(0);
+
+    expect(fragment?.x).toBe(0);
+  });
+
   test("clamps a numeric margin-relative offset against the physical page", () => {
     const { block, measure } = tallTable(1);
     block.floating = { horzAnchor: "margin", tblpX: -80 };
@@ -1209,6 +1249,19 @@ describe("floating table placement", () => {
     const fragment = tableFragments(block, measure).at(0);
 
     expect(fragment?.x).toBe(80);
+  });
+
+  test.each([
+    ["center", 40],
+    ["right", 80],
+    ["outside", 80],
+  ] as const)("resolves page-anchored tblpXSpec=%s against the page frame", (spec, expected) => {
+    const { block, measure } = tallTable(1);
+    block.floating = { horzAnchor: "page", tblpXSpec: spec };
+
+    const fragment = tableFragments(block, measure).at(0);
+
+    expect(fragment?.x).toBe(expected);
   });
 });
 
