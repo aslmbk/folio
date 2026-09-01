@@ -26,10 +26,20 @@ export type { ParseAddCommentResult, ParseSuggestChangesResult } from "./parse";
 export { parseAddCommentInput, parseSuggestChangesInput } from "./parse";
 export type { AnthropicToolDefinition, OpenAIToolDefinition } from "./providers";
 export { toAnthropicTools, toOpenAITools } from "./providers";
-export { FOLIO_AGENT_TOOLS, getFolioToolDefinitions } from "./tools";
+export type { FolioAgentToolOptions, FolioSuggestChangesOptions } from "./suggest-changes-options";
+export {
+  DEFAULT_SUGGEST_CHANGES_OPERATION_TYPES,
+  InvalidFolioSuggestChangesOptionsError,
+} from "./suggest-changes-options";
+export {
+  describeSuggestChangesCapabilities,
+  FOLIO_AGENT_TOOLS,
+  getFolioToolDefinitions,
+} from "./tools";
 export type {
   FolioAgentApplyOperationsSummary,
   FolioAgentBlock,
+  FolioAgentInputNormalization,
   FolioAgentDocumentOutline,
   FolioAgentChange,
   FolioAgentComment,
