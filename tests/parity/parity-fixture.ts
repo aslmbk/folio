@@ -36,7 +36,13 @@ type FolioParityBridge = {
   countCommentAnchors: () => number;
   aiSnapshotBlockCount: () => number;
   readBlockGeometry: () => {
-    rects: { blockId: string; page: number; top: number; height: number }[];
+    rects: {
+      snapshotBlockId: string;
+      blockId: string;
+      page: number;
+      top: number;
+      height: number;
+    }[];
     missingIsNull: boolean;
     hasScrollRoot: boolean;
   };
