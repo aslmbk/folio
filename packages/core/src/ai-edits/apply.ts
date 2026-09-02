@@ -49,6 +49,7 @@ import type {
   FolioAIEditAppliedOperation,
   FolioAIEditApplyMode,
   FolioAIEditApplyResult,
+  FolioAIEditNormalization,
   FolioAIEditOperation,
   FolioAIEditSnapshot,
   FolioAIEditSkipReason,
@@ -115,7 +116,12 @@ type ResolvedOperation = {
   blockFrom: number;
   blockTo: number;
   blockNode: PMNode;
-  insertText?: string;
+  /**
+   * One entry per paragraph the insert produces. Usually a single entry;
+   * more than one when the operation's `text` contained a line break and
+   * was split into consecutive paragraphs (see {@link splitInsertParagraphTexts}).
+   */
+  insertTexts?: readonly string[];
   tableRowInsertion?: TableRowInsertion;
   tableRowDeletion?: TableRowDeletion;
   tableColumnInsertion?: TableColumnInsertion;
@@ -346,15 +352,35 @@ type LiveBlockEntry = { from: number; to: number; node: PMNode };
  * uniqueness across overlapping calls in the same JS realm.
  */
 let revisionIdCursor = Date.now() * 1000;
-const nextRevisionSeed = (count: number): number => {
-  // Each replacement allocates up to three ids: deletion, insertion, and
-  // background-format clearing. Insert/delete operations use one each.
-  // Reserve `count * 4` to be safely above any conceivable per-op
-  // allocation (current max is 3). Returning the start of the
-  // reserved range as the seed is enough — the caller bumps it.
+const nextRevisionSeed = (revisionIdCount: number): number => {
+  // The caller has already summed a safe per-operation reservation (see
+  // `estimateRevisionIdReservation`); reserving exactly that many ids keeps
+  // this batch's range from overlapping the next `nextRevisionSeed` call's
+  // range. Returning the start of the reserved range as the seed is enough
+  // — the caller bumps it.
   const start = revisionIdCursor;
-  revisionIdCursor += Math.max(count, 1) * 4;
+  revisionIdCursor += Math.max(revisionIdCount, 1);
   return start;
+};
+
+/**
+ * Ids one resolved operation may allocate from the shared revision-id range
+ * reserved by `nextRevisionSeed`. Most operation types allocate at most
+ * three (delete + insert + background-format clearing); reserving four per
+ * operation is a safe cushion above that. A multi-paragraph
+ * `insertAfterBlock` / `insertBeforeBlock` (`text` split on line breaks,
+ * see `splitInsertParagraphTexts`) allocates one id per paragraph in
+ * tracked-changes mode, so it needs more than four once split into more
+ * than four paragraphs — reserving less than that would let a later
+ * `nextRevisionSeed` call reuse an id this operation already stamped on
+ * the document.
+ */
+const REVISION_IDS_PER_OPERATION = 4;
+const estimateRevisionIdReservation = (item: ResolvedOperation): number => {
+  if (item.operation.type === "insertAfterBlock" || item.operation.type === "insertBeforeBlock") {
+    return Math.max(item.insertTexts?.length ?? 1, REVISION_IDS_PER_OPERATION);
+  }
+  return REVISION_IDS_PER_OPERATION;
 };
 
 /**
@@ -547,6 +573,24 @@ const buildSignatureTableNode = ({
   return tableType.create({}, row);
 };
 
+const LINE_BREAK_PATTERN = /\r\n|\r|\n/;
+
+/**
+ * Split `insertAfterBlock` / `insertBeforeBlock` text on line breaks into one
+ * string per paragraph the operation should produce. A model routinely sends
+ * a whole clause — heading plus body — as one `text` with embedded newlines;
+ * Word has no such thing as a paragraph containing a line break, so each line
+ * becomes its own paragraph instead of literal newline characters inside one.
+ * Blank (whitespace-only) lines are dropped rather than becoming empty
+ * paragraphs, so a trailing/leading newline collapses away. Falls back to a
+ * single empty string when every line is blank, so callers never get zero
+ * paragraphs out of non-empty input.
+ */
+const splitInsertParagraphTexts = (text: string): string[] => {
+  const nonBlankLines = text.split(LINE_BREAK_PATTERN).filter((line) => line.trim().length > 0);
+  return nonBlankLines.length > 0 ? nonBlankLines : [""];
+};
+
 /**
  * Build the inline content for an inserted or replaced block, promoting the
  * model's `**bold**` / `***bold italic***` markdown into real Word marks (the
@@ -595,6 +639,7 @@ const applyFolioAIEditOperationsInternal = ({
 }: ApplyFolioAIEditOperationsInternalOptions): FolioAIEditApplyResult => {
   const applied: FolioAIEditAppliedOperation[] = [];
   const skipped: FolioAIEditSkippedOperation[] = [];
+  const normalizations: FolioAIEditNormalization[] = [];
   const resolved: ResolvedOperation[] = [];
   const insertionType = view.state.schema.marks["insertion"];
   const deletionType = view.state.schema.marks["deletion"];
@@ -664,6 +709,17 @@ const applyFolioAIEditOperationsInternal = ({
       claimedTableColumns.add(columnKey);
     }
 
+    if (
+      (operation.type === "insertAfterBlock" || operation.type === "insertBeforeBlock") &&
+      LINE_BREAK_PATTERN.test(operation.text)
+    ) {
+      normalizations.push({
+        id: operation.id,
+        code: "splitMultilineText",
+        paragraphCount: resolution.operation.insertTexts?.length ?? 1,
+      });
+    }
+
     const commentId = commentText !== undefined ? createCommentId?.(commentText) : undefined;
     resolved.push({
       ...resolution.operation,
@@ -683,11 +739,15 @@ const applyFolioAIEditOperationsInternal = ({
   const executableResolved = tablePlan.executable;
 
   if (executableResolved.length === 0) {
-    return { applied, skipped };
+    return { applied, skipped, ...(normalizations.length > 0 && { normalizations }) };
   }
 
   let tr = view.state.tr;
-  let revisionSeed = revisionIdSeed ?? nextRevisionSeed(executableResolved.length);
+  const revisionIdReservation = executableResolved.reduce(
+    (total, item) => total + estimateRevisionIdReservation(item),
+    0,
+  );
+  let revisionSeed = revisionIdSeed ?? nextRevisionSeed(revisionIdReservation);
   const date = new Date().toISOString();
   const insertedColumnCounts = new Map<string, number>();
 
@@ -951,10 +1011,12 @@ const applyFolioAIEditOperationsInternal = ({
       }
       case "insertAfterBlock":
       case "insertBeforeBlock": {
+        const insertTexts = item.insertTexts ?? [""];
+        const isEmptyInsert = insertTexts.length === 1 && insertTexts[0]?.length === 0;
         if (
           mode === "tracked-changes" &&
           item.operation.pageBreakBefore === true &&
-          (!item.insertText || item.insertText.length === 0)
+          isEmptyInsert
         ) {
           skipped.push({
             id: item.operation.id,
@@ -963,72 +1025,99 @@ const applyFolioAIEditOperationsInternal = ({
           continue;
         }
 
-        const marks = [];
-        let insertedBlockRevisionId: number | null = null;
-        if (producesTrackedChanges && insertionType) {
-          const revisionId = revisionSeed++;
-          insertedBlockRevisionId = revisionId;
-          marks.push(
-            insertionType.create({
-              revisionId,
-              author,
-              date,
-              ...trackedRevisionExtras,
-            }),
-          );
-          appliedRevisionIds = [revisionId];
-        }
-        if (commentMark) {
-          marks.push(commentMark);
-        }
-        const content =
-          item.insertText && item.insertText.length > 0
-            ? buildEmphasisInlineContent(view.state.schema, item.insertText, marks)
-            : null;
-        // Inherit formatting attrs (listMarker, styleId, …) from
-        // the source block but never reuse identity attrs — a new
-        // paragraph must get fresh paraId/textId so trackers don't
-        // collide.
+        // Captured once into a `const`, not re-read as `item.operation.*`
+        // inside the loop below: the switch's discriminant narrows
+        // `item.operation` here, but that narrowing does not reliably
+        // survive a property-chain re-read from inside a nested loop body,
+        // whereas a `const` binding's type is fixed for every scope it is
+        // read from.
+        const operation = item.operation;
+
+        // Inherit formatting attrs (listMarker, styleId, …) from the source
+        // block but never reuse identity attrs — a new paragraph must get
+        // fresh paraId/textId so trackers don't collide. Applied to the
+        // first paragraph only: a paragraph synthesized from a later line
+        // in a split `text` is body text, not a clone of the anchor, so it
+        // must not carry the anchor's heading/list styling either.
         const baseAttrs =
-          item.operation.inheritFormatting === false
+          operation.inheritFormatting === false
             ? {}
             : stripBlockIdentityAttrs(item.blockNode.attrs);
-        const attrs: Record<string, unknown> = { ...baseAttrs };
-        if (item.operation.pageBreakBefore === true) {
-          attrs["pageBreakBefore"] = true;
-        }
-        if (item.operation.styleId !== undefined) {
-          // Heading / clause style ids (e.g. ClauseHeading1) take
-          // precedence over the source block's style so the
-          // inserted paragraph renders as the requested kind, not
-          // as a clone of the anchor.
-          attrs["styleId"] = item.operation.styleId;
-          // A heading is logically a fresh block; drop list marker
-          // attrs that would otherwise leak from the anchor and
-          // render the heading as a list item.
-          if (item.operation.inheritFormatting !== false) {
-            attrs["listMarker"] = null;
-            attrs["listMarkerHidden"] = null;
-            attrs["listLevelNumFmts"] = null;
-            attrs["listLevelStarts"] = null;
-            attrs["listAbstractNumId"] = null;
-            attrs["listStartOverride"] = null;
+
+        // Built with a plain `for` loop rather than `.map()`: a function
+        // declared inside this outer loop that closes over `revisionSeed`
+        // (mutated every iteration via `revisionSeed++`) trips oxlint's
+        // no-loop-func rule, even though this callback always runs
+        // synchronously and never outlives the iteration.
+        const insertedBlockRevisionIds: number[] = [];
+        const nodes: PMNode[] = [];
+        for (const [paragraphIndex, text] of insertTexts.entries()) {
+          // `text` was split from one operation's `text` field on a line
+          // break (see `splitInsertParagraphTexts`); only the first
+          // resulting paragraph is the one the model actually styled —
+          // later ones are body text that happened to share the call.
+          const isFirstParagraph = paragraphIndex === 0;
+
+          const marks: Mark[] = [];
+          let paragraphRevisionId: number | null = null;
+          if (producesTrackedChanges && insertionType) {
+            paragraphRevisionId = revisionSeed++;
+            marks.push(
+              insertionType.create({
+                revisionId: paragraphRevisionId,
+                author,
+                date,
+                ...trackedRevisionExtras,
+              }),
+            );
+            insertedBlockRevisionIds.push(paragraphRevisionId);
           }
+          if (commentMark) {
+            marks.push(commentMark);
+          }
+          const content =
+            text.length > 0 ? buildEmphasisInlineContent(view.state.schema, text, marks) : null;
+
+          const attrs: Record<string, unknown> = isFirstParagraph ? { ...baseAttrs } : {};
+          if (isFirstParagraph && operation.pageBreakBefore === true) {
+            attrs["pageBreakBefore"] = true;
+          }
+          if (isFirstParagraph && operation.styleId !== undefined) {
+            // Heading / clause style ids (e.g. ClauseHeading1) take
+            // precedence over the source block's style so the
+            // inserted paragraph renders as the requested kind, not
+            // as a clone of the anchor.
+            attrs["styleId"] = operation.styleId;
+            // A heading is logically a fresh block; drop list marker
+            // attrs that would otherwise leak from the anchor and
+            // render the heading as a list item.
+            if (operation.inheritFormatting !== false) {
+              attrs["listMarker"] = null;
+              attrs["listMarkerHidden"] = null;
+              attrs["listLevelNumFmts"] = null;
+              attrs["listLevelStarts"] = null;
+              attrs["listAbstractNumId"] = null;
+              attrs["listStartOverride"] = null;
+            }
+          }
+          // In suggested mode, mark the whole inserted paragraph so the strip
+          // drops it from serialized DOCX until accepted (the inline insertion
+          // marks alone would leave an empty paragraph behind).
+          if (isSuggested && suggestionId !== null && paragraphRevisionId !== null) {
+            attrs["_suggestedInsert"] = {
+              suggestionId,
+              revisionId: paragraphRevisionId,
+              author,
+              date,
+              ...(initials ? { initials } : {}),
+            };
+          }
+          nodes.push(item.blockNode.type.create(attrs, content));
         }
-        // In suggested mode, mark the whole inserted paragraph so the strip
-        // drops it from serialized DOCX until accepted (the inline insertion
-        // marks alone would leave an empty paragraph behind).
-        if (isSuggested && suggestionId !== null && insertedBlockRevisionId !== null) {
-          attrs["_suggestedInsert"] = {
-            suggestionId,
-            revisionId: insertedBlockRevisionId,
-            author,
-            date,
-            ...(initials ? { initials } : {}),
-          };
+        if (insertedBlockRevisionIds.length > 0) {
+          appliedRevisionIds = insertedBlockRevisionIds;
         }
-        const node = item.blockNode.type.create(attrs, content);
-        tr = tr.insert(item.from, node);
+        tr = tr.insert(item.from, nodes);
         break;
       }
       case "insertSignatureTable": {
@@ -1349,7 +1438,7 @@ const applyFolioAIEditOperationsInternal = ({
     view.dispatch(tr);
   }
 
-  return { applied, skipped };
+  return { applied, skipped, ...(normalizations.length > 0 && { normalizations }) };
 };
 
 export const applyFolioAIEditOperations = (
@@ -1378,6 +1467,7 @@ export const previewFolioAIEditOperations = (
   return {
     applied: result.applied.map(({ id }) => ({ id })),
     skipped: result.skipped,
+    ...(result.normalizations !== undefined && { normalizations: result.normalizations }),
   };
 };
 
@@ -1750,6 +1840,9 @@ const resolveOperation = ({
     } else {
       insertFrom = isInsertAfter ? blockTo : blockFrom;
     }
+    const insertTexts = LINE_BREAK_PATTERN.test(operation.text)
+      ? splitInsertParagraphTexts(operation.text)
+      : [operation.text];
     return {
       type: "resolved",
       operation: {
@@ -1759,7 +1852,7 @@ const resolveOperation = ({
         blockFrom,
         blockTo,
         blockNode,
-        insertText: operation.text,
+        insertTexts,
       },
     };
   }

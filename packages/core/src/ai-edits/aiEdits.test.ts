@@ -976,6 +976,209 @@ describe("Folio AI edit operations", () => {
     expect(view.state.doc.child(2).textContent).toBe("Second inserted.");
   });
 
+  test("splits multi-line insertAfterBlock text into consecutive paragraphs and reports a normalization", () => {
+    // A model routinely sends a whole clause — heading plus body — as one
+    // `text` with embedded newlines. Word has no paragraph-with-a-line-break
+    // primitive, so this must become several paragraphs, not literal
+    // newline characters inside one.
+    const view = makeView(makeState(["5. Confidentiality body."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "6. Force Majeure\nNeither party shall be liable for delays beyond its control.",
+          styleId: "Heading2",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(view.state.doc.childCount).toBe(3);
+    // Only the first resulting paragraph is the one the model styled.
+    expect(view.state.doc.child(1).textContent).toBe("6. Force Majeure");
+    expect(view.state.doc.child(1).attrs["styleId"]).toBe("Heading2");
+    // The body line lands as its own, separately-styled paragraph.
+    expect(view.state.doc.child(2).textContent).toBe(
+      "Neither party shall be liable for delays beyond its control.",
+    );
+    expect(view.state.doc.child(2).attrs["styleId"]).toBeNull();
+    expect(result.normalizations).toEqual([
+      { id: "op-1", code: "splitMultilineText", paragraphCount: 2 },
+    ]);
+  });
+
+  test("leaves a single-line insertAfterBlock unchanged and reports no normalization", () => {
+    const view = makeView(makeState(["Anchor block."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "Single paragraph, no line breaks.",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(view.state.doc.childCount).toBe(2);
+    expect(view.state.doc.child(1).textContent).toBe("Single paragraph, no line breaks.");
+    expect(result.normalizations).toBeUndefined();
+  });
+
+  test("splits insertAfterBlock text on CRLF line endings", () => {
+    const view = makeView(makeState(["Anchor block."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "First line.\r\nSecond line.",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.child(1).textContent).toBe("First line.");
+    expect(view.state.doc.child(2).textContent).toBe("Second line.");
+    expect(result.normalizations).toEqual([
+      { id: "op-1", code: "splitMultilineText", paragraphCount: 2 },
+    ]);
+  });
+
+  test("collapses blank and trailing lines when splitting multi-line insert text", () => {
+    const view = makeView(makeState(["Anchor block."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "6. Force Majeure\n\nNeither party shall be liable.\n\n\n",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    // Blank lines are dropped rather than becoming empty paragraphs, and the
+    // trailing newlines do not add a trailing empty block.
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.child(1).textContent).toBe("6. Force Majeure");
+    expect(view.state.doc.child(2).textContent).toBe("Neither party shall be liable.");
+    expect(result.normalizations).toEqual([
+      { id: "op-1", code: "splitMultilineText", paragraphCount: 2 },
+    ]);
+  });
+
+  test("gives every paragraph from a split insert its own tracked-change revision id", () => {
+    const view = makeView(makeState(["Anchor block."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "Heading\nBody line.",
+        },
+      ],
+      mode: "tracked-changes",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(result.applied[0]?.revisionIds).toHaveLength(2);
+    expect(new Set(result.applied[0]?.revisionIds).size).toBe(2);
+  });
+
+  test("does not leak a list-item anchor's listMarker onto later paragraphs of a split insert", () => {
+    // baseAttrs (inherited from the anchor) must only land on the first
+    // paragraph. A body-text continuation line is not a list item just
+    // because the anchor it followed was.
+    const view = makeView(makeState([{ text: "Payment one.", listMarker: "7.5.1" }]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "Payment two.\nSubject to the schedule in Annex A.",
+          inheritFormatting: true,
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.child(1).textContent).toBe("Payment two.");
+    expect(view.state.doc.child(1).attrs["listMarker"]).toBe("7.5.1");
+    expect(view.state.doc.child(2).textContent).toBe("Subject to the schedule in Annex A.");
+    expect(view.state.doc.child(2).attrs["listMarker"]).toBeNull();
+  });
+
+  test("does not leak a heading anchor's styleId onto later paragraphs of a split insert", () => {
+    // Same contract from the other direction: when the ANCHOR (not the
+    // operation's own styleId override) carries a styleId, only the first
+    // synthesized paragraph may inherit it.
+    const view = makeView(makeState([{ text: "1. Definitions", styleId: "Heading2" }]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "In this agreement, the following terms apply.\nMore body text.",
+          inheritFormatting: true,
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.child(1).textContent).toBe(
+      "In this agreement, the following terms apply.",
+    );
+    expect(view.state.doc.child(1).attrs["styleId"]).toBe("Heading2");
+    expect(view.state.doc.child(2).textContent).toBe("More body text.");
+    expect(view.state.doc.child(2).attrs["styleId"]).toBeNull();
+  });
+
   test("inheritFormatting does not copy identity attrs (paraId / textId)", () => {
     // The new block synthesized for an insertAfterBlock with
     // inheritFormatting must keep formatting attrs (listMarker,
