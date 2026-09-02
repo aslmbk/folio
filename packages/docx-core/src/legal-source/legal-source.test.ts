@@ -334,3 +334,258 @@ describe("Stella Legal Source", () => {
     expect(numberingXml).toContain('<w:suff w:val="tab"/><w:lvlText');
   });
 });
+
+const bodyParagraphs = (result: ReturnType<typeof compileLegalSourceToDocument>) =>
+  result.status === "ok"
+    ? result.document.package.document.content.flatMap((block) =>
+        block.type === "paragraph" && block.formatting?.styleId === "BodyText" ? [block] : [],
+      )
+    : [];
+
+const runsOf = (paragraph: { content: { type: string }[] }) =>
+  paragraph.content.flatMap((node) => {
+    if (node.type === "run" && "formatting" in node && "content" in node) {
+      return [node];
+    }
+    if (node.type === "hyperlink" && "children" in node && Array.isArray(node.children)) {
+      return node.children;
+    }
+    return [];
+  });
+
+describe("Stella Legal Source — markdown bodies", () => {
+  test("renders inline markdown in a clause body as formatted runs", () => {
+    const result = compileLegalSourceToDocument(
+      [
+        '@doc title="Inline"',
+        "@clause Payment",
+        "The **Buyer** pays *promptly*, see [the schedule](https://example.com/s).",
+      ].join("\n"),
+    );
+    const [body] = bodyParagraphs(result);
+    expect(body).toBeDefined();
+    const hyperlink = body?.content.find((node) => node.type === "hyperlink");
+    expect(hyperlink?.type === "hyperlink" ? hyperlink.href : undefined).toBe(
+      "https://example.com/s",
+    );
+    expect(JSON.stringify(body)).toContain('"bold":true');
+    expect(JSON.stringify(body)).toContain('"italic":true');
+    expect(JSON.stringify(body)).not.toContain("**");
+  });
+
+  test("keeps [[placeholders]] highlighted inside emphasised text", () => {
+    const result = compileLegalSourceToDocument(
+      ['@doc title="Placeholders"', "@paragraph", "**[[Party]]** shall pay [[Amount]]."].join("\n"),
+    );
+    const [body] = bodyParagraphs(result);
+    const highlighted = (body ? runsOf(body) : []).filter(
+      (run) => "formatting" in run && run.formatting?.highlight === "yellow",
+    );
+    expect(highlighted).toHaveLength(2);
+  });
+
+  test("a markdown list inside a clause body becomes a list block in place", () => {
+    const result = parseLegalSource(
+      [
+        '@doc title="Lists"',
+        "@clause Duties",
+        "The Supplier shall:",
+        "- deliver on time",
+        "- report monthly",
+        "",
+        "Both duties are ongoing.",
+      ].join("\n"),
+    );
+    expect(result.draft.blocks).toEqual([
+      { type: "clause", level: 1, heading: "Duties", paragraphs: ["The Supplier shall:"] },
+      { type: "list", ordered: false, items: ["deliver on time", "report monthly"] },
+      { type: "paragraph", paragraphs: ["Both duties are ongoing."] },
+    ]);
+  });
+
+  test("a GFM pipe table outside @table is a table block", () => {
+    const result = parseLegalSource(
+      ['@doc title="Tables"', "| Item | Owner |", "| --- | --- |", "| Approval | Alpha |"].join(
+        "\n",
+      ),
+    );
+    expect(result.draft.blocks).toEqual([
+      { type: "table", table: { headers: ["Item", "Owner"], rows: [["Approval", "Alpha"]] } },
+    ]);
+  });
+
+  test("a directive line never merges into the paragraph above it", () => {
+    const result = parseLegalSource(
+      ['@doc title="T"', "@clause First", "Body line", "@clause Next", "More"].join("\n"),
+    );
+    expect(result.draft.blocks).toEqual([
+      { type: "clause", level: 1, heading: "First", paragraphs: ["Body line"] },
+      { type: "clause", level: 1, heading: "Next", paragraphs: ["More"] },
+    ]);
+  });
+
+  test("soft-wrapped lines stay one paragraph", () => {
+    const result = parseLegalSource(
+      [
+        '@doc title="Wrap"',
+        "@paragraph",
+        "This sentence",
+        "continues here.",
+        "",
+        "Second one.",
+      ].join("\n"),
+    );
+    expect(result.draft.blocks).toEqual([
+      { type: "paragraph", paragraphs: ["This sentence continues here.", "Second one."] },
+    ]);
+  });
+
+  test("reports an unknown directive as the author spelled it", () => {
+    const result = parseLegalSource(['@doc title="T"', "@Whereas the parties agree"].join("\n"));
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "unknown-directive",
+        message: 'Unknown legal directive "@Whereas".',
+        line: 2,
+      }),
+    );
+  });
+
+  test("a blank line before a directive never swallows it", () => {
+    const result = parseLegalSource(
+      [
+        "",
+        "@doc title=T",
+        "",
+        "@title T",
+        "",
+        "@clause A",
+        "body",
+        "",
+        "@pagebreak",
+        "",
+        "@clause B",
+        "more",
+      ].join("\n"),
+    );
+    expect(result.draft.blocks).toEqual([
+      { type: "title", text: "T" },
+      { type: "clause", level: 1, heading: "A", paragraphs: ["body"] },
+      { type: "pageBreak" },
+      { type: "clause", level: 1, heading: "B", paragraphs: ["more"] },
+    ]);
+  });
+
+  test("fenced code stays literal through the inline renderer", () => {
+    const result = compileLegalSourceToDocument(
+      ['@doc title="Code"', "@paragraph", "```", "**not bold** [[not a placeholder]]", "```"].join(
+        "\n",
+      ),
+    );
+    const [body] = bodyParagraphs(result);
+    expect(body).toBeDefined();
+    const runs = body ? runsOf(body) : [];
+    // Escaped characters come back as separate runs; the joined text is
+    // what matters.
+    expect(
+      runs
+        .map((run) =>
+          "content" in run
+            ? run.content.map((item) => (item.type === "text" ? item.text : "")).join("")
+            : "",
+        )
+        .join(""),
+    ).toBe("**not bold** [[not a placeholder]]");
+    expect(JSON.stringify(body)).not.toContain('"bold":true');
+    expect(JSON.stringify(body)).not.toContain('"highlight"');
+  });
+
+  test("a list or quote directly followed by a directive does not swallow it", () => {
+    const result = parseLegalSource(
+      [
+        '@doc title="Boundaries"',
+        "@clause Duties",
+        "- deliver",
+        "- report",
+        "@clause Fees",
+        "> quoted intro",
+        "@subclause Rates",
+        "Hourly.",
+      ].join("\n"),
+    );
+    expect(result.draft.blocks).toEqual([
+      { type: "clause", level: 1, heading: "Duties", paragraphs: [] },
+      { type: "list", ordered: false, items: ["deliver", "report"] },
+      { type: "clause", level: 1, heading: "Fees", paragraphs: ["quoted intro"] },
+      { type: "clause", level: 2, heading: "Rates", paragraphs: ["Hourly."] },
+    ]);
+  });
+
+  test("diagnostics keep the author's line numbers after boundary insertion", () => {
+    const result = parseLegalSource(
+      ['@doc title="Lines"', "@list", "- one", "@bogus directive", "@clause A"].join("\n"),
+    );
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "unknown-directive", line: 4 }),
+    );
+  });
+
+  test("tolerates closing directives a model invents", () => {
+    const result = parseLegalSource(
+      [
+        '@doc title="Closers"',
+        "@list",
+        "- one",
+        "- two",
+        "@endlist",
+        "@clause A",
+        "body",
+        "@end",
+      ].join("\n"),
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.fixes.filter((fix) => fix.code === "closing-directive-ignored")).toHaveLength(2);
+    expect(result.draft.blocks).toEqual([
+      { type: "list", ordered: false, items: ["one", "two"] },
+      { type: "clause", level: 1, heading: "A", paragraphs: ["body"] },
+    ]);
+  });
+
+  test("warns about a body paragraph that is bold end to end instead of rewriting it", () => {
+    const result = compileLegalSourceToDocument(
+      ['@doc title="Bold"', "@paragraph", "**Whole sentence carried over from chat.**"].join("\n"),
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") {
+      return;
+    }
+    expect(result.warnings.map((warning) => warning.code)).toEqual(["whole-paragraph-emphasis"]);
+    expect(JSON.stringify(bodyParagraphs(result))).toContain('"bold":true');
+  });
+
+  test("signature fields stay literal, never markdown, but keep placeholder highlights", () => {
+    const result = compileLegalSourceToDocument(
+      [
+        '@doc title="Sign"',
+        "@signatures",
+        "Party: A_B_C Ltd",
+        "By: *Jane*",
+        "Party: [[Seller legal name]]",
+        "By: [[name of signatory]]",
+      ].join("\n"),
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") {
+      return;
+    }
+    const serialized = JSON.stringify(result.document.package.document.content);
+    expect(serialized).toContain("A_B_C Ltd");
+    expect(serialized).toContain("*Jane*");
+    expect(serialized).not.toContain("[[");
+    expect(serialized).toContain(
+      JSON.stringify({ text: "Seller legal name", preserveSpace: true }).slice(1, -1),
+    );
+    const highlighted = (serialized.match(/"highlight":"yellow"/gu) ?? []).length;
+    expect(highlighted).toBe(2);
+  });
+});
