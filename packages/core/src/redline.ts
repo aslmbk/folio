@@ -35,6 +35,7 @@ import {
   type FolioDocumentPrivacyOptions,
   type FolioDocumentPrivacyReport,
 } from "./docx/metadataPrivacy";
+import { FolioContentInlinePresentationProjectionError } from "./compare/content";
 import { inlineFormattingSegments } from "./compare/formatting";
 import {
   GenerateRedlineDocxOperationLimitError,
@@ -119,16 +120,32 @@ const buildFormattingRedlineOperations = ({
   revisedBlock,
   nextOperationId,
 }: BuildFormattingRedlineOperationsOptions): FolioAIEditOperation[] => {
-  const segments = inlineFormattingSegments({
+  const formattingComparison = inlineFormattingSegments({
     baseBlock,
     targetBlock: revisedBlock,
     maxSegments: MAX_GENERATED_REDLINE_OPERATIONS,
   });
-  if (segments === null) {
-    throw new GenerateRedlineDocxOperationLimitError({
-      message: "The document comparison exceeds the generated operation limit.",
-    });
-  }
+  const segments = (() => {
+    switch (formattingComparison.status) {
+      case "compared":
+        return formattingComparison.segments;
+      case "budget-exceeded":
+        throw new GenerateRedlineDocxOperationLimitError({
+          message: "The document comparison exceeds the generated operation limit.",
+        });
+      case "unalignable":
+        throw new FolioContentInlinePresentationProjectionError({
+          message: "The inline formatting runs could not be aligned for redline generation.",
+          side: formattingComparison.side,
+          baseBlockId: baseBlock.id,
+          revisedBlockId: revisedBlock.id,
+        });
+      default: {
+        const unreachable: never = formattingComparison;
+        return panic("Unhandled inline formatting comparison result", { result: unreachable });
+      }
+    }
+  })();
   const operations: FolioAIEditOperation[] = [];
   for (const { startOffset, endOffset, formatting } of segments) {
     const range = createFolioAITextRangeHandle({
