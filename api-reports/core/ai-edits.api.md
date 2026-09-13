@@ -127,7 +127,7 @@ export type FolioAIBlockAnchor = {
 };
 
 // @public (undocumented)
-export type FolioAIBlockKind = "heading" | "listItem" | "paragraph";
+export type FolioAIBlockKind = FolioContentParagraphKind;
 
 // @public (undocumented)
 export type FolioAIBlockPreviewRun = FolioContentRun;
@@ -478,6 +478,9 @@ export type FolioCommentAnchor = {
     blockId: string | null;
     quote: string;
 };
+
+// @public
+export type FolioContentParagraphKind = "heading" | "listItem" | "paragraph";
 
 // @public (undocumented)
 export type FolioDocumentNavigationTarget = {

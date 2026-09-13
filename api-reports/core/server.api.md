@@ -498,7 +498,7 @@ export type FolioAIBlockAnchor = {
 };
 
 // @public (undocumented)
-export type FolioAIBlockKind = "heading" | "listItem" | "paragraph";
+export type FolioAIBlockKind = FolioContentParagraphKind;
 
 // @public (undocumented)
 export type FolioAIBlockPreviewRun = FolioContentRun;
@@ -844,6 +844,9 @@ export type FolioCompareDocxVersionsOptions = {
     include?: readonly FolioVersionComparisonScope[];
     privacy?: FolioVersionDiffPrivacyOptions;
 };
+
+// @public
+export type FolioContentParagraphKind = "heading" | "listItem" | "paragraph";
 
 // @public (undocumented)
 export type FolioDocumentMetadataProperty = (typeof FOLIO_DOCUMENT_METADATA_PROPERTIES)[number];

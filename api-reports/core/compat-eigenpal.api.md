@@ -783,7 +783,7 @@ export type FolioAIBlockAnchor = {
 };
 
 // @public (undocumented)
-export type FolioAIBlockKind = "heading" | "listItem" | "paragraph";
+export type FolioAIBlockKind = FolioContentParagraphKind;
 
 // @public (undocumented)
 export type FolioAIBlockPreviewRun = FolioContentRun;
@@ -1241,6 +1241,9 @@ export type FolioContentParagraphFormattingPatch = {
     alignment?: FolioContentBlock["directAlignment"] | null;
     spacing?: FolioContentParagraphSpacing | null;
 };
+
+// @public
+export type FolioContentParagraphKind = "heading" | "listItem" | "paragraph";
 
 // @public
 export type FolioContentParagraphSpacing = {
