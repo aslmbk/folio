@@ -17,7 +17,7 @@ if (result.isOk()) {
 The buffer opens as ordinary revisions in any OOXML consumer. `changes` is a
 discriminated union on `kind` (`insert`, `delete`, `replace`, `move`, `format`,
 `table-insert`, `table-delete`, `table-row-insert`, `table-row-delete`,
-`split`, `merge`, `paragraph-format`, `numbering`), for an agent that wants
+`split`, `merge`, `paragraph-format`, `run-format`, `inline-atom`, `numbering`), for an agent that wants
 the summary rather than the document. Every change carries the story it
 belongs to, so a caller can tell a body edit from a footnote edit — except
 `numbering`, which belongs to the package.
@@ -437,3 +437,27 @@ carries the current numbers and the failing cases.
 - `probes.test.ts` — one labelled single mutation each, pinning what the
   change list SAYS rather than only that it round-trips.
 - `../../scripts/compare.ts` — a manual runner for humans.
+
+## Revision-format compatibility
+
+`CompareDocxOptions.revisionFormat` is `"word"` by default. It emits standard
+OOXML revision markup and reports `{ status: "standard-ooxml" }` in the result's
+`compatibility` field.
+
+`"folio-exact"` records Folio-only review metadata. It can preserve section
+header/footer reference history in the MCE extension defined by
+[`../docx/sectionReferenceHistory.xsd`](../docx/sectionReferenceHistory.xsd),
+and it can add an untracked receiver after a deleted terminal table. The receiver
+uses Folio's ignorable `urn:stella:folio:review-history:1` namespace so Folio
+can remove it on reject or clear its marker on accept. Word can safely ignore or
+drop this metadata, so a `requires-folio` package must be resolved in Folio
+before handing it to Word when the raw Folio base view must be reproduced.
+`compatibility` reports every requirement as a non-empty `reasons` array, such
+as `{ status: "requires-folio", reasons: ["section-reference-history"] }`.
+An absent `frh:previousReferences` means no reference history was encoded; an
+empty element means the prior section had no header or footer references. Folio
+must resolve this history before the package is handed to Word for an exact
+result: Word opens the extension safely but strips it during an ordinary save.
+
+The terminal runner accepts `--revision-format word|folio-exact`. Its `--json`
+output includes `compatibility` alongside `changes` and `unsupported`.

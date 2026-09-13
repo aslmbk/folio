@@ -18,7 +18,7 @@ import { Fragment } from "prosemirror-model";
 import {
   isStyleSourcedParagraphNumbering,
   modelParagraphFormattingEmission,
-  paragraphNumberingReferencesEqual,
+  sameAuthoredParagraphNumberingReference,
 } from "../../internal/paragraphFormattingSerialization";
 import { visitDocxParagraphs } from "../../docx/paragraphTraversal";
 import { DATE_UTC_ATTRIBUTE } from "../../docx/trackedChangeInfo";
@@ -50,6 +50,7 @@ import {
   visitTableCellParagraphPropertySourceBindings,
 } from "../../docx/paragraphPropertySource";
 import { canonicalJson } from "../../utils/canonicalJson";
+import { imageRawXmlFingerprint } from "../../docx/imageRawXml";
 import { normalizeHorizontalScalePercent } from "../../utils/horizontalScale";
 import { parseShapeGeometryAdjustments } from "../shapeGeometryAdjustments";
 import { narrowEnum, ShapeOutlineStyleSchema } from "../../docx/parserEnums";
@@ -1502,6 +1503,9 @@ function convertPMParagraph(
   if (attrs.textId) {
     paragraph.textId = attrs.textId;
   }
+  if (attrs.reviewCarrier) {
+    paragraph.reviewCarrier = attrs.reviewCarrier;
+  }
   const pFormatting = paragraphAttrsToFormatting(attrs);
   if (pFormatting) {
     paragraph.formatting = pFormatting;
@@ -1712,7 +1716,7 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
       delete result.numPrFromStyle;
     } else if (
       attrs.numPr !== orig.numPr &&
-      !paragraphNumberingReferencesEqual(attrs.numPr, orig.numPr)
+      !sameAuthoredParagraphNumberingReference(attrs.numPr, orig.numPr)
     ) {
       if (attrs.numPr) {
         result.numPr = attrs.numPr;
@@ -2263,6 +2267,10 @@ function extractParagraphContent(
             textBoxAnchorMarkers,
           }),
         );
+        return;
+      }
+      if (node.type.name === "math") {
+        currentTrackedChange.wrapper.content.push(createMathFromNode(node));
         return;
       }
       const run = createTrackedChangeRun({
@@ -3147,9 +3155,9 @@ function createFieldFromNode(
     );
   });
 
-  // Dynamic fields need visible fallback text only when they have no authored
-  // structural result. A page-break-only result is complete despite having no
-  // glyphs; appending a space would mutate it on every save/reopen cycle.
+  // PAGE and NUMPAGES have a stable visible fallback. Other empty fields may
+  // intentionally have no result (for example an empty TOC); inventing a
+  // space changes their authored result on every save/reopen cycle.
   let displayText = attrs.displayText ?? "";
   if (!displayText && !hasExplicitPageBreak) {
     switch (attrs.fieldType) {
@@ -3158,9 +3166,6 @@ function createFieldFromNode(
         break;
       case "NUMPAGES":
         displayText = "1";
-        break;
-      default:
-        displayText = " ";
         break;
     }
   }
@@ -3177,6 +3182,7 @@ function createFieldFromNode(
     extractedContent.length > 0
       ? synchronizeFieldDisplayText(extractedContent, displayText, displayRun)
       : [];
+  const fallbackFieldContent = displayText ? [displayRun] : [];
 
   if (attrs.fieldKind === "complex") {
     const complex: ComplexField = {
@@ -3187,7 +3193,7 @@ function createFieldFromNode(
       fieldResult:
         fieldContent.length > 0
           ? fieldContent.filter((content): content is Run => content.type === "run")
-          : [displayRun],
+          : fallbackFieldContent,
     };
     if (attrs.fldLock) {
       complex.fldLock = true;
@@ -3202,7 +3208,7 @@ function createFieldFromNode(
     type: "simpleField",
     instruction: attrs.instruction,
     fieldType: attrs.fieldType,
-    content: fieldContent.length > 0 ? fieldContent : [displayRun],
+    content: fieldContent.length > 0 ? fieldContent : fallbackFieldContent,
   };
   if (attrs.fldLock) {
     simple.fldLock = true;
@@ -3472,6 +3478,7 @@ function createImageRun(node: PMNode): Run {
           type: "drawing",
           image,
           ...(attrs._docxRawXml ? { rawXml: attrs._docxRawXml } : {}),
+          ...(attrs._docxRawXml ? { rawImageFingerprint: imageRawXmlFingerprint(image) } : {}),
         };
 
   return {
@@ -3631,6 +3638,7 @@ const RUN_FORMATTING_VISUAL_GROUPS = {
   smallCaps: "smallCaps",
   allCaps: "allCaps",
   hidden: "hidden",
+  noProof: null,
   color: "color",
   highlight: "highlight",
   shading: "shading",
@@ -3670,6 +3678,7 @@ const RUN_FORMATTING_FAST_PATH_DISPOSITION = {
   smallCaps: "visual",
   allCaps: "visual",
   hidden: "visual",
+  noProof: "structural",
   color: "visual",
   highlight: "visual",
   shading: "visual",
@@ -3986,6 +3995,7 @@ const DIRECT_OVERRIDE_FORMATTING_PROPERTIES = [
   "emboss",
   "fontSizeCs",
   "hidden",
+  "noProof",
   "imprint",
   "italic",
   "italicCs",

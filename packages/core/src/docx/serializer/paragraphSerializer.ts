@@ -978,6 +978,9 @@ function serializeTrackedChange(
         item.type === "simpleField" ? serializeSimpleField(item) : serializeComplexField(item);
       return tag === "del" || tag === "moveFrom" ? rewriteRunTextAsDeleted(xml) : xml;
     }
+    if (item.type === "mathEquation") {
+      return item.ommlXml;
+    }
     if (
       item.type === "insertion" ||
       item.type === "deletion" ||
@@ -1121,6 +1124,9 @@ export function serializeParagraph(paragraph: Paragraph): string {
   }
   if (paragraph.textId) {
     attrs.push(`w14:textId="${escapeXml(paragraph.textId)}"`);
+  }
+  if (paragraph.reviewCarrier) {
+    attrs.push(`folio:reviewCarrier="${paragraph.reviewCarrier}"`);
   }
   const attrsStr = attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
 

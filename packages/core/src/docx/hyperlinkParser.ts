@@ -121,7 +121,8 @@ export function parseHyperlink(
         // Both external and internal links use the same target
         const safeHref = sanitizeExternalUrl(rel.target);
         if (safeHref) {
-          hyperlink.href = safeHref;
+          // Validate the protocol without rewriting the authored relationship target.
+          hyperlink.href = rel.target;
         }
       }
     }
@@ -318,7 +319,7 @@ export function resolveHyperlinkUrl(
     if (rel) {
       const safeHref = sanitizeExternalUrl(rel.target);
       if (safeHref) {
-        hyperlink.href = safeHref;
+        hyperlink.href = rel.target;
         return hyperlink.href;
       }
     }

@@ -21,6 +21,11 @@ import type {
   FinalParagraphMarkRevision,
 } from "./verification";
 
+/** Revision encoding requested for the generated package. */
+export const COMPARE_REVISION_FORMATS = ["word", "folio-exact"] as const;
+
+export type CompareRevisionFormat = (typeof COMPARE_REVISION_FORMATS)[number];
+
 /** Everything {@link compareDocx} needs; nothing it reads from the ambient clock. */
 export type CompareDocxOptions = {
   /** Author recorded on every generated tracked change. */
@@ -52,6 +57,12 @@ export type CompareDocxOptions = {
    * one thing this call promises.
    */
   granularity?: WordDiffGranularity;
+  /**
+   * Revision encoding: `"word"` (default) uses only standard OOXML revision
+   * markup. `"folio-exact"` preserves Folio-only review history that must be
+   * resolved before the package is handed to Word.
+   */
+  revisionFormat?: CompareRevisionFormat;
 };
 
 /** Where one change sits in the base or target document. */
@@ -136,6 +147,25 @@ export type CompareChange =
       targetBlockId: string;
       /** Only the properties that differ, set to the target document's value. */
       properties: FolioAIBlockParagraphProperties;
+    }
+  /** The body-level section properties changed. */
+  | {
+      kind: "section-properties";
+      location: CompareChangeLocation;
+    }
+  /** Full authored run properties changed beyond the neutral inline patch. */
+  | {
+      kind: "run-format";
+      location: CompareChangeLocation;
+      targetBlockId: string;
+      text: string;
+    }
+  /** A field, image, or page break changed while the surrounding text stayed the same. */
+  | {
+      kind: "inline-atom";
+      location: CompareChangeLocation;
+      targetBlockId: string;
+      text: string;
     }
   | {
       kind: "format";
@@ -244,6 +274,23 @@ export type CompareUnsupportedPart = {
   targetStory: FolioDocumentStoryHandle | null;
 };
 
+/**
+ * What a consumer can do with the returned revision package.
+ *
+ * Word can save standard OOXML revisions. It strips Folio's final-section
+ * reference history on an ordinary save, so a caller must resolve that history
+ * in Folio before handing a `requires-folio` package to Word when exactness
+ * matters.
+ */
+export type CompareCompatibility =
+  | { status: "standard-ooxml" }
+  | {
+      status: "requires-folio";
+      reasons: readonly [CompareFolioRequirement, ...CompareFolioRequirement[]];
+    };
+
+export type CompareFolioRequirement = "section-reference-history" | "terminal-table-carrier";
+
 export type CompareResult = {
   /** The base package carrying the generated tracked changes. */
   buffer: ArrayBuffer;
@@ -254,12 +301,14 @@ export type CompareResult = {
    * returned at all.
    */
   verification: CompareVerification;
+  /** The consumer compatibility of the generated revision encoding. */
+  compatibility: CompareCompatibility;
   unsupported: readonly CompareUnsupportedPart[];
 };
 
 export class InvalidCompareDocxOptionsError extends TaggedError("InvalidCompareDocxOptionsError")<{
   message: string;
-  option: "timestamp";
+  option: "timestamp" | "revisionFormat";
   receivedValue: unknown;
 }> {}
 

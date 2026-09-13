@@ -1,5 +1,6 @@
 import { panic } from "better-result";
-import type { Node as PMNode } from "prosemirror-model";
+import { Mark, type Node as PMNode } from "prosemirror-model";
+import type { Transaction } from "prosemirror-state";
 
 import { decodeOoxmlSymbolCharacter } from "../utils/ooxmlSymbol";
 import { expectFieldAttrs, expectSymbolAttrs } from "./attrs";
@@ -42,6 +43,32 @@ const dispositionsByName = new Map<string, RunFormattingInlineAtomDisposition>(
   Object.entries(RUN_FORMATTING_INLINE_ATOM_DISPOSITIONS),
 );
 
+const CONTROL_CHARACTER_BY_DISPOSITION = Object.freeze({
+  "break-run": "\n",
+  "field-run": null,
+  "not-a-run": null,
+  "page-break-carrier": null,
+  "structured-field": null,
+  "symbol-run": null,
+  "tab-run": "\t",
+  "text-run": null,
+} as const satisfies Record<RunFormattingInlineAtomDisposition, string | null>);
+
+export const runFormattingInlineControlCharacter = (node: PMNode): string | null => {
+  const disposition = runFormattingInlineAtomDisposition(node);
+  if (disposition === null) {
+    return null;
+  }
+  return CONTROL_CHARACTER_BY_DISPOSITION[disposition] ?? null;
+};
+
+export const runFormattingInlineControlNodeName = (character: string): string | null => {
+  const entry = Object.entries(RUN_FORMATTING_INLINE_ATOM_DISPOSITIONS).find(
+    ([, disposition]) => CONTROL_CHARACTER_BY_DISPOSITION[disposition] === character,
+  );
+  return entry?.[0] ?? null;
+};
+
 export const runFormattingInlineAtomDisposition = (
   node: PMNode,
 ): RunFormattingInlineAtomDisposition | null => {
@@ -73,6 +100,38 @@ export type SelectedRunFormattingCarrierRepresentation = RunFormattingCarrierRep
   carrierDisposition: RunFormattingCarrier["disposition"];
   from: number;
   to: number;
+};
+
+type ApplyMarksToRunFormattingRepresentationOptions = {
+  tr: Transaction;
+  representation: RunFormattingCarrierRepresentation & { from: number; to: number };
+  marks: readonly Mark[];
+};
+
+/** Apply a mark set without changing a carrier's text or serialized ownership. */
+export const applyMarksToRunFormattingRepresentation = ({
+  tr,
+  representation,
+  marks,
+}: ApplyMarksToRunFormattingRepresentationOptions): void => {
+  const { node, position, from, to } = representation;
+  if (Mark.sameSet(node.marks, marks)) {
+    return;
+  }
+  if (!node.isText) {
+    tr.setNodeMarkup(position, undefined, node.attrs, marks);
+    return;
+  }
+  for (const current of node.marks) {
+    if (!marks.some((candidate) => candidate.eq(current))) {
+      tr.removeMark(from, to, current.type);
+    }
+  }
+  for (const next of marks) {
+    if (!node.marks.some((candidate) => candidate.eq(next))) {
+      tr.addMark(from, to, next);
+    }
+  }
 };
 
 /**
@@ -179,12 +238,11 @@ export const selectRunFormattingCarrierRepresentations = ({
 /** Deterministic visible text for one logical formatting revision carrier. */
 export const runFormattingCarrierReviewText = (carrier: RunFormattingCarrier): string => {
   switch (carrier.disposition) {
+    case "tab-run":
+    case "break-run":
+      return CONTROL_CHARACTER_BY_DISPOSITION[carrier.disposition];
     case "text-run":
       return carrier.node.text ?? "";
-    case "tab-run":
-      return "\t";
-    case "break-run":
-      return "\n";
     case "page-break-carrier":
       return "";
     case "symbol-run": {

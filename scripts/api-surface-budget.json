@@ -2,7 +2,7 @@
   "docx-core": {
     "reportBytes": 60393,
     "reportLines": 1955,
-    "declarationBytes": 99695,
+    "declarationBytes": 105210,
     "declarationLines": 2567
   },
   "core": {
@@ -20,8 +20,8 @@
   "agents": {
     "reportBytes": 13171,
     "reportLines": 393,
-    "declarationBytes": 59761,
-    "declarationLines": 1194
+    "declarationBytes": 63806,
+    "declarationLines": 1310
   },
   "vue": {
     "reportBytes": 54675,

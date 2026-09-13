@@ -8,12 +8,12 @@
     "instantiations": 119309
   },
   "react": {
-    "types": 151672,
+    "types": 160733,
     "instantiations": 305848
   },
   "agents": {
-    "types": 86166,
-    "instantiations": 83527
+    "types": 90732,
+    "instantiations": 88961
   },
   "vue": {
     "types": 181473,
@@ -24,7 +24,7 @@
     "instantiations": 122528
   },
   "playground": {
-    "types": 151570,
+    "types": 160698,
     "instantiations": 219329
   },
   "playground-vue": {

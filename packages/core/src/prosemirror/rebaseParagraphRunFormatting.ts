@@ -1,4 +1,4 @@
-import { Mark } from "prosemirror-model";
+import { Mark, type Node as PMNode } from "prosemirror-model";
 import type { Transaction } from "prosemirror-state";
 import { panic } from "better-result";
 
@@ -16,6 +16,7 @@ import { paragraphRunStyleContext, type RunStyleResolver } from "./runStyleForma
 type RebaseParagraphRunFormattingOptions = {
   nextAttrs: Record<string, unknown>;
   paragraphPosition: number;
+  shouldRebase?: (node: PMNode) => boolean;
   styleResolver: RunStyleResolver;
   tr: Transaction;
 };
@@ -27,6 +28,7 @@ type RebaseParagraphRunFormattingOptions = {
 export const setParagraphAttrsWithRebasedRunFormatting = ({
   nextAttrs,
   paragraphPosition,
+  shouldRebase,
   styleResolver,
   tr,
 }: RebaseParagraphRunFormattingOptions): Transaction => {
@@ -54,6 +56,9 @@ export const setParagraphAttrsWithRebasedRunFormatting = ({
     node,
     position,
   }: RunFormattingCarrierRepresentation): void => {
+    if (shouldRebase && !shouldRebase(node)) {
+      return;
+    }
     const authoredFormatting = readAuthoredRunFormatting({
       context: previousContext,
       marks: node.marks,

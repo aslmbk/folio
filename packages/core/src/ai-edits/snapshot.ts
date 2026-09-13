@@ -1,13 +1,26 @@
 import { panic } from "better-result";
+import { Fragment } from "prosemirror-model";
 import type { Mark, Node as PMNode } from "prosemirror-model";
 import { TableMap } from "prosemirror-tables";
 
-import { expectParagraphAttrs, expectRunFormattingOverrideMarkAttrs } from "../prosemirror/attrs";
+import {
+  expectCharacterStyleMarkAttrs,
+  expectHyperlinkMarkAttrs,
+  expectParagraphAttrs,
+  expectRunFormattingOverrideMarkAttrs,
+} from "../prosemirror/attrs";
 import { marksToTextFormatting } from "../prosemirror/conversion/fromProseDoc";
 import { directParagraphAlignment } from "../prosemirror/paragraphAlignment";
+import { directParagraphIndentation } from "../prosemirror/paragraphIndentation";
 import { directParagraphSpacing } from "../prosemirror/paragraphSpacing";
 import { paragraphRunStyleContext, type RunStyleResolver } from "../prosemirror/runStyleFormatting";
+import { runFormattingInlineControlCharacter } from "../prosemirror/runFormattingInlineCarriers";
 import { authoredRunFormattingFromAttrs } from "../prosemirror/runFormattingProvenance";
+import {
+  readAuthoredRunFormatting,
+  reconcileRunFormattingMarks,
+} from "../prosemirror/runFormattingReconciliation";
+import { recreateProseNodeWithParagraphPropertySource } from "../docx/paragraphPropertySource";
 import type { TextFormatting } from "../types/document";
 import { deriveBlankBlockId, deriveBlockId, type FolioBlockId } from "../types/block-id";
 import { buildCleanBlockText, type CleanBlockText } from "./clean-text";
@@ -26,6 +39,7 @@ import type {
 type FolioAIEditSnapshotMetadata = {
   numberingReferenceKeys: readonly string[];
   sourceDocument: PMNode;
+  styleResolver: RunStyleResolver | null;
   storyTables: readonly FolioStoryTable[];
 };
 
@@ -46,6 +60,254 @@ export const storyTablesOf = (snapshot: FolioAIEditSnapshot): readonly FolioStor
 /** @internal The immutable ProseMirror document that produced this snapshot. */
 export const sourceDocumentOf = (snapshot: FolioAIEditSnapshot): PMNode =>
   metadataOf(snapshot).sourceDocument;
+
+/** @internal Style context that produced the snapshot's authored run properties. */
+export const styleResolverOf = (snapshot: FolioAIEditSnapshot): RunStyleResolver | null =>
+  metadataOf(snapshot).styleResolver;
+
+/**
+ * Derive a comparison-only view with concrete numbering references rebound.
+ * Rebuild from the remapped source document so blocks, anchors, table nodes,
+ * and operation templates retain one canonical set of numbering references.
+ */
+export const remapFolioAIEditSnapshotNumberingReferences = (
+  snapshot: FolioAIEditSnapshot,
+  numIdMap: ReadonlyMap<number, number>,
+): FolioAIEditSnapshot => {
+  if (numIdMap.size === 0) {
+    return snapshot;
+  }
+  const metadata = metadataOf(snapshot);
+  const remapNode = (node: PMNode): PMNode => {
+    const numPr: unknown = node.attrs["numPr"];
+    if (typeof numPr !== "object" || numPr === null || !("numId" in numPr)) {
+      return node;
+    }
+    const numId = numPr.numId;
+    if (typeof numId !== "number") {
+      return node;
+    }
+    const remappedNumId = numIdMap.get(numId);
+    if (remappedNumId === undefined) {
+      return node;
+    }
+    return recreateProseNodeWithParagraphPropertySource(node, {
+      attrs: { ...node.attrs, numPr: { ...numPr, numId: remappedNumId } },
+    });
+  };
+  const remapped = remapDocument(metadata.sourceDocument, remapNode);
+  if (remapped === metadata.sourceDocument) {
+    return snapshot;
+  }
+  return createFolioAIEditSnapshotInternal(remapped, metadata.styleResolver);
+};
+
+const remapDocument = (doc: PMNode, remapNode: (node: PMNode) => PMNode): PMNode => {
+  const rewrite = (node: PMNode): PMNode => {
+    if (node.isText) return remapNode(node);
+    const children: PMNode[] = [];
+    let changed = false;
+    node.forEach((child) => {
+      const next = rewrite(child);
+      if (next !== child) changed = true;
+      children.push(next);
+    });
+    const withChildren = changed
+      ? recreateProseNodeWithParagraphPropertySource(node, {
+          content: Fragment.fromArray(children),
+        })
+      : node;
+    return remapNode(withChildren);
+  };
+  return rewrite(doc);
+};
+
+const externalHrefCanCrossPackage = (href: string): boolean =>
+  href.length > 0 && !href.startsWith("#");
+
+const hyperlinkCanCrossPackage = ({ href, rId }: ReturnType<typeof expectHyperlinkMarkAttrs>) =>
+  externalHrefCanCrossPackage(href) ||
+  (href.length === 0 && !(typeof rId === "string" && rId.length > 0));
+
+/**
+ * Detach external hyperlink relationship ids before copying a story into a
+ * different package. The serializer allocates relationship ids for the
+ * receiving part; bookmark targets remain package-local and are refused.
+ */
+export const detachFolioAIEditSnapshotExternalHyperlinks = (
+  snapshot: FolioAIEditSnapshot,
+): FolioAIEditSnapshot | null => {
+  const metadata = metadataOf(snapshot);
+  let portable = true;
+  metadata.sourceDocument.descendants((node) => {
+    const emptyHyperlinks = node.attrs["_emptyHyperlinks"];
+    if (Array.isArray(emptyHyperlinks)) {
+      for (const hyperlink of emptyHyperlinks) {
+        if (
+          typeof hyperlink !== "object" ||
+          hyperlink === null ||
+          "anchor" in hyperlink ||
+          ("rId" in hyperlink &&
+            (typeof hyperlink.href !== "string" || !externalHrefCanCrossPackage(hyperlink.href)))
+        ) {
+          portable = false;
+          return false;
+        }
+      }
+    }
+    for (const mark of node.marks) {
+      if (mark.type.name !== "hyperlink") continue;
+      if (!hyperlinkCanCrossPackage(expectHyperlinkMarkAttrs(mark))) {
+        portable = false;
+        return false;
+      }
+    }
+    return true;
+  });
+  if (!portable) return null;
+  const remapNode = (node: PMNode): PMNode => {
+    const emptyHyperlinks = node.attrs["_emptyHyperlinks"];
+    const attrs = Array.isArray(emptyHyperlinks)
+      ? {
+          ...node.attrs,
+          _emptyHyperlinks: emptyHyperlinks.map(({ rId: _rId, ...hyperlink }) => hyperlink),
+        }
+      : node.attrs;
+    let marks: readonly Mark[] = node.marks;
+    for (const mark of node.marks) {
+      if (mark.type.name !== "hyperlink") continue;
+      const { rId: _rId, ...hyperlink } = expectHyperlinkMarkAttrs(mark);
+      marks = marks.map((candidate) =>
+        candidate === mark ? mark.type.create(hyperlink) : candidate,
+      );
+    }
+    if (attrs === node.attrs && marks === node.marks) return node;
+    if (node.isText) return node.mark(marks);
+    return recreateProseNodeWithParagraphPropertySource(node, { attrs, marks });
+  };
+  const remapped = remapDocument(metadata.sourceDocument, remapNode);
+  return remapped === metadata.sourceDocument
+    ? snapshot
+    : createFolioAIEditSnapshotInternal(remapped, metadata.styleResolver);
+};
+
+type RemapFolioAIEditSnapshotStyleReferencesOptions = {
+  snapshot: FolioAIEditSnapshot;
+  styleIdMap: ReadonlyMap<string, string>;
+  defaultParagraphStyleId: string | undefined;
+  importedStyleResolver: RunStyleResolver | null;
+  reconcileAuthoredFormatting?: boolean;
+};
+
+/** Rebind imported style identifiers while retaining the source formatting context. */
+export const remapFolioAIEditSnapshotStyleReferences = ({
+  snapshot,
+  styleIdMap,
+  defaultParagraphStyleId,
+  importedStyleResolver,
+  reconcileAuthoredFormatting = false,
+}: RemapFolioAIEditSnapshotStyleReferencesOptions): FolioAIEditSnapshot => {
+  if (
+    defaultParagraphStyleId === undefined &&
+    (styleIdMap.size === 0 || [...styleIdMap].every(([source, target]) => source === target))
+  ) {
+    return snapshot;
+  }
+  const metadata = metadataOf(snapshot);
+  const remapNode = (node: PMNode): PMNode => {
+    const styleId = node.attrs["styleId"];
+    const remappedStyleId = typeof styleId === "string" ? styleIdMap.get(styleId) : undefined;
+    if (remappedStyleId !== undefined) {
+      return recreateProseNodeWithParagraphPropertySource(node, {
+        attrs: { ...node.attrs, styleId: remappedStyleId },
+      });
+    }
+    if (node.isTextblock && typeof styleId !== "string" && defaultParagraphStyleId !== undefined) {
+      return recreateProseNodeWithParagraphPropertySource(node, {
+        attrs: { ...node.attrs, styleId: defaultParagraphStyleId },
+      });
+    }
+    if (!node.isText) return node;
+    let marks: readonly Mark[] = node.marks;
+    for (const mark of node.marks) {
+      if (mark.type.name !== "characterStyle") continue;
+      const attrs = expectCharacterStyleMarkAttrs(mark);
+      const remapped = styleIdMap.get(attrs.styleId);
+      if (remapped === undefined) continue;
+      marks = marks.map((candidate) =>
+        candidate === mark ? mark.type.create({ ...attrs, styleId: remapped }) : candidate,
+      );
+    }
+    return marks === node.marks ? node : node.mark(marks);
+  };
+  const remapped = remapDocument(metadata.sourceDocument, remapNode);
+  if (remapped === metadata.sourceDocument) return snapshot;
+  if (!reconcileAuthoredFormatting) {
+    return createFolioAIEditSnapshotInternal(remapped, importedStyleResolver);
+  }
+  const rebindAuthoredInlineFormatting = (source: PMNode, candidate: PMNode): PMNode => {
+    if (source.childCount !== candidate.childCount) {
+      return panic("Style remapping changed the document structure");
+    }
+    if (source.isInline) {
+      const hasAuthoredFormatting = source.marks.some(
+        ({ type }) => type.name === "runFormattingOverride" || type.name === "characterStyle",
+      );
+      if (!hasAuthoredFormatting) return candidate;
+      // Inline nodes are reconciled by their paragraph parent below, where the
+      // two style cascades are available.
+      return candidate;
+    }
+    const sourceContext =
+      source.type.name === "paragraph"
+        ? paragraphRunStyleContext(source, metadata.styleResolver)
+        : undefined;
+    const candidateContext =
+      candidate.type.name === "paragraph"
+        ? paragraphRunStyleContext(candidate, importedStyleResolver)
+        : undefined;
+    const children: PMNode[] = [];
+    let changed = false;
+    source.forEach((sourceChild, _offset, index) => {
+      const candidateChild = candidate.child(index);
+      let next = rebindAuthoredInlineFormatting(sourceChild, candidateChild);
+      if (sourceContext && candidateContext && sourceChild.isInline) {
+        const hasAuthoredFormatting = sourceChild.marks.some(
+          ({ type }) => type.name === "runFormattingOverride" || type.name === "characterStyle",
+        );
+        if (hasAuthoredFormatting) {
+          const authoredFormatting = readAuthoredRunFormatting({
+            context: sourceContext,
+            marks: sourceChild.marks,
+            styleResolver: metadata.styleResolver,
+          });
+          if (authoredFormatting.styleId !== undefined) {
+            authoredFormatting.styleId =
+              styleIdMap.get(authoredFormatting.styleId) ?? authoredFormatting.styleId;
+          }
+          const marks = reconcileRunFormattingMarks({
+            authoredFormatting,
+            context: candidateContext,
+            node: candidateChild,
+            styleResolver: importedStyleResolver,
+          });
+          next = candidateChild.isText
+            ? candidateChild.mark(marks)
+            : recreateProseNodeWithParagraphPropertySource(candidateChild, { marks });
+        }
+      }
+      if (next !== candidateChild) changed = true;
+      children.push(next);
+    });
+    return changed
+      ? recreateProseNodeWithParagraphPropertySource(candidate, {
+          content: Fragment.fromArray(children),
+        })
+      : candidate;
+  };
+  const rebound = rebindAuthoredInlineFormatting(metadata.sourceDocument, remapped);
+  return createFolioAIEditSnapshotInternal(rebound, importedStyleResolver);
+};
 
 export const normalizeFolioAIBlockText = (text: string): string =>
   text.replace(/\s+/gu, " ").trim();
@@ -397,13 +659,15 @@ const createFolioAIEditSnapshotInternal = (
     const displayLabel = getDisplayLabel(node);
     const styleId = getStyleId(node);
     const listLevel = getListLevel(node);
+    const listReference = getListReference(node);
     const numberingReferenceKey = getNumberingReferenceKey(node);
     if (numberingReferenceKey) {
       numberingReferenceKeys.add(numberingReferenceKey);
     }
     const directAlignment = getDirectAlignment(node);
     const directSpacing = getDirectSpacing(node);
-    const previewRuns = getPreviewRuns(node, styleResolver);
+    const directIndentation = getDirectIndentation(node);
+    const previewRuns = getPreviewRuns({ node, nodeFrom: pos, cleanBlock, styleResolver });
     const table = getTableLocation({ path, blockIndex: index, tableIndexByStart });
 
     draftBlocks.push({
@@ -416,8 +680,10 @@ const createFolioAIEditSnapshotInternal = (
         ...(displayLabel !== undefined && { displayLabel }),
         ...(styleId !== undefined && { styleId }),
         ...(listLevel !== undefined && { listLevel }),
+        ...(listReference !== undefined && { listReference }),
         ...(directAlignment !== undefined && { directAlignment }),
         ...(directSpacing !== undefined && { directSpacing }),
+        ...(directIndentation !== undefined && { directIndentation }),
         ...(previewRuns !== undefined && { previewRuns }),
         ...(structuralBoundaries.length > 0 && { structuralBoundaries }),
         ...(table !== undefined && { table }),
@@ -449,6 +715,7 @@ const createFolioAIEditSnapshotInternal = (
   metadataBySnapshot.set(snapshot, {
     numberingReferenceKeys: [...numberingReferenceKeys],
     sourceDocument: doc,
+    styleResolver,
     storyTables: tables,
   });
   return snapshot;
@@ -523,6 +790,21 @@ const getListLevel = (node: PMNode): number | undefined => {
   return typeof ilvl === "number" && Number.isInteger(ilvl) && ilvl >= 0 ? ilvl : undefined;
 };
 
+const getListReference = (node: PMNode): FolioAIBlock["listReference"] | undefined => {
+  const numPr: unknown = node.attrs["numPr"];
+  if (typeof numPr !== "object" || numPr === null || !("numId" in numPr)) return undefined;
+  const { numId } = numPr;
+  const level = "ilvl" in numPr ? numPr.ilvl : 0;
+  return typeof numId === "number" &&
+    Number.isInteger(numId) &&
+    numId > 0 &&
+    typeof level === "number" &&
+    Number.isInteger(level) &&
+    level >= 0
+    ? { numId, level }
+    : undefined;
+};
+
 const getNumberingReferenceKey = (node: PMNode): string | null => {
   const numPr: unknown = node.attrs["numPr"];
   if (typeof numPr !== "object" || numPr === null || !("numId" in numPr)) {
@@ -550,6 +832,10 @@ const getDirectAlignment = (node: PMNode) => directParagraphAlignment(expectPara
 /** Read only authored `w:spacing`, never effective spacing resolved from a style. */
 const getDirectSpacing = (node: PMNode) => directParagraphSpacing(expectParagraphAttrs(node));
 
+/** Read only authored `w:ind`, never effective indentation resolved from a style. */
+const getDirectIndentation = (node: PMNode) =>
+  directParagraphIndentation(expectParagraphAttrs(node));
+
 type PreviewRunStyle = {
   bold?: boolean;
   italic?: boolean;
@@ -565,23 +851,44 @@ const HIDDEN_MARK = "hidden";
 const RUN_FORMATTING_OVERRIDE_MARK = "runFormattingOverride";
 const CHARACTER_STYLE_MARK = "characterStyle";
 
-const getPreviewRuns = (
-  node: PMNode,
-  styleResolver: RunStyleResolver | null,
-): FolioAIBlockPreviewRun[] | undefined => {
+type GetPreviewRunsOptions = {
+  node: PMNode;
+  nodeFrom: number;
+  cleanBlock: CleanBlockText;
+  styleResolver: RunStyleResolver | null;
+};
+
+const getPreviewRuns = ({
+  node,
+  nodeFrom,
+  cleanBlock,
+  styleResolver,
+}: GetPreviewRunsOptions): FolioAIBlockPreviewRun[] | undefined => {
   const runs: FolioAIBlockPreviewRun[] = [];
   const defaultStyle = getDefaultPreviewRunStyle(node);
   let paragraphStyleContext: ReturnType<typeof paragraphRunStyleContext> | undefined;
+  let cleanOffset = 0;
 
-  node.descendants((child) => {
-    if (!child.isText || child.text === undefined) {
-      return true;
-    }
+  node.descendants((child, relativePosition) => {
+    const text = child.isText ? child.text : runFormattingInlineControlCharacter(child);
+    if (text === undefined || text === null) return true;
     if (
       child.marks.some((mark) => mark.type.name === DELETION_MARK || mark.type.name === HIDDEN_MARK)
     ) {
       return false;
     }
+    const start = nodeFrom + 1 + relativePosition;
+    while ((cleanBlock.offsets[cleanOffset] ?? Number.POSITIVE_INFINITY) < start) {
+      cleanOffset++;
+    }
+    const endOffset = cleanOffset + text.length - 1;
+    if (
+      cleanBlock.offsets[cleanOffset] !== start ||
+      cleanBlock.offsets[endOffset] !== start + text.length - 1
+    ) {
+      return false;
+    }
+    cleanOffset += text.length;
 
     const style = getPreviewRunStyle(child.marks, defaultStyle);
     const hasAuthorshipCarrier = child.marks.some(
@@ -608,12 +915,12 @@ const getPreviewRuns = (
       samePreviewRunStyle(previous, style) &&
       sameDirectFormatting(previous.directFormatting, directFormatting)
     ) {
-      previous.text += child.text;
+      previous.text += text;
       return false;
     }
 
     runs.push({
-      text: child.text,
+      text,
       ...style,
       ...(!isEmptyPreviewRunStyle(directFormatting) && { directFormatting }),
     });
@@ -890,7 +1197,7 @@ const isEmptyPreviewRunStyle = ({
   fontFamily,
   fontSizePt,
   color,
-}: PreviewRunStyle): boolean =>
+}: FolioAIInlineFormatting): boolean =>
   bold === undefined &&
   italic === undefined &&
   underline === undefined &&
@@ -913,19 +1220,6 @@ const sameDirectFormatting = (
     left.fontSizePt === right.fontSizePt &&
     left.color === right.color);
 
-const isUnstyledPreviewRun = ({
-  bold,
-  italic,
-  underline,
-  strike,
-  fontFamily,
-  fontSizePt,
-  color,
-}: FolioAIBlockPreviewRun): boolean =>
-  bold === undefined &&
-  italic === undefined &&
-  underline === undefined &&
-  strike === undefined &&
-  fontFamily === undefined &&
-  fontSizePt === undefined &&
-  color === undefined;
+const isUnstyledPreviewRun = ({ directFormatting, ...style }: FolioAIBlockPreviewRun): boolean =>
+  isEmptyPreviewRunStyle(style) &&
+  (directFormatting === undefined || isEmptyPreviewRunStyle(directFormatting));

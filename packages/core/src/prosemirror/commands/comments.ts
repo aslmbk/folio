@@ -7,6 +7,7 @@
 import type { Mark, MarkType, Node as PMNode } from "prosemirror-model";
 import type { Command, EditorState, Transaction } from "prosemirror-state";
 import { removeRow, TableMap } from "prosemirror-tables";
+import { Mapping } from "prosemirror-transform";
 
 import { joinProseParagraphsWithRightPropertySource } from "../../docx/paragraphPropertySource";
 
@@ -24,7 +25,11 @@ import type {
   TableFormatting,
   TableRowFormatting,
 } from "../../types/document";
-import { PARAGRAPH_MARK_CHANGE_KINDS, type ParagraphMarkChangeKind } from "@stll/docx-core/model";
+import {
+  PARAGRAPH_MARK_CHANGE_KINDS,
+  REVIEW_CARRIERS,
+  type ParagraphMarkChangeKind,
+} from "@stll/docx-core/model";
 
 import { expectParagraphAttrs, expectRunPropertyChangeMarkAttrs } from "../attrs";
 import {
@@ -32,6 +37,7 @@ import {
   finalParagraphsOf,
   paragraphEndsItsContainer,
 } from "../containerFinalParagraph";
+import { isTableCellRetainedInReviewView } from "../tableCellRevisionVisibility";
 import { resolveParagraphDefaultTextFormatting } from "../conversion/toProseDoc";
 import {
   markChangedParagraphRanges,
@@ -267,7 +273,11 @@ function resolveChange(
               let restored: SectionProperties = { ...sectionProperties };
               if (mode === "reject") {
                 for (const change of matches.toReversed()) {
-                  restored = sectionRejectProperties(restored, change.previousProperties);
+                  restored = sectionRejectProperties({
+                    live: restored,
+                    previousProperties: change.previousProperties,
+                    previousReferences: change.previousReferences,
+                  });
                 }
               }
               delete restored.propertyChanges;
@@ -290,6 +300,17 @@ function resolveChange(
                 paragraphPosition: pos,
                 styleResolver,
                 tr,
+                ...(mode === "reject" && {
+                  // A direct override is already authored against the source
+                  // context that reject restores. Inherited marks must rebase.
+                  shouldRebase: (inline) => {
+                    const deleted = inline.marks.some(({ type }) => type.name === "deletion");
+                    const direct = inline.marks.some(
+                      ({ type }) => type.name === "runFormattingOverride",
+                    );
+                    return !deleted || !direct;
+                  },
+                }),
               });
             } else {
               tr.setNodeMarkup(pos, undefined, nextAttrs);
@@ -593,6 +614,10 @@ function resolveChange(
         });
       }
 
+      if (!terminalTableDeletionIsPending(tr)) {
+        resolveTerminalTableReviewCarrier(tr, mode);
+      }
+
       if (tr.steps.length > 0) {
         dispatch(tr);
       }
@@ -600,6 +625,50 @@ function resolveChange(
     return true;
   };
 }
+
+/**
+ * The receiver belongs to the deleted terminal table, not every revision in
+ * the document. Keep it through independently resolved changes, then resolve
+ * it as soon as that table's deletion has been decided.
+ */
+const terminalTableDeletionIsPending = (tr: Transaction): boolean => {
+  let terminalTable: PMNode | null = null;
+  for (let index = tr.doc.childCount - 1; index >= 0; index--) {
+    const node = tr.doc.child(index);
+    if (node.type.name === "table") {
+      terminalTable = node;
+      break;
+    }
+  }
+  if (terminalTable === null) {
+    return false;
+  }
+  let pending = false;
+  terminalTable.descendants((node) => {
+    pending ||=
+      (node.type.name === "tableRow" && isTableRowRevisionAttr(node.attrs["trDel"])) ||
+      (node.type.name !== "tableRow" && node.marks.some((mark) => mark.type.name === "deletion"));
+    return !pending;
+  });
+  return pending;
+};
+
+/** Resolve the Folio-only receiver Word needs after a terminal deleted table. */
+const resolveTerminalTableReviewCarrier = (tr: Transaction, mode: ResolveMode): void => {
+  const carrier = tr.doc.lastChild;
+  if (
+    carrier?.type.name !== "paragraph" ||
+    carrier.attrs["reviewCarrier"] !== REVIEW_CARRIERS.TERMINAL_TABLE
+  ) {
+    return;
+  }
+  const position = tr.doc.content.size - carrier.nodeSize;
+  if (mode === "accept") {
+    tr.setNodeAttribute(position, "reviewCarrier", undefined);
+    return;
+  }
+  tr.delete(position, position + carrier.nodeSize);
+};
 
 type ResolveRunPropertyChangeOptions = {
   tr: Transaction;
@@ -830,11 +899,11 @@ function collectTableCellStructuralOps(
         revisionSet,
       });
     } else {
-      const keepsCell = (marker.kind === "ins") === (mode === "accept");
+      const view = mode === "accept" ? "final" : "original";
       operations.push({
         type: "membership",
         cellPos,
-        action: keepsCell ? "clear" : "remove",
+        action: isTableCellRetainedInReviewView(marker.kind, view) ? "clear" : "remove",
       });
     }
   }
@@ -1310,6 +1379,28 @@ export function resolveAllChangesInHeadlessState(
   });
   return resolvedState;
 }
+
+/**
+ * Resolve through the editor command path when a caller must map a position in
+ * the reviewed document back to the tracked source. The bulk resolver is
+ * faster, but deliberately replaces inline content without retaining mapping.
+ */
+export const resolveAllChangesInHeadlessStateWithMapping = (
+  state: EditorState,
+  mode: ResolveMode,
+): { state: EditorState; mapping: Mapping } => {
+  let resolvedState = state;
+  let mapping = new Mapping();
+  resolveChange(
+    0,
+    state.doc.content.size,
+    mode,
+  )(state, (transaction) => {
+    resolvedState = state.apply(transaction);
+    mapping = transaction.mapping;
+  });
+  return { state: resolvedState, mapping };
+};
 
 /**
  * Find the document range covered by all revision carriers with any of the

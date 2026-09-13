@@ -252,10 +252,13 @@ export const clearAutocompleteSuggestion: (tr: Transaction) => Transaction;
 export const clearTemplateSlashMenu: (tr: Transaction) => Transaction;
 
 // @public
+export const COMPARE_REVISION_FORMATS: readonly ["word", "folio-exact"];
+
+// @public
 export const COMPARE_UNSUPPORTED_REASONS: readonly ["story-missing-in-base", "story-missing-in-target", "story-not-editable"];
 
 // @public
-export const COMPARE_VERIFICATION_CAUSES: readonly ["invisible-structure", "block-count", "container", "inline-structure", "table-geometry", "style", "list-level", "alignment", "spacing", "inline-formatting", "whitespace", "text"];
+export const COMPARE_VERIFICATION_CAUSES: readonly ["invisible-structure", "block-count", "container", "inline-structure", "table-geometry", "section-properties", "style", "list-level", "alignment", "spacing", "indentation", "inline-formatting", "whitespace", "text"];
 
 // @public
 export const COMPARE_VERIFICATION_INVARIANTS: readonly ["accept-reproduces-target", "reject-reproduces-base"];
@@ -316,6 +319,25 @@ export type CompareChange = {
     baseBlockId: string;
     targetBlockId: string;
     properties: FolioAIBlockParagraphProperties;
+} |
+/** The body-level section properties changed. */
+    {
+    kind: "section-properties";
+    location: CompareChangeLocation;
+} |
+/** Full authored run properties changed beyond the neutral inline patch. */
+    {
+    kind: "run-format";
+    location: CompareChangeLocation;
+    targetBlockId: string;
+    text: string;
+} |
+/** A field, image, or page break changed while the surrounding text stayed the same. */
+    {
+    kind: "inline-atom";
+    location: CompareChangeLocation;
+    targetBlockId: string;
+    text: string;
 } | {
     kind: "format";
     location: CompareChangeLocation;
@@ -395,6 +417,14 @@ export type CompareChangeLocation = {
 };
 
 // @public
+export type CompareCompatibility = {
+    status: "standard-ooxml";
+} | {
+    status: "requires-folio";
+    reasons: readonly [CompareFolioRequirement, ...CompareFolioRequirement[]];
+};
+
+// @public
 export const compareContent: <Block extends FolioContentBlock = FolioContentBlock>(options: CompareContentOptions<Block>) => Result<FolioContentComparison<Block>, FolioContentComparisonError>;
 
 // @public
@@ -434,6 +464,7 @@ export type CompareDocxOptions = {
     timestamp: string;
     onUnverified?: "refuse" | "emit";
     granularity?: WordDiffGranularity;
+    revisionFormat?: CompareRevisionFormat;
 };
 
 // @public (undocumented)
@@ -459,12 +490,19 @@ export class CompareDocxSerializeError extends CompareDocxSerializeError_base<{
 }> {}
 
 // @public (undocumented)
+export type CompareFolioRequirement = "section-reference-history" | "terminal-table-carrier";
+
+// @public (undocumented)
 export type CompareResult = {
     buffer: ArrayBuffer;
     changes: readonly CompareChange[];
     verification: CompareVerification;
+    compatibility: CompareCompatibility;
     unsupported: readonly CompareUnsupportedPart[];
 };
+
+// @public (undocumented)
+export type CompareRevisionFormat = (typeof COMPARE_REVISION_FORMATS)[number];
 
 // @public
 export type CompareUnsupportedPart = {
@@ -823,9 +861,8 @@ export type FolioAIEditApplyResult = {
 // @public
 export type FolioAIEditNormalization =
 /**
-* A line-break in `insertAfterBlock` / `insertBeforeBlock`'s `text` cannot
-* become one paragraph with an embedded break (Word paragraphs are single
-* lines); the applier split it into one paragraph per non-blank line.
+* A line-break in paragraph-mode `insertAfterBlock` /
+* `insertBeforeBlock` text was split into one paragraph per non-blank line.
 */
     {
     id: string;
@@ -879,13 +916,19 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
     type: "insertAfterBlock" | "insertBeforeBlock";
     blockId: string;
     text: string;
+    lineBreakMode?: "paragraph" | "inline";
     inheritFormatting?: boolean;
     moveId?: string;
     pageBreakBefore?: boolean;
+    hardPageBreak?: {
+        clear?: import__stll_docx_core_model.BreakContent["clear"];
+    };
     styleId?: string | null;
     listLevel?: number | null;
+    numbering?: FolioAIListReference | null;
     alignment?: import__stll_docx_core_model.ParagraphAlignment | null;
     spacing?: FolioAIParagraphSpacing | null;
+    indentation?: FolioAIParagraphIndentation | null;
     comment?: FolioAIComment;
 } | {
     id: string;
@@ -1114,7 +1157,9 @@ export type FolioContentBlock<Kind extends string = string> = {
     styleId?: string;
     directAlignment?: FolioContentParagraphAlignment;
     directSpacing?: FolioContentParagraphSpacing;
+    directIndentation?: FolioContentParagraphIndentation;
     listLevel?: number;
+    listReference?: FolioContentListReference;
     previewRuns?: readonly FolioContentRun[];
     table?: FolioContentTableLocation;
     containerPath?: readonly FolioContentContainerPathEntry[];
@@ -1231,9 +1276,7 @@ export type FolioContentInlineFormatting = Partial<Record<FolioContentInlineBool
 };
 
 // @public
-export type FolioContentInlineFormattingPatch = {
-    [Property in keyof FolioContentInlineFormatting]?: FolioContentInlineFormatting[Property] | null;
-};
+export type FolioContentInlineFormattingPatch = { [Property in keyof FolioContentInlineFormatting]?: FolioContentInlineFormatting[Property] | null; };
 
 // @public (undocumented)
 export class FolioContentInlinePresentationProjectionError extends FolioContentInlinePresentationProjectionError_base<{
@@ -1253,8 +1296,10 @@ export type FolioContentParagraphAlignment = "left" | "center" | "right" | "both
 export type FolioContentParagraphFormattingPatch = {
     styleId?: string | null;
     listLevel?: number | null;
+    listReference?: FolioContentListReference | null;
     alignment?: FolioContentBlock["directAlignment"] | null;
     spacing?: FolioContentParagraphSpacing | null;
+    indentation?: FolioContentParagraphIndentation | null;
 };
 
 // @public
@@ -1587,7 +1632,7 @@ export type InspectDocxCompatibilityOptions = Partial<DocxCompatibilityContext>;
 // @public (undocumented)
 export class InvalidCompareDocxOptionsError extends InvalidCompareDocxOptionsError_base<{
     message: string;
-    option: "timestamp";
+    option: "timestamp" | "revisionFormat";
     receivedValue: unknown;
 }> {}
 

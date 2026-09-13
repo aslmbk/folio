@@ -251,6 +251,7 @@ export type DrawingContent = {
     type: "drawing";
     image: Image_2;
     rawXml?: string;
+    rawImageFingerprint?: string;
     rawXmlMode?: never;
 } | {
     type: "drawing";
@@ -670,6 +671,7 @@ export type Paragraph = {
     formatting?: ParagraphFormatting;
     propertyChanges?: ParagraphPropertyChange[];
     pPrMark?: ParagraphMarkChange;
+    reviewCarrier?: ReviewCarrier;
     content: ParagraphContent[];
     listRendering?: ListRendering;
     renderedPageBreakBefore?: boolean;
@@ -804,6 +806,14 @@ export type RelationshipMap = Map<string, Relationship>;
 // @public
 export type RelationshipType = string;
 
+// @public (undocumented)
+export const REVIEW_CARRIERS: {
+    readonly TERMINAL_TABLE: "terminal-table";
+};
+
+// @public
+export type ReviewCarrier = (typeof REVIEW_CARRIERS)[keyof typeof REVIEW_CARRIERS];
+
 // @public
 export type Run = {
     type: "run";
@@ -931,6 +941,10 @@ export type SectionPropertyChange = {
     type: "sectionPropertyChange";
     info: PropertyChangeInfo;
     previousProperties?: SectionProperties;
+    previousReferences?: {
+        headerReferences?: HeaderReference[];
+        footerReferences?: FooterReference[];
+    };
     currentProperties?: SectionProperties;
 };
 
@@ -1319,6 +1333,7 @@ export type TextFormatting = {
     smallCaps?: boolean;
     allCaps?: boolean;
     hidden?: boolean;
+    noProof?: boolean;
     color?: ColorValue;
     highlight?: "black" | "blue" | "cyan" | "darkBlue" | "darkCyan" | "darkGray" | "darkGreen" | "darkMagenta" | "darkRed" | "darkYellow" | "green" | "lightGray" | "magenta" | "none" | "red" | "white" | "yellow";
     shading?: ShadingProperties;
@@ -1424,7 +1439,7 @@ export type TrackedChangeInfo = {
 export type TrackedRunChange = Insertion | Deletion | MoveFrom | MoveTo;
 
 // @public
-export type TrackedRunContent = Run | Hyperlink | BookmarkStart | BookmarkEnd | SimpleField | ComplexField | TrackedRunChange;
+export type TrackedRunContent = Run | Hyperlink | BookmarkStart | BookmarkEnd | SimpleField | ComplexField | MathEquation | TrackedRunChange;
 
 // @public
 export type UnderlineStyle = "none" | "single" | "words" | "double" | "thick" | "dotted" | "dottedHeavy" | "dash" | "dashedHeavy" | "dashLong" | "dashLongHeavy" | "dotDash" | "dashDotHeavy" | "dotDotDash" | "dashDotDotHeavy" | "wave" | "wavyHeavy" | "wavyDouble";

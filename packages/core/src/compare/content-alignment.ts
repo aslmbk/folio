@@ -1322,6 +1322,7 @@ type AlignProfiledContentSequenceOptions<Item> = {
     revised: ProfiledContentSequenceItem<Item>,
   ) => boolean;
   pairSoleStructuralSlot?: boolean;
+  soleShiftedPairResiduePolicy?: "conservative" | "row-count-evidence";
   primaryEvidence?: "stable" | "exact";
   similarityFactor?:
     | ((
@@ -1343,6 +1344,7 @@ const alignProfiledContentSequence = <Item>({
   workSession,
   canPair = () => true,
   pairSoleStructuralSlot = false,
+  soleShiftedPairResiduePolicy = "conservative",
   primaryEvidence = "stable",
   similarityFactor = () => 1,
 }: AlignProfiledContentSequenceOptions<Item>): ContentSequenceAlignment<Item>[] => {
@@ -1578,10 +1580,17 @@ const alignProfiledContentSequence = <Item>({
     aligned.push({ type: "revisedOnly", item });
     hasRevisedOnly = true;
   }
-  if (pairCount === 1 && solePairIsShifted && hasBaseOnly && hasRevisedOnly) {
-    // One content match cannot establish a shifted container mapping when doing so
-    // also strands containers on both sides; that shape is equally consistent with
-    // content moving between a deletion and an insertion.
+  if (
+    (soleShiftedPairResiduePolicy === "conservative" || base.length === revised.length) &&
+    pairCount === 1 &&
+    solePairIsShifted &&
+    hasBaseOnly &&
+    hasRevisedOnly
+  ) {
+    // One content match cannot establish a shifted container mapping when it also
+    // strands containers on both sides. Row-count evidence is the sole exception:
+    // a changed count supports retaining a surviving row between a row insertion
+    // and deletion.
     return aligned.flatMap((entry): ContentSequenceAlignment<Item>[] =>
       entry.type === "pair"
         ? [
@@ -1717,6 +1726,7 @@ const pairTableRows = <Block extends FolioContentBlock>({
     // Once the table itself is paired, its sole row on each side is the same
     // structural slot even when every word in that row changed.
     pairSoleStructuralSlot: true,
+    soleShiftedPairResiduePolicy: "row-count-evidence",
     primaryEvidence: "exact",
     similarityFactor: (base, revised) =>
       base.profile.physicalCellCount === revised.profile.physicalCellCount ? 1 : 0.5,

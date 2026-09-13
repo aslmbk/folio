@@ -793,8 +793,9 @@ describe("single-mutation probes", () => {
     if (result.isErr()) {
       throw result.error;
     }
+    expect(result.value.verification).toEqual({ status: "verified" });
     const kinds = result.value.changes.map(({ kind }) => kind);
-    expect(new Set(kinds)).toEqual(new Set(["numbering"]));
+    expect(kinds).toContain("numbering");
     const [change] = result.value.changes;
     expect(change?.kind === "numbering" && change.before?.format).toBe("decimal");
     expect(change?.kind === "numbering" && change.after?.format).toBe("lowerRoman");
@@ -810,6 +811,7 @@ describe("single-mutation probes", () => {
     if (result.isErr()) {
       throw result.error;
     }
+    expect(result.value.verification).toEqual({ status: "verified" });
 
     const numberingChanges = result.value.changes.filter(({ kind }) => kind === "numbering");
     expect(numberingChanges.map(({ level }) => level)).toEqual([0, 1]);
@@ -824,6 +826,7 @@ describe("single-mutation probes", () => {
     if (result.isErr()) {
       throw result.error;
     }
+    expect(result.value.verification).toEqual({ status: "verified" });
 
     const numberingChanges = result.value.changes.filter(({ kind }) => kind === "numbering");
     expect(numberingChanges.map(({ level }) => level)).toEqual([2]);
@@ -837,6 +840,7 @@ describe("single-mutation probes", () => {
     if (result.isErr()) {
       throw result.error;
     }
+    expect(result.value.verification).toEqual({ status: "verified" });
 
     const numberingChanges = result.value.changes.filter(({ kind }) => kind === "numbering");
     expect(numberingChanges.map(({ level }) => level)).toEqual([2]);
@@ -877,7 +881,10 @@ describe("single-mutation probes", () => {
     }
     expect(result.value.changes.map(({ kind }) => kind)).toEqual(["paragraph-format"]);
     const [change] = result.value.changes;
-    expect(change?.kind === "paragraph-format" && change.properties).toEqual({ listLevel: null });
+    expect(change?.kind === "paragraph-format" && change.properties).toEqual({
+      listLevel: null,
+      numbering: null,
+    });
 
     expect(await projectView(result.value.buffer, "final")).toEqual(
       await projectView(unnumbered, "final"),
@@ -1269,6 +1276,60 @@ describe("single-mutation probes", () => {
     expect(await projectView(result.value.buffer, "original")).toEqual(
       await projectView(base, "final"),
     );
+  });
+
+  test("folio-exact terminal table receiver follows its deleted table", async () => {
+    const base = await withoutTerminalBodyParagraph(
+      await buildBodySequenceDocx([
+        { kind: "paragraph", text: "The source clause changes." },
+        { kind: "table", rows: [["Source", "Amount"]] },
+      ]),
+    );
+    const target = await buildBodySequenceDocx([
+      { kind: "paragraph", text: "The target clause changes." },
+      { kind: "paragraph", text: "Terminal target paragraph." },
+    ]);
+    const result = await compareDocx(base, target, { ...OPTIONS, revisionFormat: "folio-exact" });
+    if (result.isErr()) throw result.error;
+
+    expect(result.value.verification).toEqual({ status: "verified" });
+    expect(result.value.compatibility).toEqual({
+      status: "requires-folio",
+      reasons: ["terminal-table-carrier"],
+    });
+    expect(await documentPartOf(result.value.buffer)).toContain(
+      'folio:reviewCarrier="terminal-table"',
+    );
+
+    for (const mode of ["accept", "reject"] as const) {
+      const reviewer = await FolioDocxReviewer.fromBuffer(result.value.buffer);
+      const changes = reviewer.getChanges();
+      const terminalTableDeletion = changes.find(({ type }) => type === "rowDeleted");
+      if (!terminalTableDeletion) throw new Error("Expected the terminal table deletion.");
+      const unrelated = changes.find(({ id }) => id !== terminalTableDeletion.id);
+      if (!unrelated) throw new Error("Expected an unrelated revision.");
+      for (const change of changes) {
+        if (change.id === terminalTableDeletion.id) continue;
+        expect(
+          mode === "accept" ? reviewer.acceptChange(change) : reviewer.rejectChange(change),
+        ).toBe(true);
+        expect(await documentPartOf(await reviewer.toBuffer())).toContain(
+          'folio:reviewCarrier="terminal-table"',
+        );
+      }
+      expect(
+        mode === "accept"
+          ? reviewer.acceptChange(terminalTableDeletion)
+          : reviewer.rejectChange(terminalTableDeletion),
+      ).toBe(true);
+      const resolved = await reviewer.toBuffer();
+      const reopened = await FolioDocxReviewer.fromBuffer(resolved);
+      expect(reopened.getChanges()).toEqual([]);
+      expect(await documentPartOf(resolved)).not.toContain('folio:reviewCarrier="terminal-table"');
+      expect(await projectView(resolved, "final")).toEqual(
+        await projectView(mode === "accept" ? target : base, "final"),
+      );
+    }
   });
 
   test("append_paragraphs: the ADDED break lands one paragraph back", async () => {

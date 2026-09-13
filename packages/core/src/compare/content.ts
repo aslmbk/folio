@@ -16,6 +16,7 @@ import {
   type WordDiffSegment,
 } from "../ai-edits/word-diff";
 import { inlineFormattingSegments } from "./formatting";
+import { paragraphIndentationEqual } from "../prosemirror/paragraphIndentation";
 import {
   alignFolioContentStructure,
   contentBlocksShareContainer,
@@ -27,6 +28,8 @@ import type {
   FolioContentBlock,
   FolioContentFormatRange,
   FolioContentIdStability,
+  FolioContentListReference,
+  FolioContentParagraphIndentation,
   FolioContentParagraphSpacing,
   FolioContentSnapshot,
 } from "./content-types";
@@ -120,8 +123,10 @@ export type FolioContentTextSegment = {
 export type FolioContentParagraphFormattingPatch = {
   styleId?: string | null;
   listLevel?: number | null;
+  listReference?: FolioContentListReference | null;
   alignment?: FolioContentBlock["directAlignment"] | null;
   spacing?: FolioContentParagraphSpacing | null;
+  indentation?: FolioContentParagraphIndentation | null;
 };
 
 /** Presentation differences for one text-aligned block pair. */
@@ -1069,14 +1074,28 @@ export const changedFolioContentParagraphFormatting = (
   if ((base.styleId ?? null) !== (revised.styleId ?? null)) {
     patch.styleId = revised.styleId ?? null;
   }
-  if (base.listLevel !== revised.listLevel) {
+  const listReferenceChanged = base.listReference?.numId !== revised.listReference?.numId;
+  const targetOmitsLevelOnChangedReference =
+    listReferenceChanged && revised.listReference !== undefined && revised.listLevel === undefined;
+  if (base.listLevel !== revised.listLevel || targetOmitsLevelOnChangedReference) {
     patch.listLevel = revised.listLevel ?? null;
+  }
+  if (
+    listReferenceChanged ||
+    (base.listLevel !== revised.listLevel &&
+      revised.listLevel === undefined &&
+      revised.listReference !== undefined)
+  ) {
+    patch.listReference = revised.listReference ?? null;
   }
   if (base.directAlignment !== revised.directAlignment) {
     patch.alignment = revised.directAlignment ?? null;
   }
   if (!paragraphSpacingEqual(base.directSpacing, revised.directSpacing)) {
     patch.spacing = revised.directSpacing ?? null;
+  }
+  if (!paragraphIndentationEqual(base.directIndentation, revised.directIndentation)) {
+    patch.indentation = revised.directIndentation ?? null;
   }
   return Object.keys(patch).length > 0 ? patch : null;
 };

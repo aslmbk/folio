@@ -333,6 +333,7 @@ const paragraphNodeSpec: NodeSpec = {
     // parsed from or rendered to HTML/OOXML.
     idStability: { default: undefined },
     textId: { default: null },
+    reviewCarrier: { default: undefined },
     alignment: { default: null },
     alignmentFromStyle: { default: undefined },
     kinsoku: { default: null },
@@ -385,6 +386,7 @@ const paragraphNodeSpec: NodeSpec = {
     contextualSpacing: { default: null },
     runInWithNext: { default: null },
     defaultTextFormatting: { default: null },
+    _tableRunFormatting: { default: undefined },
     sectionBreakType: { default: null },
     // Base text direction (discriminated union; see paragraphDirection.ts). The
     // `source` distinguishes an authoritative manual/import decision from a

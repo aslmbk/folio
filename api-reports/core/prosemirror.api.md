@@ -291,6 +291,7 @@ export const PAINTABLE_MARK_NAMES: ReadonlySet<string>;
 export type ParagraphAttrs = {
     paraId?: string;
     textId?: string;
+    reviewCarrier?: "terminal-table";
     alignment?: import__stll_docx_core_model.ParagraphAlignment;
     alignmentFromStyle?: import__stll_docx_core_model.ParagraphAlignment;
     kinsoku?: boolean;
@@ -354,6 +355,7 @@ export type ParagraphAttrs = {
     widowControl?: boolean;
     contextualSpacing?: boolean;
     defaultTextFormatting?: import__stll_docx_core_model.TextFormatting;
+    _tableRunFormatting?: import__stll_docx_core_model.TextFormatting;
     sectionBreakType?: "nextPage" | "continuous" | "oddPage" | "evenPage";
     direction?: ParagraphDirection | null;
     outlineLevel?: number;

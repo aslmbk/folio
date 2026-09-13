@@ -1,10 +1,11 @@
-import { Mark, type MarkType, type Node as PMNode, type Schema } from "prosemirror-model";
+import { Fragment, Mark, type MarkType, type Node as PMNode, type Schema } from "prosemirror-model";
 import type { EditorState, Transaction } from "prosemirror-state";
 import { TableMap } from "prosemirror-tables";
 import { canJoin, canSplit } from "prosemirror-transform";
 import { panic } from "better-result";
 
 import type { NumberingMap } from "../docx/numberingParser";
+import { formattingEquals } from "../docx/runConsolidator";
 import { expectParagraphAttrs, expectRunPropertyChangeMarkAttrs } from "../prosemirror/attrs";
 import {
   hasSerializableParagraphPropertyChange,
@@ -12,6 +13,13 @@ import {
 } from "../prosemirror/commands/propertyChangeScope";
 import { CLEARED_LIST_RENDERING_ATTRS } from "../prosemirror/listMarker";
 import { directParagraphAlignment } from "../prosemirror/paragraphAlignment";
+import {
+  directParagraphIndentation,
+  paragraphIndentationAttrPatch,
+  paragraphIndentationEqual,
+  paragraphIndentationFromFormatting,
+  withDirectParagraphIndentation,
+} from "../prosemirror/paragraphIndentation";
 import {
   directParagraphSpacing,
   paragraphSpacingAttrPatch,
@@ -25,8 +33,13 @@ import {
   readAuthoredRunFormatting,
   reconcileRunFormattingMarks,
 } from "../prosemirror/runFormattingReconciliation";
-import { paragraphRunStyleContextAt } from "../prosemirror/runStyleFormatting";
 import {
+  paragraphRunStyleContext,
+  paragraphRunStyleContextAt,
+} from "../prosemirror/runStyleFormatting";
+import {
+  applyMarksToRunFormattingRepresentation,
+  runFormattingInlineControlNodeName,
   selectRunFormattingCarrierRepresentations,
   type SelectedRunFormattingCarrierRepresentation,
 } from "../prosemirror/runFormattingInlineCarriers";
@@ -442,7 +455,8 @@ const resolveReplaceBlockImpact = ({
 
 /**
  * The attrs one `setBlockParagraphProperties` writes, or `null` when the
- * block already holds them. `styleId: null` clears the style; `listLevel`
+ * block already holds them. `styleId: null` clears the style; `numbering`
+ * selects a concrete numbering instance and level; `listLevel`
  * moves `w:numPr/w:ilvl` and leaves `w:numId` alone, because a demoted item
  * stays in the same list; `listLevel: null` drops `w:numPr` entirely, which
  * is a paragraph that stopped being a list item.
@@ -462,7 +476,11 @@ const paragraphPropertiesPatch = ({
 }: ParagraphPropertiesPatchOptions): Record<string, unknown> | null => {
   const attrs = expectParagraphAttrs(node);
   const currentDirectAlignment = directParagraphAlignment(attrs);
+  const currentDirectIndentation = directParagraphIndentation(attrs);
   const currentDirectSpacing = directParagraphSpacing(attrs);
+  const resolvedIndentationFromStyle = paragraphIndentationFromFormatting(
+    resolvedFormattingFromStyle,
+  );
   const resolvedSpacingFromStyle = paragraphSpacingFromFormatting(resolvedFormattingFromStyle);
   const patch: Record<string, unknown> = {};
   let originalFormatting =
@@ -487,6 +505,15 @@ const paragraphPropertiesPatch = ({
         }),
       );
     }
+    if (properties.indentation === undefined) {
+      Object.assign(
+        patch,
+        paragraphIndentationAttrPatch({
+          direct: currentDirectIndentation,
+          inherited: resolvedIndentationFromStyle,
+        }),
+      );
+    }
     originalFormatting ??= {};
     if (nextStyleId === null) {
       Reflect.deleteProperty(originalFormatting, "styleId");
@@ -498,7 +525,27 @@ const paragraphPropertiesPatch = ({
     }
     originalFormattingChanged = true;
   }
-  if (properties.listLevel !== undefined) {
+  if (properties.numbering !== undefined) {
+    if (properties.numbering === null) {
+      patch["numPr"] = null;
+      Object.assign(patch, CLEARED_LIST_RENDERING_ATTRS);
+    } else {
+      Object.assign(
+        patch,
+        listLevelAttrPatch(
+          attrs,
+          { numId: properties.numbering.numId, ilvl: properties.numbering.level },
+          numbering,
+        ),
+      );
+      if (properties.listLevel === null) {
+        // An explicit instance can omit `w:ilvl`. Keep that authored absence:
+        // Word renders level zero, but serializing it creates direct formatting.
+        patch["numPr"] = { numId: properties.numbering.numId };
+        patch["numPrFromStyle"] = null;
+      }
+    }
+  } else if (properties.listLevel !== undefined) {
     const numPr: unknown = node.attrs["numPr"];
     if (properties.listLevel === null) {
       patch["numPr"] = null;
@@ -532,6 +579,21 @@ const paragraphPropertiesPatch = ({
         ? attrs.alignmentFromStyle
         : resolvedFormattingFromStyle?.alignment;
     patch["alignment"] = properties.alignment ?? alignmentFromStyle ?? null;
+    originalFormattingChanged = true;
+  }
+  if (
+    properties.indentation !== undefined &&
+    (styleChanged || !paragraphIndentationEqual(currentDirectIndentation, properties.indentation))
+  ) {
+    const directIndentation = properties.indentation ?? undefined;
+    originalFormatting = withDirectParagraphIndentation(originalFormatting, directIndentation);
+    Object.assign(
+      patch,
+      paragraphIndentationAttrPatch({
+        direct: directIndentation,
+        inherited: resolvedIndentationFromStyle,
+      }),
+    );
     originalFormattingChanged = true;
   }
   if (
@@ -677,6 +739,87 @@ type ApplyBlockParagraphPropertiesResult = {
   tr: Transaction;
   changed: boolean;
   revisionId: number | null;
+  revisionIds: readonly number[];
+};
+
+const preserveRunFormattingAcrossTrackedStyleChange = ({
+  allocateRevisionInfo,
+  nextParagraphAttrs,
+  paragraphPosition,
+  styleResolver,
+  tr,
+}: {
+  allocateRevisionInfo: () => ParagraphPropertyChangeAttrs["info"];
+  nextParagraphAttrs: Record<string, unknown>;
+  paragraphPosition: number;
+  styleResolver: ReturnType<typeof getDocumentStyleResolver>;
+  tr: Transaction;
+}): { tr: Transaction; revisionIds: readonly number[] } => {
+  const propertyChangeType = tr.doc.type.schema.marks["runPropertyChange"];
+  if (!propertyChangeType) return { tr, revisionIds: [] };
+  const paragraph = tr.doc.nodeAt(paragraphPosition);
+  if (!paragraph || paragraph.type.name !== "paragraph") return { tr, revisionIds: [] };
+  const previousContext = paragraphRunStyleContext(paragraph, styleResolver);
+  const nextParagraph = paragraph.type.create(
+    nextParagraphAttrs,
+    paragraph.content,
+    paragraph.marks,
+  );
+  const nextContext = paragraphRunStyleContext(nextParagraph, styleResolver);
+  const representations = selectRunFormattingCarrierRepresentations({
+    doc: tr.doc,
+    from: paragraphPosition + 1,
+    to: paragraphPosition + paragraph.nodeSize - 1,
+  });
+  const revisionIds: number[] = [];
+  for (const representation of representations) {
+    if (!representation.node.marks.some(({ type }) => type.name === "deletion")) {
+      continue;
+    }
+    const existingChange = representation.node.marks.find(
+      (mark) => mark.type === propertyChangeType,
+    );
+    if (existingChange && expectRunPropertyChangeMarkAttrs(existingChange).changes.length > 0) {
+      continue;
+    }
+    const previousFormatting = readAuthoredRunFormatting({
+      context: previousContext,
+      marks: representation.node.marks,
+      styleResolver,
+    });
+    const nextFormatting = readAuthoredRunFormatting({
+      context: nextContext,
+      marks: representation.node.marks,
+      styleResolver,
+    });
+    if (formattingEquals(previousFormatting, nextFormatting)) {
+      continue;
+    }
+    const info = allocateRevisionInfo();
+    const suggestionAttrs =
+      info.provenance === "suggested" &&
+      info.suggestionId !== undefined &&
+      info.suggestionId !== null
+        ? { provenance: "suggested" as const, suggestionId: info.suggestionId }
+        : {};
+    const propertyChange = propertyChangeType.create({
+      changes: [
+        {
+          type: "runPropertyChange",
+          info,
+          ...(Object.keys(previousFormatting).length > 0 && { previousFormatting }),
+        },
+      ],
+      ...suggestionAttrs,
+    });
+    applyMarksToRunFormattingRepresentation({
+      tr,
+      representation,
+      marks: propertyChange.addToSet(representation.node.marks),
+    });
+    revisionIds.push(info.id);
+  }
+  return { tr, revisionIds };
 };
 
 /**
@@ -705,7 +848,7 @@ const applyBlockParagraphProperties = ({
     numbering,
   });
   if (patch === null) {
-    return { tr, changed: false, revisionId: null };
+    return { tr, changed: false, revisionId: null, revisionIds: [] };
   }
   const changeInfo = revisionInfo?.();
   const change: ParagraphPropertyChangeAttrs | null = changeInfo
@@ -715,30 +858,45 @@ const applyBlockParagraphProperties = ({
         previousFormatting: paragraphPropertiesSnapshot(node),
       }
     : null;
+  const preserveRunFormatting =
+    change !== null &&
+    properties.styleId !== undefined &&
+    (attrs.styleId ?? null) !== properties.styleId;
   const existing = attrs._propertyChanges;
+  const nextAttrs = {
+    ...node.attrs,
+    ...patch,
+    ...(change ? { _propertyChanges: [...(Array.isArray(existing) ? existing : []), change] } : {}),
+  };
+  const bridgeResult =
+    preserveRunFormatting && revisionInfo
+      ? preserveRunFormattingAcrossTrackedStyleChange({
+          allocateRevisionInfo: revisionInfo,
+          nextParagraphAttrs: nextAttrs,
+          paragraphPosition: position,
+          styleResolver,
+          tr,
+        })
+      : { tr, revisionIds: [] };
   return {
-    tr: tr.setNodeMarkup(position, undefined, {
-      ...node.attrs,
-      ...patch,
-      ...(change
-        ? { _propertyChanges: [...(Array.isArray(existing) ? existing : []), change] }
-        : {}),
-    }),
+    tr: bridgeResult.tr.setNodeMarkup(position, undefined, nextAttrs),
     changed: true,
     revisionId: change?.info.id ?? null,
+    revisionIds: change ? [change.info.id, ...bridgeResult.revisionIds] : [],
   };
 };
 
 type ApplyReplaceBlockStyleIdResult = {
   tr: Transaction;
   revisionId: number | null;
+  revisionIds: readonly number[];
 };
 
 type ApplyReplaceBlockStyleIdOptions = {
   item: ResolvedOperation;
   tr: Transaction;
   styleResolver: ReturnType<typeof getDocumentStyleResolver>;
-  revisionInfo?: ParagraphPropertyChangeAttrs["info"];
+  revisionInfo?: () => ParagraphPropertyChangeAttrs["info"];
 };
 
 const applyReplaceBlockStyleId = ({
@@ -748,13 +906,13 @@ const applyReplaceBlockStyleId = ({
   revisionInfo,
 }: ApplyReplaceBlockStyleIdOptions): ApplyReplaceBlockStyleIdResult => {
   if (item.operation.type !== "replaceBlock" || item.operation.styleId === undefined) {
-    return { tr, revisionId: null };
+    return { tr, revisionId: null, revisionIds: [] };
   }
 
   const blockPosition = tr.mapping.map(item.blockFrom, -1);
   const block = tr.doc.nodeAt(blockPosition);
   if (!block) {
-    return { tr, revisionId: null };
+    return { tr, revisionId: null, revisionIds: [] };
   }
 
   const attrs = expectParagraphAttrs(block);
@@ -769,26 +927,39 @@ const applyReplaceBlockStyleId = ({
     resolvedFormattingFromStyle,
   });
   if (patch === null) {
-    return { tr, revisionId: null };
+    return { tr, revisionId: null, revisionIds: [] };
   }
 
   const existing = attrs._propertyChanges;
-  const change: ParagraphPropertyChangeAttrs | null = revisionInfo
+  const changeInfo = revisionInfo?.();
+  const change: ParagraphPropertyChangeAttrs | null = changeInfo
     ? {
         type: "paragraphPropertyChange",
-        info: revisionInfo,
+        info: changeInfo,
         previousFormatting: paragraphPropertiesSnapshot(block),
       }
     : null;
+  const preserveRunFormatting =
+    change !== null && (attrs.styleId ?? null) !== item.operation.styleId;
+  const nextAttrs = {
+    ...block.attrs,
+    ...patch,
+    ...(change ? { _propertyChanges: [...(Array.isArray(existing) ? existing : []), change] } : {}),
+  };
+  const bridgeResult =
+    preserveRunFormatting && revisionInfo
+      ? preserveRunFormattingAcrossTrackedStyleChange({
+          allocateRevisionInfo: revisionInfo,
+          nextParagraphAttrs: nextAttrs,
+          paragraphPosition: blockPosition,
+          styleResolver,
+          tr,
+        })
+      : { tr, revisionIds: [] };
   return {
-    tr: tr.setNodeMarkup(blockPosition, undefined, {
-      ...block.attrs,
-      ...patch,
-      ...(change
-        ? { _propertyChanges: [...(Array.isArray(existing) ? existing : []), change] }
-        : {}),
-    }),
+    tr: bridgeResult.tr.setNodeMarkup(blockPosition, undefined, nextAttrs),
     revisionId: change?.info.id ?? null,
+    revisionIds: change ? [change.info.id, ...bridgeResult.revisionIds] : [],
   };
 };
 
@@ -932,37 +1103,6 @@ const applyInlineFormatting = ({
     applyMarksToRunFormattingRepresentation({ tr, representation, marks });
   }
   return tr;
-};
-
-type ApplyMarksToRunFormattingRepresentationOptions = {
-  tr: Transaction;
-  representation: SelectedRunFormattingCarrierRepresentation;
-  marks: readonly Mark[];
-};
-
-const applyMarksToRunFormattingRepresentation = ({
-  tr,
-  representation,
-  marks,
-}: ApplyMarksToRunFormattingRepresentationOptions): void => {
-  const { node, position, from, to } = representation;
-  if (Mark.sameSet(node.marks, marks)) {
-    return;
-  }
-  if (!node.isText) {
-    tr.setNodeMarkup(position, undefined, node.attrs, marks);
-    return;
-  }
-  for (const current of node.marks) {
-    if (!marks.some((candidate) => candidate.eq(current))) {
-      tr.removeMark(from, to, current.type);
-    }
-  }
-  for (const next of marks) {
-    if (!node.marks.some((candidate) => candidate.eq(next))) {
-      tr.addMark(from, to, next);
-    }
-  }
 };
 
 const sameDefinedFormattingValue = (left: unknown, right: unknown): boolean => {
@@ -1467,7 +1607,10 @@ const buildTableNode = ({ schema, rows, revision }: BuildTableNodeOptions): PMNo
         cellType.create(
           null,
           splitCellParagraphTexts(text).map((line) =>
-            paragraphType.create(null, line.length > 0 ? schema.text(line, marks) : null),
+            paragraphType.create(
+              null,
+              line.length > 0 ? cleanTextInlineNodes({ schema, text: line, marks }) : null,
+            ),
           ),
         ),
       ),
@@ -1882,33 +2025,67 @@ const buildInsertedParagraphs = ({
     if (commentMark) {
       marks.push(commentMark);
     }
-    const content = text.length > 0 ? buildEmphasisInlineContent(schema, text, marks) : null;
+    const hardPageBreak = isFirstParagraph ? operation.hardPageBreak : undefined;
+    let content: PMNode[] | null = null;
+    if (hardPageBreak !== undefined) {
+      const pageBreakRun = schema.nodes["pageBreakRun"];
+      if (pageBreakRun === undefined) {
+        panic("The schema has no page-break run node", { operationId: operation.id });
+      }
+      content = [pageBreakRun.create(hardPageBreak, null, marks)];
+    } else if (text.length > 0) {
+      content = hasCleanTextControls(text)
+        ? cleanTextInlineNodes({ schema, text, marks })
+        : buildEmphasisInlineContent(schema, text, marks);
+    }
     const attrs: Record<string, unknown> = isFirstParagraph ? { ...baseAttrs } : {};
     if (isFirstParagraph && operation.pageBreakBefore === true) {
       attrs["pageBreakBefore"] = true;
     }
+    const explicitNumbering = operation.numbering;
     const listLevel = operation.listLevel;
-    if (isFirstParagraph && listLevel === null) {
-      attrs["numPr"] = null;
-      Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
-    } else if (isFirstParagraph && typeof listLevel === "number") {
-      const anchorNumPr: unknown = Reflect.get(baseAttrs, "numPr");
-      const numId =
-        typeof anchorNumPr === "object" && anchorNumPr !== null && "numId" in anchorNumPr
-          ? anchorNumPr.numId
-          : undefined;
-      if (typeof numId === "number") {
+    if (isFirstParagraph) {
+      if (explicitNumbering === null) {
+        attrs["numPr"] = null;
+        Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
+      } else if (explicitNumbering !== undefined) {
         Object.assign(
           attrs,
           listLevelAttrPatch(
             operation.inheritFormatting === false ? {} : expectParagraphAttrs(item.blockNode),
-            { numId, ilvl: listLevel },
+            { numId: explicitNumbering.numId, ilvl: explicitNumbering.level },
             numbering,
           ),
         );
-      } else {
-        attrs["numPr"] = { ilvl: listLevel };
+        if (listLevel === null) {
+          // The target named a numbering instance but left `w:ilvl` absent.
+          // Keep that distinction: Word takes level zero for rendering, while
+          // writing an explicit zero changes the paragraph's direct provenance.
+          attrs["numPr"] = { numId: explicitNumbering.numId };
+          attrs["numPrFromStyle"] = null;
+        }
+      } else if (listLevel === null) {
+        attrs["numPr"] = null;
         Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
+      } else if (typeof listLevel === "number") {
+        const anchorNumPr: unknown = Reflect.get(baseAttrs, "numPr");
+        const numId =
+          typeof anchorNumPr === "object" && anchorNumPr !== null && "numId" in anchorNumPr
+            ? anchorNumPr.numId
+            : undefined;
+        if (typeof numId === "number") {
+          Object.assign(
+            attrs,
+            listLevelAttrPatch(
+              operation.inheritFormatting === false ? {} : expectParagraphAttrs(item.blockNode),
+              { numId, ilvl: listLevel },
+              numbering,
+            ),
+          );
+        } else {
+          attrs["numPr"] = { ilvl: listLevel };
+          Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
+        }
       }
     }
     if (isFirstParagraph && operation.styleId !== undefined) {
@@ -1921,7 +2098,8 @@ const buildInsertedParagraphs = ({
       isFirstParagraph &&
       (operation.styleId !== undefined ||
         operation.alignment !== undefined ||
-        operation.spacing !== undefined)
+        operation.spacing !== undefined ||
+        operation.indentation !== undefined)
     ) {
       const inheritedDirectAlignment =
         operation.inheritFormatting === false
@@ -1931,12 +2109,20 @@ const buildInsertedParagraphs = ({
         operation.inheritFormatting === false
           ? undefined
           : directParagraphSpacing(expectParagraphAttrs(item.blockNode));
+      const inheritedDirectIndentation =
+        operation.inheritFormatting === false
+          ? undefined
+          : directParagraphIndentation(expectParagraphAttrs(item.blockNode));
       const directAlignment =
         operation.alignment === undefined
           ? inheritedDirectAlignment
           : (operation.alignment ?? undefined);
       const directSpacing =
         operation.spacing === undefined ? inheritedDirectSpacing : (operation.spacing ?? undefined);
+      const directIndentation =
+        operation.indentation === undefined
+          ? inheritedDirectIndentation
+          : (operation.indentation ?? undefined);
       attrs["alignmentFromStyle"] = formattingFromStyle?.alignment;
       attrs["alignment"] = directAlignment ?? formattingFromStyle?.alignment ?? null;
       const sourceFormatting = attrs["_originalFormatting"];
@@ -1963,12 +2149,24 @@ const buildInsertedParagraphs = ({
       if (operation.spacing !== undefined) {
         originalFormatting = withDirectParagraphSpacing(originalFormatting, directSpacing);
       }
+      if (operation.indentation !== undefined) {
+        originalFormatting = withDirectParagraphIndentation(originalFormatting, directIndentation);
+      }
       if (operation.styleId !== undefined || operation.spacing !== undefined) {
         Object.assign(
           attrs,
           paragraphSpacingAttrPatch({
             direct: directSpacing,
             inherited: paragraphSpacingFromFormatting(formattingFromStyle),
+          }),
+        );
+      }
+      if (operation.styleId !== undefined || operation.indentation !== undefined) {
+        Object.assign(
+          attrs,
+          paragraphIndentationAttrPatch({
+            direct: directIndentation,
+            inherited: paragraphIndentationFromFormatting(formattingFromStyle),
           }),
         );
       }
@@ -2154,6 +2352,7 @@ const applyFolioAIEditOperationsInternal = ({
 
     if (
       (operation.type === "insertAfterBlock" || operation.type === "insertBeforeBlock") &&
+      operation.lineBreakMode !== "inline" &&
       LINE_BREAK_PATTERN.test(operation.text)
     ) {
       normalizations.push({
@@ -2607,21 +2806,18 @@ const applyFolioAIEditOperationsInternal = ({
             diffText,
           });
         }
-        const revisionIdParagraph =
-          producesTrackedChanges && changesStyle ? operationRevisionSeed++ : null;
+        const allocateStyleRevisionInfo = () => ({
+          id: operationRevisionSeed++,
+          author,
+          date,
+          ...trackedRevisionExtras,
+        });
         const styleResult = applyReplaceBlockStyleId({
           item,
           tr,
           styleResolver,
-          ...(revisionIdParagraph !== null
-            ? {
-                revisionInfo: {
-                  id: revisionIdParagraph,
-                  author,
-                  date,
-                  ...trackedRevisionExtras,
-                },
-              }
+          ...(producesTrackedChanges && changesStyle
+            ? { revisionInfo: allocateStyleRevisionInfo }
             : {}),
         });
         tr = styleResult.tr;
@@ -2632,26 +2828,13 @@ const applyFolioAIEditOperationsInternal = ({
           appliedRevisionIds = [
             ...(changesText ? [revisionIdDelete, revisionIdInsert] : []),
             ...(clearedBackground ? backgroundRevisionIds : []),
-            ...(styleResult.revisionId === null ? [] : [styleResult.revisionId]),
+            ...styleResult.revisionIds,
           ];
         }
         break;
       }
       case "insertAfterBlock":
       case "insertBeforeBlock": {
-        const insertTexts = item.insertTexts ?? [""];
-        const isEmptyInsert = insertTexts.length === 1 && insertTexts[0]?.length === 0;
-        if (
-          mode === "tracked-changes" &&
-          item.operation.pageBreakBefore === true &&
-          isEmptyInsert
-        ) {
-          skipped.push({
-            id: item.operation.id,
-            reason: "unsupportedMode",
-          });
-          continue;
-        }
         const built = buildInsertedParagraphs({
           item,
           schema: view.state.schema,
@@ -3135,8 +3318,8 @@ const applyFolioAIEditOperationsInternal = ({
           continue;
         }
         tr = appliedProperties.tr;
-        if (appliedProperties.revisionId !== null) {
-          appliedRevisionIds = [appliedProperties.revisionId];
+        if (appliedProperties.revisionIds.length > 0) {
+          appliedRevisionIds = [...appliedProperties.revisionIds];
         }
         break;
       }
@@ -3207,8 +3390,8 @@ const applyFolioAIEditOperationsInternal = ({
               : { revisionInfo: allocateSplitParagraphPropertyRevisionInfo }),
           });
           tr = appliedProperties.tr;
-          if (appliedProperties.revisionId !== null) {
-            appliedRevisionIds.push(appliedProperties.revisionId);
+          if (appliedProperties.revisionIds.length > 0) {
+            appliedRevisionIds.push(...appliedProperties.revisionIds);
           }
         }
         break;
@@ -3269,8 +3452,8 @@ const applyFolioAIEditOperationsInternal = ({
                 }),
           });
           tr = appliedProperties.tr;
-          if (appliedProperties.revisionId !== null) {
-            appliedRevisionIds.push(appliedProperties.revisionId);
+          if (appliedProperties.revisionIds.length > 0) {
+            appliedRevisionIds.push(...appliedProperties.revisionIds);
           }
         }
         break;
@@ -3455,6 +3638,68 @@ type TextReplacementOptions = {
   diffText: ReturnType<typeof createWordDiffSession>["diff"];
 };
 
+const CLEAN_TEXT_CONTROL_PATTERN = /[\t\n]/gu;
+
+const hasCleanTextControls = (text: string): boolean => text.includes("\t") || text.includes("\n");
+
+type CleanTextInlineNodesOptions = {
+  schema: Schema;
+  text: string;
+  marks?: readonly Mark[] | undefined;
+};
+
+const cleanTextInlineNodes = ({
+  schema,
+  text,
+  marks = [],
+}: CleanTextInlineNodesOptions): PMNode[] => {
+  const nodes: PMNode[] = [];
+  let offset = 0;
+  for (const match of text.matchAll(CLEAN_TEXT_CONTROL_PATTERN)) {
+    const index = match.index;
+    const preceding = text.slice(offset, index);
+    if (preceding.length > 0) {
+      nodes.push(schema.text(preceding, marks));
+    }
+    const control = match[0];
+    const nodeName = runFormattingInlineControlNodeName(control);
+    if (nodeName === null) {
+      panic("A clean-text control pattern matched an unrepresentable character", { control });
+    }
+    const type = schema.nodes[nodeName];
+    if (!type) {
+      panic("The editor schema cannot represent a clean-text control character", { control });
+    }
+    nodes.push(type.create(null, null, marks));
+    offset = index + control.length;
+  }
+  const trailing = text.slice(offset);
+  if (trailing.length > 0) {
+    nodes.push(schema.text(trailing, marks));
+  }
+  return nodes;
+};
+
+type InsertCleanTextOptions = {
+  tr: Transaction;
+  from: number;
+  to: number;
+  text: string;
+};
+
+const insertCleanText = ({
+  tr,
+  from,
+  to,
+  text,
+}: InsertCleanTextOptions): { transaction: Transaction; end: number } => {
+  if (!hasCleanTextControls(text)) {
+    return { transaction: tr.insertText(text, from, to), end: from + text.length };
+  }
+  const content = Fragment.fromArray(cleanTextInlineNodes({ schema: tr.doc.type.schema, text }));
+  return { transaction: tr.replaceWith(from, to, content), end: from + content.size };
+};
+
 const applyTextReplacement = ({
   tr,
   item,
@@ -3498,9 +3743,15 @@ const applyTextReplacement = ({
       );
       return nextTr.replaceWith(item.from, item.to, content);
     }
-    nextTr = nextTr.insertText(replacement, item.from, item.to);
+    const inserted = insertCleanText({
+      tr: nextTr,
+      from: item.from,
+      to: item.to,
+      text: replacement,
+    });
+    nextTr = inserted.transaction;
     if (commentMark && replacement.length > 0) {
-      nextTr = nextTr.addMark(item.from, item.from + replacement.length, commentMark);
+      nextTr = nextTr.addMark(item.from, inserted.end, commentMark);
     }
     return nextTr;
   }
@@ -3610,14 +3861,16 @@ const applyTextReplacement = ({
           continue;
         }
         if (step.kind === "ins" && insertionType) {
-          nextTr = nextTr.insertText(step.text, step.at, step.at);
-          nextTr = nextTr.addMark(
-            step.at,
-            step.at + step.text.length,
-            insertionType.create(insAttrs),
-          );
+          const inserted = insertCleanText({
+            tr: nextTr,
+            from: step.at,
+            to: step.at,
+            text: step.text,
+          });
+          nextTr = inserted.transaction;
+          nextTr = nextTr.addMark(step.at, inserted.end, insertionType.create(insAttrs));
           if (commentMark) {
-            nextTr = nextTr.addMark(step.at, step.at + step.text.length, commentMark);
+            nextTr = nextTr.addMark(step.at, inserted.end, commentMark);
           }
         }
       }
@@ -3629,10 +3882,11 @@ const applyTextReplacement = ({
   }
 
   if (replacement.length > 0 && insertionType) {
-    nextTr = nextTr.insertText(replacement, item.to, item.to);
-    nextTr = nextTr.addMark(item.to, item.to + replacement.length, insertionType.create(insAttrs));
+    const inserted = insertCleanText({ tr: nextTr, from: item.to, to: item.to, text: replacement });
+    nextTr = inserted.transaction;
+    nextTr = nextTr.addMark(item.to, inserted.end, insertionType.create(insAttrs));
     if (commentMark) {
-      nextTr = nextTr.addMark(item.to, item.to + replacement.length, commentMark);
+      nextTr = nextTr.addMark(item.to, inserted.end, commentMark);
     }
   }
 
@@ -3805,7 +4059,9 @@ const resolveOperation = ({
     } else {
       insertFrom = isInsertAfter ? blockTo : blockFrom;
     }
-    const insertTexts = LINE_BREAK_PATTERN.test(operation.text)
+    const splitParagraphs =
+      operation.lineBreakMode !== "inline" && LINE_BREAK_PATTERN.test(operation.text);
+    const insertTexts = splitParagraphs
       ? splitInsertParagraphTexts(operation.text)
       : [operation.text];
     return {

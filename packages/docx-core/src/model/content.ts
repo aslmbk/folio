@@ -149,8 +149,10 @@ export type DrawingContent =
       type: "drawing";
       /** Image data */
       image: Image;
-      /** Original OOXML for package-preserving round-trips of unsupported drawing markup. */
+      /** Original OOXML for package-preserving round-trips while the editable image is unchanged. */
       rawXml?: string;
+      /** Editable image projection fingerprint when `rawXml` was captured, used to invalidate replay after model edits. */
+      rawImageFingerprint?: string;
       rawXmlMode?: never;
     }
   | {
@@ -1069,6 +1071,8 @@ export type TrackedRunContent =
   | BookmarkEnd
   | SimpleField
   | ComplexField
+  // CT_RunTrackChange permits both m:oMath and m:oMathPara.
+  | MathEquation
   | TrackedRunChange;
 
 /**
@@ -1230,6 +1234,11 @@ export type SectionPropertyChange = {
   info: PropertyChangeInfo;
   /** Section properties before the tracked change */
   previousProperties?: SectionProperties;
+  /** Complete prior header/footer selection, stored in Folio's ignorable MCE extension. */
+  previousReferences?: {
+    headerReferences?: HeaderReference[];
+    footerReferences?: FooterReference[];
+  };
   /** Section properties after the tracked change (editor model convenience) */
   currentProperties?: SectionProperties;
 };
@@ -1445,6 +1454,13 @@ export type ParagraphMarkChange = {
   info: TrackedChangeInfo;
 };
 
+export const REVIEW_CARRIERS = {
+  TERMINAL_TABLE: "terminal-table",
+} as const;
+
+/** A Folio-private untracked paragraph used to resolve a terminal table deletion. */
+export type ReviewCarrier = (typeof REVIEW_CARRIERS)[keyof typeof REVIEW_CARRIERS];
+
 /** Paragraph (w:p) */
 export type Paragraph = {
   type: "paragraph";
@@ -1458,6 +1474,8 @@ export type Paragraph = {
   propertyChanges?: ParagraphPropertyChange[];
   /** Paragraph-mark insertion / deletion (w:pPr / w:rPr / w:ins | w:del) */
   pPrMark?: ParagraphMarkChange;
+  /** Folio-private review-resolution carrier; ignored by standard OOXML consumers. */
+  reviewCarrier?: ReviewCarrier;
   /** Paragraph content */
   content: ParagraphContent[];
   /** Computed list rendering (if this is a list item) */

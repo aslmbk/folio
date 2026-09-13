@@ -174,9 +174,8 @@ export type FolioAIEditApplyResult = {
 // @public
 export type FolioAIEditNormalization =
 /**
-* A line-break in `insertAfterBlock` / `insertBeforeBlock`'s `text` cannot
-* become one paragraph with an embedded break (Word paragraphs are single
-* lines); the applier split it into one paragraph per non-blank line.
+* A line-break in paragraph-mode `insertAfterBlock` /
+* `insertBeforeBlock` text was split into one paragraph per non-blank line.
 */
     {
     id: string;
@@ -230,13 +229,19 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
     type: "insertAfterBlock" | "insertBeforeBlock";
     blockId: string;
     text: string;
+    lineBreakMode?: "paragraph" | "inline";
     inheritFormatting?: boolean;
     moveId?: string;
     pageBreakBefore?: boolean;
+    hardPageBreak?: {
+        clear?: import__stll_docx_core_model.BreakContent["clear"];
+    };
     styleId?: string | null;
     listLevel?: number | null;
+    numbering?: FolioAIListReference | null;
     alignment?: import__stll_docx_core_model.ParagraphAlignment | null;
     spacing?: FolioAIParagraphSpacing | null;
+    indentation?: FolioAIParagraphIndentation | null;
     comment?: FolioAIComment;
 } | {
     id: string;

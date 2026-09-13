@@ -374,6 +374,12 @@ export const WORDPROCESSINGML_NAMESPACE_URIS: ReadonlySet<string> = new Set([
   "http://purl.oclc.org/ooxml/wordprocessingml/main",
 ]);
 
+/** Office document relationship attributes, Transitional and Strict. */
+export const OFFICE_RELATIONSHIP_NAMESPACE_URIS: ReadonlySet<string> = new Set([
+  NAMESPACES.r,
+  "http://purl.oclc.org/ooxml/officeDocument/relationships",
+]);
+
 /**
  * First child whose local name matches AND whose resolved namespace URI is
  * one of `namespaceUris`. Unlike {@link findChild}, a same-named element
@@ -644,6 +650,29 @@ export function getChildElements(parent: XmlElement | null | undefined): XmlElem
     }
   }
   return results;
+}
+
+/**
+ * Folio's normalized Markup Compatibility policy: use the first Choice, which
+ * is the established parser behavior when `mc:Requires` cannot be evaluated;
+ * use Fallback only when there is no Choice. Callers serialize that selected
+ * branch as ordinary WordprocessingML rather than concatenating alternatives.
+ */
+export function selectAlternateContentBranch(alternateContent: XmlElement): XmlElement | undefined {
+  let fallback: XmlElement | undefined;
+  for (const child of getChildElements(alternateContent)) {
+    if (getNamespaceUri(child) !== NAMESPACES.mc) continue;
+    switch (getLocalName(child.name)) {
+      case "Choice":
+        return child;
+      case "Fallback":
+        fallback ??= child;
+        break;
+      default:
+        break;
+    }
+  }
+  return fallback;
 }
 
 /**

@@ -44,6 +44,7 @@ import type {
 import { DRAWING_RAW_XML_MODES } from "@stll/docx-core/model";
 import { parseGroupDrawing } from "./groupDrawingParser";
 import { parseImage } from "./imageParser";
+import { imageRawXmlFingerprint } from "./imageRawXml";
 import {
   EmphasisMarkSchema,
   FontHintSchema,
@@ -79,6 +80,7 @@ import {
   mergeXmlnsDeclarations,
   parseBooleanElement,
   parseNumericAttribute,
+  selectAlternateContentBranch,
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 import { parsePropertyChangeInfo } from "./trackedChangeInfo";
@@ -197,6 +199,7 @@ type RunPropertyChildren = {
   imprint?: XmlElement;
   kern?: XmlElement;
   lang?: XmlElement;
+  noProof?: XmlElement;
   outline?: XmlElement;
   position?: XmlElement;
   rFonts?: XmlElement;
@@ -235,6 +238,9 @@ function collectFirstRunPropertyChildren(rPr: XmlElement): RunPropertyChildren {
         break;
       case "color":
         children.color ??= child;
+        break;
+      case "noProof":
+        children.noProof ??= child;
         break;
       case "cs":
         children.cs ??= child;
@@ -430,6 +436,11 @@ export function parseRunProperties(
   const vanish = propertyChildren.vanish;
   if (vanish) {
     formatting.hidden = parseBooleanElement(vanish);
+  }
+
+  const noProof = propertyChildren.noProof;
+  if (noProof) {
+    formatting.noProof = parseBooleanElement(noProof);
   }
 
   // Text color (w:color)
@@ -874,7 +885,12 @@ function parseDrawingContent(
 ): DrawingContent | ShapeContent | null {
   const groupImage = parseGroupDrawing(element, rels ?? undefined, media ?? undefined);
   if (groupImage) {
-    return { type: "drawing", image: groupImage, rawXml: captureVerbatimXml(element) };
+    return {
+      type: "drawing",
+      image: groupImage,
+      rawXml: captureVerbatimXml(element),
+      rawImageFingerprint: imageRawXmlFingerprint(groupImage),
+    };
   }
   if (shouldPreserveRawShapeDrawing(element)) {
     return {
@@ -906,9 +922,8 @@ function parseDrawingContent(
     type: "drawing",
     image,
   };
-  if (!image.src) {
-    drawing.rawXml = captureVerbatimXml(element);
-  }
+  drawing.rawXml = captureVerbatimXml(element);
+  drawing.rawImageFingerprint = imageRawXmlFingerprint(image);
   return drawing;
 }
 
@@ -1076,7 +1091,7 @@ function parseRunContents(
           break;
         }
 
-        const targetEl = choiceEl ?? fallbackEl;
+        const targetEl = selectAlternateContentBranch(child);
         if (targetEl) {
           for (const innerChild of getChildElements(targetEl)) {
             const innerName = getLocalName(innerChild.name);
@@ -1100,6 +1115,17 @@ function parseRunContents(
                 innerVml.rawXml = captureVerbatimXml(cloneWithXmlnsDeclarations(child, rootXmlns));
                 contents.push(innerVml);
               }
+            } else {
+              // Parse one selected child at a time so text and preserved visual
+              // carriers retain their original interleaving.
+              contents.push(
+                ...parseRunContents(
+                  { ...targetEl, elements: [innerChild] },
+                  rels,
+                  media,
+                  rootXmlns,
+                ),
+              );
             }
           }
         }

@@ -363,8 +363,10 @@ const toFolioAIBlockParagraphProperties = (
 ): FolioAIBlockParagraphProperties => ({
   ...(properties.styleId !== undefined && { styleId: properties.styleId }),
   ...(properties.listLevel !== undefined && { listLevel: properties.listLevel }),
+  ...(properties.listReference !== undefined && { numbering: properties.listReference }),
   ...(properties.alignment !== undefined && { alignment: properties.alignment }),
   ...(properties.spacing !== undefined && { spacing: properties.spacing }),
+  ...(properties.indentation !== undefined && { indentation: properties.indentation }),
 });
 
 /**
@@ -756,6 +758,10 @@ const withTrailingDeletionRules = ({
           ...(insert.moveId !== undefined && { moveId: insert.moveId }),
           styleId: insert.styleId ?? null,
           listLevel: insert.listLevel ?? null,
+          numbering: insert.numbering ?? null,
+          indentation: insert.indentation ?? null,
+          ...(insert.lineBreakMode !== undefined && { lineBreakMode: insert.lineBreakMode }),
+          ...(insert.hardPageBreak !== undefined && { hardPageBreak: insert.hardPageBreak }),
           alignment: insert.alignment ?? null,
           spacing: insert.spacing ?? null,
         };
@@ -936,17 +942,31 @@ export const planStoryCompare = ({
 
   const pushInsertOperation = (block: FolioAIBlock, anchorId: string | null): void => {
     const moveSourceId = moveSourceByTargetBlockId.get(block.id);
+    const structuralBoundary = block.structuralBoundaries?.at(0);
+    const hardPageBreak =
+      block.text.length === 0 &&
+      block.structuralBoundaries?.length === 1 &&
+      structuralBoundary?.type === "pageBreak" &&
+      structuralBoundary.offset === 0
+        ? { ...(structuralBoundary.clear !== undefined && { clear: structuralBoundary.clear }) }
+        : undefined;
     // All four always explicit, `null` included: an inserted paragraph that
     // says nothing takes the anchor's paragraph properties, and the anchor is
     // whichever block happened to follow it. A new ordinary paragraph beside
     // a styled, aligned list item is not implicitly the same kind of paragraph.
     const shared = {
       text: block.text,
+      ...((block.text.includes("\t") || block.text.includes("\n")) && {
+        lineBreakMode: "inline" as const,
+      }),
       ...(moveSourceId !== undefined && { moveId: moveIdOf(moveSourceId) }),
+      ...(hardPageBreak !== undefined && { hardPageBreak }),
       styleId: block.styleId ?? null,
       listLevel: block.listLevel ?? null,
+      numbering: block.listReference ?? null,
       alignment: block.directAlignment ?? null,
       spacing: block.directSpacing ?? null,
+      indentation: block.directIndentation ?? null,
     };
     if (anchorId !== null) {
       operations.push({

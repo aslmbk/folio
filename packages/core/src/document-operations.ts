@@ -21,10 +21,11 @@ import type {
   FolioAIEditSkippedOperation,
   FolioAIEditSnapshot,
   FolioAIInlineFormattingPatch,
+  FolioAIParagraphIndentation,
   FolioAIParagraphSpacing,
   FolioAITextRangeHandle,
 } from "./ai-edits/types";
-import type { LineSpacingRule, ParagraphAlignment } from "./types/document";
+import type { BreakContent, LineSpacingRule, ParagraphAlignment } from "./types/document";
 import { LINE_SPACING_RULE_VALUES, PARAGRAPH_ALIGNMENT_VALUES } from "./types/documentEnumValues";
 
 export const FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION = 1 as const;
@@ -34,6 +35,14 @@ export const FOLIO_PARAGRAPH_ALIGNMENT_VALUES = Object.freeze([...PARAGRAPH_ALIG
 
 /** `w:spacing/@w:lineRule` values accepted by the operation contract. */
 export const FOLIO_LINE_SPACING_RULE_VALUES = Object.freeze([...LINE_SPACING_RULE_VALUES]);
+
+/** `w:br/@w:clear` values accepted on an authored hard page break. */
+export const FOLIO_PAGE_BREAK_CLEAR_VALUES = Object.freeze([
+  "none",
+  "left",
+  "right",
+  "all",
+] as const satisfies readonly NonNullable<BreakContent["clear"]>[]);
 
 export const FOLIO_DOCUMENT_OPERATION_TYPES = Object.freeze([
   "replaceInBlock",
@@ -526,6 +535,76 @@ const readClearableParagraphSpacing = ({
   return spacing;
 };
 
+const PARAGRAPH_INDENTATION_KEYS = [
+  "indentLeft",
+  "indentRight",
+  "indentFirstLine",
+  "hangingIndent",
+] as const satisfies readonly (keyof FolioAIParagraphIndentation)[];
+
+type ReadClearableParagraphIndentationParams = {
+  value: Record<string, unknown>;
+  key: string;
+  path: string;
+};
+
+/** Read one complete direct `w:ind` cluster, preserving zero and false. */
+const readClearableParagraphIndentation = ({
+  value,
+  key,
+  path,
+}: ReadClearableParagraphIndentationParams): FolioAIParagraphIndentation | null | undefined => {
+  const candidate = value[key];
+  if (candidate === undefined || candidate === null) {
+    return candidate;
+  }
+  const indentationPath = `${path}.${key}`;
+  if (!isPlainObject(candidate)) {
+    return invalidBatch(indentationPath, "expected an object or null when provided");
+  }
+  assertAllowedKeys(candidate, indentationPath, PARAGRAPH_INDENTATION_KEYS);
+  if (Object.keys(candidate).length === 0) {
+    return invalidBatch(indentationPath, "expected at least one indentation property");
+  }
+  const indentation: FolioAIParagraphIndentation = {};
+  for (const numberKey of ["indentLeft", "indentRight", "indentFirstLine"] as const) {
+    const number = candidate[numberKey];
+    if (number === undefined) {
+      continue;
+    }
+    if (typeof number !== "number" || !Number.isSafeInteger(number)) {
+      return invalidBatch(
+        `${indentationPath}.${numberKey}`,
+        "expected a safe integer when provided",
+      );
+    }
+    indentation[numberKey] = number;
+  }
+  const hangingIndent = candidate["hangingIndent"];
+  if (hangingIndent !== undefined) {
+    if (typeof hangingIndent !== "boolean") {
+      return invalidBatch(`${indentationPath}.hangingIndent`, "expected a boolean when provided");
+    }
+    indentation.hangingIndent = hangingIndent;
+  }
+  return indentation;
+};
+
+const readClearableNumbering = ({ value, key, path }: ReadClearableParagraphIndentationParams) => {
+  const candidate = value[key];
+  if (candidate === undefined || candidate === null) return candidate;
+  const numberingPath = `${path}.${key}`;
+  if (!isPlainObject(candidate))
+    return invalidBatch(numberingPath, "expected an object or null when provided");
+  assertAllowedKeys(candidate, numberingPath, ["numId", "level"]);
+  const numId = readNonNegativeInteger(candidate, "numId", numberingPath);
+  if (numId === 0) return invalidBatch(`${numberingPath}.numId`, "expected a positive integer");
+  return {
+    numId,
+    level: readNonNegativeInteger(candidate, "level", numberingPath),
+  };
+};
+
 /**
  * A rectangular grid of cell texts. Rectangular because a table whose rows
  * hold different cell counts is not a table any consumer can lay out, and the
@@ -581,11 +660,23 @@ const readParagraphProperties = ({
   if (!isPlainObject(candidate)) {
     return invalidBatch(propertiesPath, "expected an object");
   }
-  assertAllowedKeys(candidate, propertiesPath, ["styleId", "listLevel", "alignment", "spacing"]);
+  assertAllowedKeys(candidate, propertiesPath, [
+    "styleId",
+    "listLevel",
+    "numbering",
+    "alignment",
+    "spacing",
+    "indentation",
+  ]);
   const rawStyleId = candidate["styleId"];
   const styleId =
     rawStyleId === null ? null : readOptionalString(candidate, "styleId", propertiesPath);
   const listLevel = readClearableNonNegativeInteger(candidate, "listLevel", propertiesPath);
+  const numbering = readClearableNumbering({
+    value: candidate,
+    key: "numbering",
+    path: propertiesPath,
+  });
   const alignment = readClearableParagraphAlignment({
     value: candidate,
     key: "alignment",
@@ -596,19 +687,28 @@ const readParagraphProperties = ({
     key: "spacing",
     path: propertiesPath,
   });
+  const indentation = readClearableParagraphIndentation({
+    value: candidate,
+    key: "indentation",
+    path: propertiesPath,
+  });
   if (
     styleId === undefined &&
     listLevel === undefined &&
+    numbering === undefined &&
     alignment === undefined &&
-    spacing === undefined
+    spacing === undefined &&
+    indentation === undefined
   ) {
     return invalidBatch(propertiesPath, "expected at least one property to set");
   }
   return {
     ...(styleId !== undefined && { styleId }),
     ...(listLevel !== undefined && { listLevel }),
+    ...(numbering !== undefined && { numbering }),
     ...(alignment !== undefined && { alignment }),
     ...(spacing !== undefined && { spacing }),
+    ...(indentation !== undefined && { indentation }),
   };
 };
 
@@ -784,9 +884,13 @@ export const FOLIO_DOCUMENT_OPERATION_KEYS_BY_TYPE = Object.freeze({
     "inheritFormatting",
     "alignment",
     "spacing",
+    "indentation",
+    "lineBreakMode",
     "listLevel",
+    "numbering",
     "moveId",
     "pageBreakBefore",
+    "hardPageBreak",
     "styleId",
     "comment",
   ],
@@ -796,9 +900,13 @@ export const FOLIO_DOCUMENT_OPERATION_KEYS_BY_TYPE = Object.freeze({
     "inheritFormatting",
     "alignment",
     "spacing",
+    "indentation",
+    "lineBreakMode",
     "listLevel",
+    "numbering",
     "moveId",
     "pageBreakBefore",
+    "hardPageBreak",
     "styleId",
     "comment",
   ],
@@ -855,6 +963,30 @@ const parseSignatureParties = (
     }
     return parsedParty;
   });
+};
+
+const readOptionalHardPageBreak = (
+  value: Record<string, unknown>,
+  path: string,
+): { clear?: BreakContent["clear"] } | undefined => {
+  const candidate = value["hardPageBreak"];
+  if (candidate === undefined) {
+    return undefined;
+  }
+  if (!isPlainObject(candidate)) {
+    return invalidBatch(`${path}.hardPageBreak`, "expected an object when provided");
+  }
+  const hardPageBreakPath = `${path}.hardPageBreak`;
+  assertAllowedKeys(candidate, hardPageBreakPath, ["clear"]);
+  const clear = candidate["clear"];
+  if (clear === undefined) {
+    return {};
+  }
+  const validatedClear = FOLIO_PAGE_BREAK_CLEAR_VALUES.find((supported) => supported === clear);
+  if (validatedClear === undefined) {
+    return invalidBatch(`${hardPageBreakPath}.clear`, "expected a supported break clear value");
+  }
+  return { clear: validatedClear };
 };
 
 const parseDocumentOperation = (value: unknown, index: number): FolioDocumentOperation => {
@@ -989,23 +1121,57 @@ const parseDocumentOperation = (value: unknown, index: number): FolioDocumentOpe
   if (type === "insertAfterBlock" || type === "insertBeforeBlock") {
     const inheritFormatting = readOptionalBoolean(value, "inheritFormatting", path);
     const pageBreakBefore = readOptionalBoolean(value, "pageBreakBefore", path);
+    const hardPageBreak = readOptionalHardPageBreak(value, path);
     const styleId = value["styleId"] === null ? null : readOptionalString(value, "styleId", path);
     const moveId = readOptionalString(value, "moveId", path);
     const listLevel = readClearableNonNegativeInteger(value, "listLevel", path);
+    const numbering = readClearableNumbering({ value, key: "numbering", path });
     const alignment = readClearableParagraphAlignment({ value, key: "alignment", path });
     const spacing = readClearableParagraphSpacing({ value, key: "spacing", path });
+    const indentation = readClearableParagraphIndentation({ value, key: "indentation", path });
+    const lineBreakMode = value["lineBreakMode"];
+    if (
+      lineBreakMode !== undefined &&
+      lineBreakMode !== "paragraph" &&
+      lineBreakMode !== "inline"
+    ) {
+      return invalidBatch(
+        `${path}.lineBreakMode`,
+        'expected "paragraph" or "inline" when provided',
+      );
+    }
+    const text = readString(value, "text", path);
+    if (hardPageBreak !== undefined && text.length > 0) {
+      return invalidBatch(`${path}.text`, "expected empty text with hardPageBreak");
+    }
+    if (hardPageBreak !== undefined && pageBreakBefore !== undefined) {
+      return invalidBatch(
+        `${path}.pageBreakBefore`,
+        "cannot combine hardPageBreak with pageBreakBefore",
+      );
+    }
+    if (hardPageBreak !== undefined && lineBreakMode !== undefined) {
+      return invalidBatch(
+        `${path}.lineBreakMode`,
+        "cannot combine hardPageBreak with lineBreakMode",
+      );
+    }
     return {
       ...operationMeta,
       id,
       type,
       blockId,
-      text: readString(value, "text", path),
+      text,
       ...(inheritFormatting !== undefined && { inheritFormatting }),
       ...(alignment !== undefined && { alignment }),
       ...(spacing !== undefined && { spacing }),
+      ...(indentation !== undefined && { indentation }),
+      ...(lineBreakMode !== undefined && { lineBreakMode }),
       ...(listLevel !== undefined && { listLevel }),
+      ...(numbering !== undefined && { numbering }),
       ...(moveId !== undefined && { moveId }),
       ...(pageBreakBefore !== undefined && { pageBreakBefore }),
+      ...(hardPageBreak !== undefined && { hardPageBreak }),
       ...(styleId !== undefined && { styleId }),
       ...(comment !== undefined && { comment }),
     };

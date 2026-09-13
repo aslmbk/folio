@@ -49,6 +49,16 @@ const schema = new Schema({
       atom: true,
       attrs: { clear: { default: null } },
     },
+    math: {
+      inline: true,
+      group: "inline",
+      atom: true,
+      attrs: {
+        display: { default: "inline" },
+        ommlXml: { default: "" },
+        plainText: { default: "" },
+      },
+    },
     bookmarkBoundary: { inline: true, group: "inline", atom: true },
     table: {
       content: "tableRow+",
@@ -2848,27 +2858,80 @@ describe("Folio AI edit operations", () => {
     ]);
   });
 
-  test("page-break-only inserts are skipped in tracked-changes mode", () => {
-    const view = makeView(makeState(["Anchor block."]));
-    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+  test("tracks a page-break-only insertion through acceptance and rejection", () => {
+    const applyPageBreak = () => {
+      const view = makeView(makeState(["Anchor block."]));
+      const snapshot = createFolioAIEditSnapshot(view.state.doc);
+      const result = applyFolioAIEditOperations({
+        view,
+        snapshot,
+        operations: [
+          {
+            id: "op-1",
+            type: "insertAfterBlock",
+            blockId: "seq-0001",
+            text: "",
+            pageBreakBefore: true,
+          },
+        ],
+      });
 
-    const result = applyFolioAIEditOperations({
-      view,
-      snapshot,
-      operations: [
-        {
-          id: "op-1",
-          type: "insertAfterBlock",
-          blockId: "seq-0001",
-          text: "",
-          pageBreakBefore: true,
-        },
-      ],
-    });
+      expect(result.skipped).toEqual([]);
+      expect(result.applied.map(({ id }) => id)).toEqual(["op-1"]);
+      expect(view.state.doc.childCount).toBe(2);
+      expect(view.state.doc.child(1).attrs).toMatchObject({
+        pageBreakBefore: true,
+      });
+      expect(view.state.doc.child(0).attrs["pPrMark"]).toMatchObject({ kind: "ins" });
+      expect(view.state.doc.child(1).attrs["pPrMark"]).toBeNull();
+      return view;
+    };
 
-    expect(result.applied).toEqual([]);
-    expect(result.skipped).toEqual([{ id: "op-1", reason: "unsupportedMode" }]);
-    expect(view.state.doc.childCount).toBe(1);
+    const accepting = applyPageBreak();
+    acceptAllChanges()(accepting.state, accepting.dispatch);
+    expect(accepting.state.doc.childCount).toBe(2);
+    expect(accepting.state.doc.child(1).attrs["pageBreakBefore"]).toBe(true);
+
+    const rejecting = applyPageBreak();
+    rejectAllChanges()(rejecting.state, rejecting.dispatch);
+    expect(rejecting.state.doc.childCount).toBe(1);
+  });
+
+  test("tracks a standalone hard page-break carrier through acceptance and rejection", () => {
+    const applyHardPageBreak = () => {
+      const view = makeView(makeState(["Anchor block."]));
+      const snapshot = createFolioAIEditSnapshot(view.state.doc);
+      const result = applyFolioAIEditOperations({
+        view,
+        snapshot,
+        operations: [
+          {
+            id: "op-1",
+            type: "insertAfterBlock",
+            blockId: "seq-0001",
+            text: "",
+            hardPageBreak: {},
+          },
+        ],
+      });
+
+      expect(result.skipped).toEqual([]);
+      expect(view.state.doc.childCount).toBe(2);
+      expect(view.state.doc.child(1).firstChild?.type.name).toBe("pageBreakRun");
+      expect(view.state.doc.child(1).firstChild?.marks.map((mark) => mark.type.name)).toEqual([
+        "insertion",
+      ]);
+      return view;
+    };
+
+    const accepting = applyHardPageBreak();
+    acceptAllChanges()(accepting.state, accepting.dispatch);
+    expect(accepting.state.doc.childCount).toBe(2);
+    expect(accepting.state.doc.child(1).firstChild?.type.name).toBe("pageBreakRun");
+
+    const rejecting = applyHardPageBreak();
+    rejectAllChanges()(rejecting.state, rejecting.dispatch);
+    expect(rejecting.state.doc.childCount).toBe(1);
   });
 
   test("signature-table inserts are skipped in tracked-changes mode", () => {
@@ -5405,6 +5468,43 @@ describe("deleteBlock over inline content that is not text", () => {
 
   // A bookmark boundary is zero-width. Deleting the surrounding words did not
   // delete the bookmark itself, and leaving it must not keep the paragraph alive.
+  test("resolves a tracked deletion of an OMML-only paragraph", () => {
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", { paraId: "gone" }, [
+        schema.node("math", {
+          display: "block",
+          ommlXml: "<m:oMathPara><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>",
+          plainText: "x",
+        }),
+      ]),
+      schema.node("paragraph", { paraId: "keep" }, [schema.text("kept")]),
+    ]);
+    const state = EditorState.create({ schema, doc });
+    const view = makeView(state);
+
+    const applyDeletion = (targetView: ReturnType<typeof makeView>) =>
+      applyFolioAIEditOperations({
+        view: targetView,
+        snapshot: createFolioAIEditSnapshot(state.doc),
+        operations: [{ id: "delete", type: "deleteBlock", blockId: "gone" }],
+        mode: "tracked-changes",
+      });
+
+    const result = applyDeletion(view);
+    expect(result.applied).toHaveLength(1);
+    const pendingMath = view.state.doc.firstChild?.firstChild;
+    expect(pendingMath?.type.name).toBe("math");
+    expect(pendingMath?.marks.some(({ type }) => type.name === "deletion")).toBe(true);
+
+    const accepting = makeView(view.state);
+    acceptAllChanges()(accepting.state, accepting.dispatch);
+    expect(accepting.state.doc.textContent).toBe("kept");
+
+    const rejecting = makeView(view.state);
+    rejectAllChanges()(rejecting.state, rejecting.dispatch);
+    expect(rejecting.state.doc).toEqual(doc);
+  });
+
   test("leaves a bookmark boundary unmarked and still removes the paragraph", () => {
     const view = deleteFirstBlock([schema.node("bookmarkBoundary"), schema.text("words")]);
 

@@ -1,3 +1,16 @@
+import JSZip from "jszip";
+import { rebindDrawingImageRelationship } from "../docx/drawingRelationships";
+import {
+  captureSectionReferenceInventory,
+  resolvedSectionReferenceLosses,
+  withSectionReferenceResolution,
+} from "../internal/sectionReferenceResolution";
+import type { RemovedSectionReference } from "../internal/sectionEndpointResolution";
+import {
+  importReferencedStyleDefinitions,
+  type ImportReferencedStyleDefinitionsResult,
+} from "../compare/style-resources";
+import { expectCharacterStyleMarkAttrs } from "../prosemirror/attrs";
 /**
  * Headless `.docx` review path: buffer -> apply AI edits -> buffer, with
  * no `EditorView` and no DOM. A queue worker or agent can read a document,
@@ -18,7 +31,16 @@
  * Scope: main, header, footer, footnote, and endnote blocks.
  */
 
+import { sectionReferenceHistory } from "../docx/sectionReferenceHistory";
+import { sectionRejectProperties } from "../prosemirror/commands/propertyChangeScope";
 import { panic, TaggedError } from "better-result";
+import { canonicalJson } from "../utils/canonicalJson";
+import {
+  matchInlineProvenance,
+  type InlineProvenanceTargetOptions,
+} from "../compare/inline-provenance";
+import { matchInlineAtoms, type MatchInlineAtomsOptions } from "../compare/inline-atoms";
+import { stageSectionBoundaryProperties as stageMappedSectionBoundaryProperties } from "../compare/section-boundary-properties";
 import { Fragment } from "prosemirror-model";
 import type { Node as PMNode } from "prosemirror-model";
 import { EditorState } from "prosemirror-state";
@@ -62,19 +84,29 @@ import {
 } from "../prosemirror/extensions/features/ParagraphChangeTrackerExtension";
 import {
   createDocumentStylesPlugin,
+  withDocumentStyles,
   getDocumentStyleResolver,
 } from "../prosemirror/plugins/documentStyles";
-import { createDocumentNumberingPlugin } from "../prosemirror/plugins/documentNumbering";
+import {
+  createDocumentNumberingPlugin,
+  withDocumentNumbering,
+} from "../prosemirror/plugins/documentNumbering";
 import { schema, singletonManager } from "../prosemirror/schema";
+import { REVIEW_CARRIERS } from "@stll/docx-core/model";
+import { MAX_LIST_LEVEL } from "../prosemirror/listMarker";
 import type { Comment } from "../types/content";
 import type {
   Document,
   Endnote,
   Footnote,
   HeaderFooter,
+  MediaFile,
   NumberingDefinitions,
+  SectionProperties,
+  StyleDefinitions,
 } from "../types/document";
 import { deterministicHexId } from "../utils/hexId";
+import { getCachedNumberingMap } from "../docx/numberingParser";
 import {
   recreateProseNodeWithParagraphPropertySource,
   transferProseParagraphPropertySource,
@@ -99,6 +131,7 @@ import {
 } from "./read";
 import {
   createFolioAIEditSnapshotWithStyleResolver,
+  detachFolioAIEditSnapshotExternalHyperlinks,
   folioStoryTables,
   isFolioAIContentBlock,
   normalizeFolioAIBlockText,
@@ -106,7 +139,7 @@ import {
   type FolioStoryTable,
 } from "./snapshot";
 import { matchTableGeometry, type TableGeometryPairing } from "./table-geometry";
-import type { FolioTableTemplates } from "./table-template";
+import { tableTemplateCanCrossPackageLosslessly, type FolioTableTemplates } from "./table-template";
 import type {
   FolioAIBlock,
   FolioAIEditApplyMode,
@@ -414,7 +447,14 @@ type FolioResolvedStoryExpectation = {
 
 type FolioReviewerStateSnapshot = {
   mainState: EditorState;
+  finalSectionPropertiesOverride: SectionProperties | undefined;
   secondaryStoryStates: readonly FolioSecondaryStoryState[];
+  sectionReferenceRemovals: readonly RemovedSectionReference[];
+  removedHeaderFooterStories: readonly FolioHeaderFooterStoryHandle[];
+  importedStyles: StyleDefinitions | undefined;
+  importedMedia: ReadonlyMap<string, MediaFile>;
+  importedHeaders: ReadonlyMap<string, HeaderFooter>;
+  importedFooters: ReadonlyMap<string, HeaderFooter>;
   createdComments: readonly Comment[];
   resolvedOverrides: ReadonlyMap<number, boolean>;
   resolvedStoryExpectations: readonly FolioResolvedStoryExpectation[];
@@ -428,6 +468,7 @@ type FolioSaveSnapshot = {
   document: Document;
   path: FolioSavePath;
   changedNoteParaIds: ReadonlySet<string>;
+  sectionReferenceRemovals: readonly RemovedSectionReference[];
   sectionEndpointRemoval: TrackedSectionEndpointRemoval | null;
   resolvedStoryExpectations: readonly FolioResolvedStoryExpectation[];
 };
@@ -457,9 +498,171 @@ type FolioDocxComparisonProjection = {
   };
 };
 
+type MatchStoryInlineProvenanceOptions = InlineProvenanceTargetOptions & {
+  story: FolioEditableDocumentStoryHandle;
+};
+
+type StoryInlineProvenanceResult =
+  | {
+      status: "matched";
+      nextRevisionId: number;
+      changedTargetBlockIds: readonly string[];
+      rangeCount: number;
+      documentChanged: boolean;
+    }
+  | { status: "unalignable" }
+  | { status: "budget-exceeded" };
+
+type MatchStoryInlineAtomsOptions = Omit<MatchInlineAtomsOptions, "state" | "author"> & {
+  story: FolioEditableDocumentStoryHandle;
+};
+
+type StoryInlineAtomsResult =
+  | {
+      status: "matched";
+      nextRevisionId: number;
+      changedTargetBlockIds: readonly string[];
+      rangeCount: number;
+      documentChanged: boolean;
+    }
+  | { status: "unalignable" }
+  | { status: "budget-exceeded" };
+
+type StageTargetNumberingResult = "unchanged" | "staged" | "conflict";
+
+const numberingLevelsOf = (
+  numbering: NumberingDefinitions | null | undefined,
+): FolioNumberingLevel[] => {
+  if (!numbering) return [];
+  const levelsByAbstractId = new Map(
+    numbering.abstractNums.map((abstractNum) => [abstractNum.abstractNumId, abstractNum.levels]),
+  );
+  const levels: FolioNumberingLevel[] = [];
+  for (const instance of numbering.nums) {
+    const overrides = new Map(
+      (instance.levelOverrides ?? []).map((override) => [override.ilvl, override]),
+    );
+    for (const level of levelsByAbstractId.get(instance.abstractNumId) ?? []) {
+      const override = overrides.get(level.ilvl);
+      const resolved = override?.lvl ?? level;
+      levels.push({
+        numId: instance.numId,
+        level: resolved.ilvl,
+        format: resolved.numFmt,
+        levelText: resolved.lvlText,
+        ...((override?.startOverride ?? resolved.start) !== undefined
+          ? { start: override?.startOverride ?? resolved.start }
+          : {}),
+      });
+    }
+  }
+  return levels;
+};
+
+type ReferencedNumberingLevelsOptions = {
+  references: readonly { numId: number; level: number }[];
+};
+
+const referencedNumberingLevelsByNumId = ({
+  references,
+}: ReferencedNumberingLevelsOptions): ReadonlyMap<number, readonly number[]> => {
+  const levelsByNumId = new Map<number, Set<number>>();
+  for (const { numId, level } of references) {
+    const levels = levelsByNumId.get(numId) ?? new Set<number>();
+    levelsByNumId.set(numId, levels);
+    levels.add(level);
+    for (let ancestor = 0; ancestor <= Math.min(level, MAX_LIST_LEVEL); ancestor += 1) {
+      levels.add(ancestor);
+    }
+  }
+  return new Map(
+    [...levelsByNumId].map(([numId, levels]) => [
+      numId,
+      [...levels].toSorted((left, right) => left - right),
+    ]),
+  );
+};
+
+type SameReferencedNumberingLevelsOptions = {
+  current: NumberingDefinitions | null | undefined;
+  target: NumberingDefinitions;
+  numId: number;
+  levelsByNumId: ReadonlyMap<number, readonly number[]>;
+};
+
+const sameReferencedNumberingLevels = ({
+  current,
+  target,
+  numId,
+  levelsByNumId,
+}: SameReferencedNumberingLevelsOptions): boolean => {
+  if (!current) return false;
+  const currentNumbering = getCachedNumberingMap(current);
+  const targetNumbering = getCachedNumberingMap(target);
+  for (const level of levelsByNumId.get(numId) ?? []) {
+    const currentLevel = currentNumbering.getLevel(numId, level);
+    const targetLevel = targetNumbering.getLevel(numId, level);
+    if (
+      !currentLevel ||
+      !targetLevel ||
+      canonicalJson(currentLevel) !== canonicalJson(targetLevel)
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
 type FolioDocxComparisonAccess = {
+  stageTerminalTableReviewCarrier: (target: PMNode) => boolean;
+  stageTargetStyles: (
+    source: FolioDocxReviewer,
+    snapshots: readonly FolioAIEditSnapshot[],
+    importedHeaderFooterSnapshots: readonly FolioAIEditSnapshot[],
+  ) => ImportReferencedStyleDefinitionsResult;
+  createComparisonHeaderFooter: (
+    source: FolioDocxReviewer,
+    story: FolioHeaderFooterStoryHandle,
+  ) => Promise<FolioHeaderFooterStoryHandle | null>;
+  matchInlineAtoms: (options: MatchStoryInlineAtomsOptions) => StoryInlineAtomsResult;
+  matchInlineProvenance: (
+    options: MatchStoryInlineProvenanceOptions,
+  ) => StoryInlineProvenanceResult;
   projectStories: (mode: FolioDocxComparisonProjectionMode) => FolioDocxComparisonProjection;
   snapshotReviewedStory: (options?: FolioReadReviewedStoryOptions) => FolioAIEditSnapshot | null;
+  numberingDefinitions: () => NumberingDefinitions | null | undefined;
+  planTargetNumberingReferences: (
+    target: NumberingDefinitions | null | undefined,
+    references: readonly { numId: number; level: number }[],
+  ) => ReadonlyMap<number, number> | null;
+  stageTargetNumbering: (
+    target: NumberingDefinitions | null | undefined,
+    references: readonly { numId: number; level: number }[],
+    remappedNumIds: ReadonlyMap<number, number>,
+  ) => StageTargetNumberingResult;
+  finalSectionProperties: () => SectionProperties | undefined;
+  stageFinalSectionProperties: (options: {
+    target: SectionProperties;
+    previous: SectionProperties;
+    revision: FolioRevisionStamp;
+  }) => boolean;
+  stageMappedSectionBoundaries: (options: {
+    target: PMNode;
+    originalRevisionIdSeed: number;
+    maxRanges: number;
+    revision: FolioRevisionStamp;
+    mapTargetProperties: (args: {
+      kind: "inserted" | "retained";
+      current: SectionProperties | undefined;
+      target: SectionProperties;
+    }) =>
+      | { kind: "inserted"; target: SectionProperties }
+      | { kind: "retained"; previous: SectionProperties; target: SectionProperties }
+      | null;
+  }) =>
+    | { status: "matched"; rangeCount: number; nextRevisionId: number; documentChanged: boolean }
+    | { status: "unalignable"; detail: string }
+    | { status: "budget-exceeded" };
 };
 
 const comparisonAccessByReviewer = new WeakMap<FolioDocxReviewer, FolioDocxComparisonAccess>();
@@ -652,9 +855,16 @@ export class FolioDocxReviewer {
   /** Default author for tracked changes and comments. */
   readonly author: string;
   private readonly baseDocument: Document;
+  private finalSectionPropertiesOverride: SectionProperties | undefined;
   private readonly originalBuffer: ArrayBuffer;
   private state: EditorState;
   private readonly secondaryStoryStates = new Map<string, FolioSecondaryStoryState>();
+  private readonly removedHeaderFooterStories = new Map<string, FolioHeaderFooterStoryHandle>();
+  private readonly sectionReferenceRemovals: RemovedSectionReference[] = [];
+  private importedStyles: StyleDefinitions | undefined;
+  private readonly importedMedia = new Map<string, MediaFile>();
+  private readonly importedHeaders = new Map<string, HeaderFooter>();
+  private readonly importedFooters = new Map<string, HeaderFooter>();
   private readonly resolvedStoryExpectations = new Map<string, FolioResolvedStoryExpectation>();
   private readonly createdComments: Comment[] = [];
   private readonly usedCommentIds: Set<number>;
@@ -685,10 +895,270 @@ export class FolioDocxReviewer {
     comparisonAccessByReviewer.set(
       this,
       Object.freeze({
+        stageTerminalTableReviewCarrier: (target) => this.stageTerminalTableReviewCarrier(target),
+        stageTargetStyles: (source, snapshots, importedHeaderFooterSnapshots) =>
+          this.stageTargetStyles(source, snapshots, importedHeaderFooterSnapshots),
+        createComparisonHeaderFooter: (source, story) =>
+          this.createComparisonHeaderFooter(source, story),
+        finalSectionProperties: () => this.currentFinalSectionProperties(),
+        stageFinalSectionProperties: ({ target, previous, revision }) =>
+          this.stageFinalSectionProperties({ target, previous, revision }),
+        stageMappedSectionBoundaries: (options) => this.stageMappedSectionBoundaries(options),
+        matchInlineAtoms: ({ story, ...options }) => {
+          const state = this.getEditableStoryState(story);
+          if (!state) return panic("A compared story lost its editable state", { story });
+          const result = matchInlineAtoms({ ...options, state, author: this.author });
+          switch (result.status) {
+            case "matched":
+              if (result.transaction.docChanged) {
+                this.setEditableStoryState(story, state.apply(result.transaction));
+              }
+              return {
+                status: "matched",
+                nextRevisionId: result.nextRevisionId,
+                changedTargetBlockIds: result.changedTargetBlockIds,
+                rangeCount: result.rangeCount,
+                documentChanged: result.transaction.docChanged,
+              };
+            case "unalignable":
+            case "budget-exceeded":
+              return result;
+            default: {
+              const unreachable: never = result;
+              return panic("Unhandled inline atom result", { result: unreachable });
+            }
+          }
+        },
+        matchInlineProvenance: ({ story, ...options }) => {
+          const state = this.getEditableStoryState(story);
+          if (!state) return panic("A compared story lost its editable state", { story });
+          const result = matchInlineProvenance({ ...options, state, author: this.author });
+          switch (result.status) {
+            case "matched":
+              if (result.transaction.docChanged) {
+                this.setEditableStoryState(story, state.apply(result.transaction));
+              }
+              return {
+                status: "matched",
+                nextRevisionId: result.nextRevisionId,
+                changedTargetBlockIds: result.changedTargetBlockIds,
+                rangeCount: result.rangeCount,
+                documentChanged: result.transaction.docChanged,
+              };
+            case "unalignable":
+            case "budget-exceeded":
+              return result;
+            default: {
+              const unreachable: never = result;
+              return panic("Unhandled inline provenance result", { result: unreachable });
+            }
+          }
+        },
         projectStories: (mode) => this.projectComparisonStoriesInternal(mode),
         snapshotReviewedStory: (options) => this.snapshotReviewedStoryInternal(options),
+        numberingDefinitions: () => this.baseDocument.package.numbering,
+        planTargetNumberingReferences: (target, references) =>
+          this.planTargetNumberingReferences(target, references),
+        stageTargetNumbering: (target, references, remappedNumIds) =>
+          this.stageTargetNumbering(target, references, remappedNumIds),
       }),
     );
+  }
+
+  private stageTargetStyles(
+    source: FolioDocxReviewer,
+    snapshots: readonly FolioAIEditSnapshot[],
+    importedHeaderFooterSnapshots: readonly FolioAIEditSnapshot[],
+  ): ImportReferencedStyleDefinitionsResult {
+    const destination = this.baseDocument.package;
+    const sourcePackage = source.baseDocument.package;
+    const destinationStyles = this.importedStyles ?? destination.styles;
+    const existing = new Set(destinationStyles?.styles.map(({ styleId }) => styleId));
+    const sourceStyleIds = new Set(sourcePackage.styles?.styles.map(({ styleId }) => styleId));
+    const collect = (document: PMNode): Set<string> => {
+      const references = new Set<string>();
+      document.descendants((node) => {
+        const styleId = node.attrs["styleId"];
+        if (typeof styleId === "string" && styleId.length > 0) references.add(styleId);
+        for (const mark of node.marks) {
+          if (mark.type.name === "characterStyle")
+            references.add(expectCharacterStyleMarkAttrs(mark).styleId);
+        }
+      });
+      return references;
+    };
+    const hasUnstyledParagraph = (document: PMNode): boolean => {
+      let found = false;
+      document.descendants((node) => {
+        if (node.isTextblock && typeof node.attrs["styleId"] !== "string") {
+          found = true;
+          return false;
+        }
+        return true;
+      });
+      return found;
+    };
+    const contextsMatch =
+      canonicalJson(sourcePackage.styles?.docDefaults) ===
+        canonicalJson(destinationStyles?.docDefaults) &&
+      canonicalJson(sourcePackage.theme) === canonicalJson(destination.theme);
+    const resourceSnapshots = contextsMatch ? snapshots : importedHeaderFooterSnapshots;
+    const referencedStyleIds = new Set<string>();
+    let materializeDefaultParagraphStyle = false;
+    for (const snapshot of resourceSnapshots) {
+      if (hasUnstyledParagraph(sourceDocumentOf(snapshot))) {
+        materializeDefaultParagraphStyle = true;
+      }
+      for (const styleId of collect(sourceDocumentOf(snapshot))) {
+        if (sourceStyleIds.has(styleId) && !existing.has(styleId)) referencedStyleIds.add(styleId);
+      }
+    }
+    const reservedStyleIds = new Set<string>();
+    if (referencedStyleIds.size > 0) {
+      for (const handle of this.listStoryHandlesInternal()) {
+        const state = this.getEditableStoryState(handle);
+        if (!state) continue;
+        for (const styleId of collect(state.doc)) {
+          if (referencedStyleIds.has(styleId)) reservedStyleIds.add(styleId);
+        }
+      }
+    }
+    const result = importReferencedStyleDefinitions({
+      sourceStyles: sourcePackage.styles,
+      destinationStyles,
+      sourceTheme: sourcePackage.theme,
+      destinationTheme: destination.theme,
+      referencedStyleIds: [...referencedStyleIds],
+      reservedStyleIds: [...reservedStyleIds],
+      materializeDefaultParagraphStyle,
+    });
+    if (result.status === "imported") {
+      this.importedStyles = result.styles;
+      this.state = withDocumentStyles(this.state, result.styles);
+      for (const entry of this.secondaryStoryStates.values()) {
+        const wasUntouched = entry.state === entry.initialState;
+        const refreshed = withDocumentStyles(entry.state, result.styles);
+        entry.state = refreshed;
+        if (wasUntouched) entry.initialState = refreshed;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * A raw final table has no paragraph mark after it for Word to merge into
+   * when the target ends in a paragraph. Folio-exact comparison adds this
+   * untracked receiver before planning; its private marker makes resolving in
+   * Folio restore the raw source view.
+   */
+  private stageTerminalTableReviewCarrier(target: PMNode): boolean {
+    const baseTerminalTable = this.state.doc.lastChild;
+    if (baseTerminalTable?.type.name !== "table" || target.lastChild?.type.name !== "paragraph") {
+      return false;
+    }
+    const paragraphType = this.state.schema.nodes["paragraph"];
+    if (!paragraphType) {
+      return panic("The schema has no paragraph node for a terminal-table review carrier");
+    }
+    const carrier = paragraphType.create({ reviewCarrier: REVIEW_CARRIERS.TERMINAL_TABLE });
+    this.state = this.state.apply(this.state.tr.insert(this.state.doc.content.size, carrier));
+    return true;
+  }
+
+  private stageTargetNumbering(
+    target: NumberingDefinitions | null | undefined,
+    references: readonly { numId: number; level: number }[],
+    remappedNumIds: ReadonlyMap<number, number>,
+  ): StageTargetNumberingResult {
+    if (references.length === 0) return "unchanged";
+    if (!target) return "conflict";
+    const current = this.baseDocument.package.numbering ?? { abstractNums: [], nums: [] };
+    const nums = new Map(current.nums.map((entry) => [entry.numId, entry]));
+    const abstracts = new Map(current.abstractNums.map((entry) => [entry.abstractNumId, entry]));
+    const targetNums = new Map(target.nums.map((entry) => [entry.numId, entry]));
+    const targetAbstracts = new Map(
+      target.abstractNums.map((entry) => [entry.abstractNumId, entry]),
+    );
+    const levelsByNumId = referencedNumberingLevelsByNumId({ references });
+    const importedAbstractIds = new Map<number, number>();
+    let nextAbstractId = 0;
+    for (const id of abstracts.keys()) nextAbstractId = Math.max(nextAbstractId, id + 1);
+    for (const numId of levelsByNumId.keys()) {
+      const targetNum = targetNums.get(numId);
+      if (!targetNum) return "conflict";
+      const targetAbstract = targetAbstracts.get(targetNum.abstractNumId);
+      if (!targetAbstract) return "conflict";
+      const stagedNumId = remappedNumIds.get(numId) ?? numId;
+      const existingNum = nums.get(stagedNumId);
+      if (existingNum) {
+        if (
+          stagedNumId === numId &&
+          sameReferencedNumberingLevels({
+            current,
+            target,
+            numId,
+            levelsByNumId,
+          })
+        ) {
+          continue;
+        }
+        return "conflict";
+      }
+      let abstractNumId = importedAbstractIds.get(targetAbstract.abstractNumId);
+      if (abstractNumId === undefined) {
+        abstractNumId = targetAbstract.abstractNumId;
+        const collision = abstracts.get(abstractNumId);
+        if (collision && canonicalJson(collision) !== canonicalJson(targetAbstract)) {
+          abstractNumId = nextAbstractId++;
+        }
+        nextAbstractId = Math.max(nextAbstractId, abstractNumId + 1);
+        importedAbstractIds.set(targetAbstract.abstractNumId, abstractNumId);
+        abstracts.set(abstractNumId, { ...targetAbstract, abstractNumId });
+      }
+      nums.set(stagedNumId, { ...targetNum, numId: stagedNumId, abstractNumId });
+    }
+    if (nums.size === current.nums.length) return "unchanged";
+    const numbering = {
+      ...current,
+      abstractNums: [...abstracts.values()],
+      nums: [...nums.values()],
+    };
+    this.baseDocument.package.numbering = numbering;
+    this.state = withDocumentNumbering(this.state, numbering);
+    for (const entry of this.secondaryStoryStates.values()) {
+      entry.state = withDocumentNumbering(entry.state, numbering);
+    }
+    return "staged";
+  }
+
+  private planTargetNumberingReferences(
+    target: NumberingDefinitions | null | undefined,
+    references: readonly { numId: number; level: number }[],
+  ): ReadonlyMap<number, number> | null {
+    if (references.length === 0) return new Map();
+    if (!target) return null;
+    const current = this.baseDocument.package.numbering ?? { abstractNums: [], nums: [] };
+    const nums = new Map(current.nums.map((entry) => [entry.numId, entry]));
+    const targetNums = new Map(target.nums.map((entry) => [entry.numId, entry]));
+    const targetAbstracts = new Map(
+      target.abstractNums.map((entry) => [entry.abstractNumId, entry]),
+    );
+    const levelsByNumId = referencedNumberingLevelsByNumId({ references });
+    let nextNumId = 0;
+    for (const id of nums.keys()) nextNumId = Math.max(nextNumId, id + 1);
+    for (const id of targetNums.keys()) nextNumId = Math.max(nextNumId, id + 1);
+    const remapped = new Map<number, number>();
+    for (const numId of levelsByNumId.keys()) {
+      const targetNum = targetNums.get(numId);
+      const targetAbstract = targetNum ? targetAbstracts.get(targetNum.abstractNumId) : undefined;
+      if (!targetNum || !targetAbstract) return null;
+      const existingNum = nums.get(numId);
+      if (!existingNum) continue;
+      if (!sameReferencedNumberingLevels({ current, target, numId, levelsByNumId })) {
+        remapped.set(numId, nextNumId++);
+      }
+    }
+    return remapped;
   }
 
   /** Parse a `.docx` buffer into a reviewer. */
@@ -755,33 +1225,9 @@ export class FolioDocxReviewer {
    * packages can be compared entry by entry.
    */
   readNumberingDefinitions(): FolioNumberingLevel[] {
-    const numbering = this.baseDocument.package.numbering;
-    if (!numbering) {
-      return [];
-    }
-    const levelsByAbstractId = new Map(
-      numbering.abstractNums.map((abstractNum) => [abstractNum.abstractNumId, abstractNum.levels]),
+    return numberingLevelsOf(this.baseDocument.package.numbering).toSorted(
+      (left, right) => left.numId - right.numId || left.level - right.level,
     );
-    const levels: FolioNumberingLevel[] = [];
-    for (const instance of numbering.nums) {
-      const overrides = new Map(
-        (instance.levelOverrides ?? []).map((override) => [override.ilvl, override]),
-      );
-      for (const level of levelsByAbstractId.get(instance.abstractNumId) ?? []) {
-        const override = overrides.get(level.ilvl);
-        const resolved = override?.lvl ?? level;
-        levels.push({
-          numId: instance.numId,
-          level: resolved.ilvl,
-          format: resolved.numFmt,
-          levelText: resolved.lvlText,
-          ...((override?.startOverride ?? resolved.start) !== undefined
-            ? { start: override?.startOverride ?? resolved.start }
-            : {}),
-        });
-      }
-    }
-    return levels.toSorted((left, right) => left.numId - right.numId || left.level - right.level);
   }
 
   /** Return parsed package metadata without exposing the mutable document model. */
@@ -829,6 +1275,10 @@ export class FolioDocxReviewer {
     let highestId = 0;
     let present = false;
     if (mode === "with-revision-census") {
+      for (const change of this.currentFinalSectionProperties()?.propertyChanges ?? []) {
+        highestId = Math.max(highestId, change.info.id);
+        present = true;
+      }
       // Census every arriving story before resolution mutates any reviewer
       // state. The shared interpreter omits block ids, so this costs one
       // carrier walk per story without constructing a throwaway snapshot.
@@ -1195,7 +1645,13 @@ export class FolioDocxReviewer {
     for (const relationshipId of pkg.headers?.keys() ?? []) {
       handles.push({ type: "header", relationshipId });
     }
+    for (const relationshipId of this.importedHeaders.keys()) {
+      handles.push({ type: "header", relationshipId });
+    }
     for (const relationshipId of pkg.footers?.keys() ?? []) {
+      handles.push({ type: "footer", relationshipId });
+    }
+    for (const relationshipId of this.importedFooters.keys()) {
       handles.push({ type: "footer", relationshipId });
     }
     for (const footnote of pkg.footnotes ?? []) {
@@ -1208,7 +1664,11 @@ export class FolioDocxReviewer {
         handles.push({ type: "endnote", noteId: endnote.id });
       }
     }
-    return handles;
+    return handles.filter(
+      (handle) =>
+        (handle.type !== "header" && handle.type !== "footer") ||
+        !this.removedHeaderFooterStories.has(headerFooterStoryKey(handle)),
+    );
   }
 
   /** Discover every readable document story through a typed, serializable handle. */
@@ -1250,10 +1710,18 @@ export class FolioDocxReviewer {
    * entry where the document model identifies them as one authored change.
    */
   getChanges(filter?: FolioReviewChangeFilter): FolioReviewChange[] {
-    const changes = getTrackedChangesFromDoc(this.state.doc);
-    if (!filter) {
-      return changes;
-    }
+    const changes = [
+      ...getTrackedChangesFromDoc(this.state.doc),
+      ...(this.currentFinalSectionProperties()?.propertyChanges ?? []).map(({ info }) => ({
+        id: info.id,
+        type: "sectionPropertiesChanged" as const,
+        author: info.author,
+        date: info.date ?? null,
+        text: "",
+        blockId: null,
+      })),
+    ];
+    if (!filter) return changes;
     return changes.filter(
       (change) =>
         (filter.author === undefined || change.author === filter.author) &&
@@ -1374,6 +1842,134 @@ export class FolioDocxReviewer {
     return true;
   }
 
+  private currentFinalSectionProperties(): SectionProperties | undefined {
+    return (
+      this.finalSectionPropertiesOverride ??
+      this.baseDocument.package.document.finalSectionProperties
+    );
+  }
+
+  private stageFinalSectionProperties({
+    target,
+    previous,
+    revision,
+  }: {
+    target: SectionProperties;
+    previous: SectionProperties;
+    revision: FolioRevisionStamp;
+  }): boolean {
+    if (canonicalJson(target) === canonicalJson(previous)) return false;
+    const previousReferences = sectionReferenceHistory({ previous, target });
+    this.finalSectionPropertiesOverride = {
+      ...target,
+      propertyChanges: [
+        {
+          type: "sectionPropertyChange",
+          info: { id: revision.idSeed, author: this.author, date: revision.date },
+          previousProperties: previous,
+          ...(previousReferences !== undefined && { previousReferences }),
+          currentProperties: target,
+        },
+      ],
+    };
+    return true;
+  }
+
+  private stageMappedSectionBoundaries({
+    target,
+    originalRevisionIdSeed,
+    maxRanges,
+    revision,
+    mapTargetProperties,
+  }: {
+    target: PMNode;
+    originalRevisionIdSeed: number;
+    maxRanges: number;
+    revision: FolioRevisionStamp;
+    mapTargetProperties: (args: {
+      kind: "inserted" | "retained";
+      current: SectionProperties | undefined;
+      target: SectionProperties;
+    }) =>
+      | { kind: "inserted"; target: SectionProperties }
+      | { kind: "retained"; previous: SectionProperties; target: SectionProperties }
+      | null;
+  }):
+    | { status: "matched"; rangeCount: number; nextRevisionId: number; documentChanged: boolean }
+    | { status: "unalignable"; detail: string }
+    | { status: "budget-exceeded" } {
+    const result = stageMappedSectionBoundaryProperties({
+      state: this.state,
+      target,
+      originalRevisionIdSeed,
+      revisionStamp: revision,
+      author: this.author,
+      maxRanges,
+      mapTargetProperties,
+    });
+    if (result.status !== "matched") return result;
+    const documentChanged = result.transaction.docChanged;
+    if (documentChanged) this.state = this.state.apply(result.transaction);
+    return {
+      status: "matched",
+      rangeCount: result.rangeCount,
+      nextRevisionId: result.nextRevisionId,
+      documentChanged,
+    };
+  }
+
+  private resolveFinalSectionProperties(mode: "accept" | "reject", id: number): number {
+    const current = this.currentFinalSectionProperties();
+    const changes = current?.propertyChanges;
+    const targetIndex = changes?.findIndex(({ info }) => info.id === id);
+    if (
+      !current ||
+      !changes ||
+      changes.length === 0 ||
+      targetIndex === undefined ||
+      targetIndex < 0
+    ) {
+      return 0;
+    }
+    const { propertyChanges: _propertyChanges, ...liveProperties } = current;
+    const previousStates = changes.map((change) =>
+      sectionRejectProperties({
+        live: current,
+        previousProperties: change.previousProperties,
+        previousReferences: change.previousReferences,
+      }),
+    );
+    let resolvedProperties: SectionProperties = previousStates[0] ?? liveProperties;
+    const remaining = [];
+    for (const [index, change] of changes.entries()) {
+      const nextProperties = previousStates[index + 1] ?? liveProperties;
+      if (index === targetIndex) {
+        if (mode === "accept") resolvedProperties = nextProperties;
+        continue;
+      }
+      remaining.push({
+        ...change,
+        previousProperties: resolvedProperties,
+        ...(change.previousReferences !== undefined && {
+          previousReferences: {
+            ...(resolvedProperties.headerReferences !== undefined && {
+              headerReferences: resolvedProperties.headerReferences,
+            }),
+            ...(resolvedProperties.footerReferences !== undefined && {
+              footerReferences: resolvedProperties.footerReferences,
+            }),
+          },
+        }),
+      });
+      resolvedProperties = nextProperties;
+    }
+    this.finalSectionPropertiesOverride = {
+      ...resolvedProperties,
+      ...(remaining.length > 0 && { propertyChanges: remaining }),
+    };
+    return 1;
+  }
+
   /**
    * Accept an existing tracked change, keeping its text and dropping the
    * redline. Pass a {@link FolioReviewChange} from {@link getChanges} or its
@@ -1382,7 +1978,14 @@ export class FolioDocxReviewer {
    * revision is no longer present (already resolved, or never existed).
    */
   acceptChange(target: FolioReviewChange | number): boolean {
-    return this.runCommand(acceptAIEditRevision(revisionIdOf(target)));
+    return this.resolveWithSectionReferenceHistory(() => this.acceptChangeInternal(target));
+  }
+
+  private acceptChangeInternal(target: FolioReviewChange | number): boolean {
+    const id = revisionIdOf(target);
+    const bodyChanged = this.runCommand(acceptAIEditRevision(id));
+    const sectionChanged = this.resolveFinalSectionProperties("accept", id) > 0;
+    return bodyChanged || sectionChanged;
   }
 
   /**
@@ -1390,7 +1993,14 @@ export class FolioDocxReviewer {
    * deletion's text is restored. See {@link acceptChange} for targeting.
    */
   rejectChange(target: FolioReviewChange | number): boolean {
-    return this.runCommand(rejectAIEditRevision(revisionIdOf(target)));
+    return this.resolveWithSectionReferenceHistory(() => this.rejectChangeInternal(target));
+  }
+
+  private rejectChangeInternal(target: FolioReviewChange | number): boolean {
+    const id = revisionIdOf(target);
+    const bodyChanged = this.runCommand(rejectAIEditRevision(id));
+    const sectionChanged = this.resolveFinalSectionProperties("reject", id) > 0;
+    return bodyChanged || sectionChanged;
   }
 
   /**
@@ -1402,12 +2012,62 @@ export class FolioDocxReviewer {
    * document still carries a redline nobody can see from the body.
    */
   acceptAll(): number {
-    return this.resolveEveryStory("accept");
+    return this.resolveWithSectionReferenceHistory(
+      () => this.resolveEveryStory("accept") + this.resolveEveryFinalSectionChange("accept"),
+    );
   }
 
   /** Reject every tracked change in the package. See {@link acceptAll}. */
   rejectAll(): number {
-    return this.resolveEveryStory("reject");
+    return this.resolveWithSectionReferenceHistory(
+      () => this.resolveEveryStory("reject") + this.resolveEveryFinalSectionChange("reject"),
+    );
+  }
+
+  private resolveWithSectionReferenceHistory<T>(resolve: () => T): T {
+    const before = captureSectionReferenceInventory(
+      this.state.doc,
+      this.currentFinalSectionProperties(),
+    );
+    const result = resolve();
+    const removedEndpointReferences =
+      getTrackedSectionEndpointRemoval(this.state)?.removedReferences ?? [];
+    if (before.revisionRelationships.size > 0 || removedEndpointReferences.length > 0) {
+      const after = captureSectionReferenceInventory(
+        this.state.doc,
+        this.currentFinalSectionProperties(),
+      );
+      const removed = resolvedSectionReferenceLosses({ before, after });
+      this.sectionReferenceRemovals.push(...removed);
+      for (const reference of [...removed, ...removedEndpointReferences]) {
+        if (
+          after.references.some(
+            ({ part, relationshipId }) =>
+              part === reference.part && relationshipId === reference.relationshipId,
+          )
+        )
+          continue;
+        const handle = { type: reference.part, relationshipId: reference.relationshipId };
+        this.removedHeaderFooterStories.set(headerFooterStoryKey(handle), handle);
+      }
+    }
+    return result;
+  }
+
+  private resolveEveryFinalSectionChange(mode: "accept" | "reject"): number {
+    const current = this.currentFinalSectionProperties();
+    const firstChange = current?.propertyChanges?.at(0);
+    if (!current || !firstChange) return 0;
+    const { propertyChanges, ...liveProperties } = current;
+    this.finalSectionPropertiesOverride =
+      mode === "accept"
+        ? liveProperties
+        : sectionRejectProperties({
+            live: current,
+            previousProperties: firstChange.previousProperties,
+            previousReferences: firstChange.previousReferences,
+          });
+    return propertyChanges?.length ?? 0;
   }
 
   private resolveEveryStory(mode: "accept" | "reject"): number {
@@ -1435,7 +2095,14 @@ export class FolioDocxReviewer {
     }
     return {
       mainState: this.state,
+      finalSectionPropertiesOverride: this.finalSectionPropertiesOverride,
       secondaryStoryStates,
+      sectionReferenceRemovals: [...this.sectionReferenceRemovals],
+      removedHeaderFooterStories: [...this.removedHeaderFooterStories.values()],
+      importedStyles: this.importedStyles,
+      importedMedia: new Map(this.importedMedia),
+      importedHeaders: new Map(this.importedHeaders),
+      importedFooters: new Map(this.importedFooters),
       createdComments: [...this.createdComments],
       resolvedOverrides: new Map(this.resolvedOverrides),
       resolvedStoryExpectations: [...this.resolvedStoryExpectations.values()],
@@ -1443,7 +2110,44 @@ export class FolioDocxReviewer {
   }
 
   private documentFromStateSnapshot(snapshot: FolioReviewerStateSnapshot): Document {
-    const document = updateDocumentContent(this.baseDocument, snapshot.mainState.doc);
+    const sourceDocument =
+      snapshot.importedStyles === undefined
+        ? this.baseDocument
+        : {
+            ...this.baseDocument,
+            package: { ...this.baseDocument.package, styles: snapshot.importedStyles },
+          };
+    const document = updateDocumentContent(sourceDocument, snapshot.mainState.doc);
+    if (snapshot.finalSectionPropertiesOverride !== undefined) {
+      document.package.document.finalSectionProperties = snapshot.finalSectionPropertiesOverride;
+    }
+    if (snapshot.importedStyles !== undefined) document.package.styles = snapshot.importedStyles;
+    if (snapshot.importedMedia.size > 0)
+      document.package.media = new Map([
+        ...(document.package.media ?? []),
+        ...snapshot.importedMedia,
+      ]);
+    if (snapshot.importedHeaders.size > 0) {
+      document.package.headers = new Map([
+        ...(document.package.headers ?? []),
+        ...snapshot.importedHeaders,
+      ]);
+    }
+    if (snapshot.importedFooters.size > 0) {
+      document.package.footers = new Map([
+        ...(document.package.footers ?? []),
+        ...snapshot.importedFooters,
+      ]);
+    }
+    for (const handle of snapshot.removedHeaderFooterStories) {
+      if (handle.type === "header") {
+        document.package.headers = new Map(document.package.headers);
+        document.package.headers.delete(handle.relationshipId);
+      } else {
+        document.package.footers = new Map(document.package.footers);
+        document.package.footers.delete(handle.relationshipId);
+      }
+    }
     this.mergeEditedSecondaryStories(document, snapshot.secondaryStoryStates);
     if (snapshot.createdComments.length > 0 || snapshot.resolvedOverrides.size > 0) {
       document.package.document.comments = this.withResolvedOverrides(
@@ -1457,7 +2161,12 @@ export class FolioDocxReviewer {
   private captureSaveSnapshot(): FolioSaveSnapshot {
     const snapshot = this.captureReviewerState();
     const changedParaIds = new Set(getChangedParagraphIds(snapshot.mainState));
-    let structuralChange = hasStructuralChanges(snapshot.mainState);
+    let structuralChange =
+      hasStructuralChanges(snapshot.mainState) ||
+      snapshot.finalSectionPropertiesOverride !== undefined ||
+      snapshot.importedStyles !== undefined ||
+      snapshot.importedHeaders.size > 0 ||
+      snapshot.importedFooters.size > 0;
     let untrackedChanges = hasUntrackedChanges(snapshot.mainState);
     const changedNoteParaIds = new Set<string>();
     for (const entry of snapshot.secondaryStoryStates) {
@@ -1478,6 +2187,7 @@ export class FolioDocxReviewer {
           ? { type: "full-repack" }
           : { type: "selective-first", changedParaIds },
       changedNoteParaIds,
+      sectionReferenceRemovals: snapshot.sectionReferenceRemovals,
       sectionEndpointRemoval: getTrackedSectionEndpointRemoval(snapshot.mainState),
       resolvedStoryExpectations: snapshot.resolvedStoryExpectations,
     };
@@ -1500,13 +2210,23 @@ export class FolioDocxReviewer {
       return selective;
     }
     const repackDocument = { ...save.document, originalBuffer: this.originalBuffer };
+    const repack = () =>
+      repackDocx(repackDocument, { changedNoteParaIds: save.changedNoteParaIds });
+    const repackReferences = () =>
+      save.sectionReferenceRemovals.length > 0
+        ? withSectionReferenceResolution({
+            document: repackDocument,
+            removedReferences: save.sectionReferenceRemovals,
+            repack,
+          })
+        : repack();
     const buffer = save.sectionEndpointRemoval
       ? await withTrackedSectionEndpointRemoval({
           document: repackDocument,
           resolution: save.sectionEndpointRemoval,
-          repack: () => repackDocx(repackDocument, { changedNoteParaIds: save.changedNoteParaIds }),
+          repack: repackReferences,
         })
-      : await repackDocx(repackDocument, { changedNoteParaIds: save.changedNoteParaIds });
+      : await repackReferences();
     await this.assertResolvedStoriesSerialized(buffer, save.resolvedStoryExpectations);
     return buffer;
   }
@@ -1646,11 +2366,119 @@ export class FolioDocxReviewer {
   }
 
   private getHeaderFooterStory(story: FolioHeaderFooterStoryHandle): HeaderFooter | undefined {
+    if (this.removedHeaderFooterStories.has(headerFooterStoryKey(story))) return undefined;
+    const imported = story.type === "header" ? this.importedHeaders : this.importedFooters;
+    const importedStory = imported.get(story.relationshipId);
+    if (importedStory) return importedStory;
     const stories =
       story.type === "header"
         ? this.baseDocument.package.headers
         : this.baseDocument.package.footers;
     return stories?.get(story.relationshipId);
+  }
+
+  private async createComparisonHeaderFooter(
+    source: FolioDocxReviewer,
+    story: FolioHeaderFooterStoryHandle,
+  ): Promise<FolioHeaderFooterStoryHandle | null> {
+    const target = source.getHeaderFooterStory(story);
+    if (!target || !this.canImportHeaderFooterContent(source, story)) return null;
+    let importedWatermark: Pick<
+      HeaderFooter,
+      "watermark" | "rawWatermarkXml" | "watermarkBlockIndex"
+    > = {};
+    let importedMedia: MediaFile | undefined;
+    if (target.watermark !== undefined || target.rawWatermarkXml !== undefined) {
+      const watermark = target.watermark;
+      if (
+        story.type !== "header" ||
+        watermark?.kind !== "picture" ||
+        watermark.imageTargetExternal ||
+        !watermark.imageTarget ||
+        !target.rawWatermarkXml
+      )
+        return null;
+      const media = source.baseDocument.package.media?.get(watermark.imageTarget);
+      if (!media || !/^image\/(?:png|jpeg|gif|tiff|bmp)$/u.test(media.mimeType)) return null;
+      const xml = rebindDrawingImageRelationship({
+        xml: target.rawWatermarkXml,
+        previousId: watermark.imageRId,
+        nextId: watermark.imageRId,
+      });
+      if (xml === null) return null;
+      const extension = media.path.split(".").at(-1)?.toLowerCase();
+      if (!extension || !/^[a-z0-9]+$/u.test(extension)) return null;
+      const originalZip = await JSZip.loadAsync(this.originalBuffer);
+      const existingPaths = new Set(
+        Object.keys(originalZip.files).map((path) => path.toLowerCase()),
+      );
+      let suffix = 1;
+      let path = `word/media/folio-import-${suffix}.${extension}`;
+      while (
+        existingPaths.has(path.toLowerCase()) ||
+        this.baseDocument.package.media?.has(path) ||
+        this.importedMedia.has(path)
+      ) {
+        path = `word/media/folio-import-${++suffix}.${extension}`;
+      }
+      importedMedia = { ...media, path, data: media.data.slice(0) };
+      importedWatermark = {
+        watermark: { ...watermark, imageTarget: path },
+        rawWatermarkXml: xml,
+        ...(target.watermarkBlockIndex !== undefined && {
+          watermarkBlockIndex: target.watermarkBlockIndex,
+        }),
+      };
+    }
+    const taken = new Set([
+      ...(this.baseDocument.package.relationships?.keys() ?? []),
+      ...(this.baseDocument.package.headers?.keys() ?? []),
+      ...(this.baseDocument.package.footers?.keys() ?? []),
+      ...this.importedHeaders.keys(),
+      ...this.importedFooters.keys(),
+    ]);
+    let suffix = 1;
+    let relationshipId = `rId${suffix}`;
+    while (taken.has(relationshipId)) relationshipId = `rId${++suffix}`;
+    const handle = { type: story.type, relationshipId };
+    const empty: HeaderFooter = {
+      type: story.type,
+      hdrFtrType: target.hdrFtrType,
+      ...importedWatermark,
+      content: [{ type: "paragraph", content: [] }],
+    };
+    if (importedMedia) this.importedMedia.set(importedMedia.path, importedMedia);
+    (story.type === "header" ? this.importedHeaders : this.importedFooters).set(
+      relationshipId,
+      empty,
+    );
+    const state = ensureBaseDirectionInState(
+      EditorState.create({
+        schema,
+        doc: ensureDeterministicParaIdsInDoc(headerFooterToProseDoc(empty.content)),
+        plugins: createHeadlessPlugins(
+          this.baseDocument.package.styles,
+          this.baseDocument.package.numbering,
+        ),
+      }),
+    );
+    this.secondaryStoryStates.set(headerFooterStoryKey(handle), {
+      handle,
+      initialState: state,
+      state,
+    });
+    return handle;
+  }
+
+  private canImportHeaderFooterContent(
+    source: FolioDocxReviewer,
+    story: FolioHeaderFooterStoryHandle,
+  ): boolean {
+    const state = source.getEditableStoryState(story);
+    if (!state) return false;
+    if (!tableTemplateCanCrossPackageLosslessly(state.doc, "rebind-external")) return false;
+    const snapshot = source.snapshotStory(story);
+    return snapshot !== null && detachFolioAIEditSnapshotExternalHyperlinks(snapshot) !== null;
   }
 
   private getNoteStory(story: FolioNoteStoryHandle): Footnote | Endnote | undefined {
@@ -1710,7 +2538,10 @@ export class FolioDocxReviewer {
         continue;
       }
       if (entry.handle.type === "header" || entry.handle.type === "footer") {
-        const source = this.getHeaderFooterStory(entry.handle);
+        const source =
+          entry.handle.type === "header"
+            ? document.package.headers?.get(entry.handle.relationshipId)
+            : document.package.footers?.get(entry.handle.relationshipId);
         if (!source) {
           continue;
         }

@@ -3,6 +3,8 @@ import type {
   FolioContentInlineBooleanProperty,
   FolioContentInlineFormatting,
   FolioContentInlineFormattingPatch,
+  FolioContentListReference,
+  FolioContentParagraphIndentation,
   FolioContentParagraphSpacing,
   FolioContentParagraphKind,
   FolioContentRun,
@@ -59,6 +61,10 @@ export type FolioAIBlock = FolioContentBlock<FolioAIBlockKind> & {
  */
 export type FolioAIParagraphSpacing = FolioContentParagraphSpacing;
 
+/** The complete modeled attribute set of one direct `w:pPr/w:ind` child. */
+export type FolioAIParagraphIndentation = FolioContentParagraphIndentation;
+export type FolioAIListReference = FolioContentListReference;
+
 /**
  * The paragraph properties an operation may set. A subset of `w:pPrChange`'s
  * scope: properties a comparison can see in a block projection and an agent
@@ -68,14 +74,18 @@ export type FolioAIBlockParagraphProperties = {
   /** `w:pStyle`. `null` clears the style back to the default. */
   styleId?: string | null;
   /**
-   * `w:numPr/w:ilvl`, zero-based. `null` removes `w:numPr` altogether: the
-   * paragraph stops being a list item rather than moving to another level.
+   * `w:numPr/w:ilvl`, zero-based. `null` removes numbering unless `numbering`
+   * supplies a concrete instance; together they retain that instance without
+   * an authored level.
    */
   listLevel?: number | null;
+  numbering?: FolioAIListReference | null;
   /** Direct `w:jc`. `null` clears the override and restores style inheritance. */
   alignment?: ParagraphAlignment | null;
   /** Direct `w:spacing` attributes. `null` removes the whole direct child. */
   spacing?: FolioAIParagraphSpacing | null;
+  /** Direct `w:ind` attributes. `null` removes the whole direct child. */
+  indentation?: FolioAIParagraphIndentation | null;
 };
 
 /**
@@ -236,12 +246,13 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
         type: "insertAfterBlock" | "insertBeforeBlock";
         blockId: string;
         /**
-         * The paragraph text to insert. A line break splits `text` into
-         * consecutive paragraphs at the same anchor instead of becoming
-         * literal newlines inside one paragraph: only the first paragraph
-         * gets `styleId` / `alignment` / `inheritFormatting`, later ones use body
-         * formatting. Blank lines are dropped. Reported as a
-         * `splitMultilineText` normalization when it happens.
+         * The paragraph text to insert. With the default `lineBreakMode:
+         * "paragraph"`, a line break splits `text` into consecutive
+         * paragraphs at the same anchor: only the first paragraph gets
+         * `styleId` / `alignment` / `inheritFormatting`, later ones use
+         * body formatting. Blank lines are dropped and reported as a
+         * `splitMultilineText` normalization. `"inline"` retains the
+         * control inside one paragraph.
          *
          * `""` inserts a BLANK paragraph, and is a real edit: adding an empty
          * line is a change a reader sees, and a document that has one where
@@ -249,6 +260,11 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
          * with a tracked paragraph mark, so rejecting closes it away.
          */
         text: string;
+        /**
+         * `"paragraph"` (the default) splits newlines into consecutive blocks.
+         * `"inline"` retains tabs and hard breaks inside this inserted block.
+         */
+        lineBreakMode?: "paragraph" | "inline";
         inheritFormatting?: boolean;
         /**
          * Links this insertion to the deletion that carries the same
@@ -263,6 +279,13 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
          */
         pageBreakBefore?: boolean;
         /**
+         * Insert one standalone authored `<w:br w:type="page"/>` carrier.
+         * This differs from `pageBreakBefore`, which is a paragraph property.
+         */
+        hardPageBreak?: {
+          clear?: BreakContent["clear"];
+        };
+        /**
          * Override the paragraph `styleId` attr of the inserted
          * block (e.g. `ClauseHeading1`). When omitted the inserted
          * block inherits the source block's styleId via
@@ -275,10 +298,11 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
          * anchor's `w:numId`. Without it the inserted paragraph takes the
          * anchor's level, which is the wrong one whenever the new item sits
          * beside a list item at a different depth. `null` gives it no
-         * numbering at all — an ordinary paragraph next to a list item, which
-         * inheritance alone cannot say.
+         * numbering unless `numbering` supplies a concrete instance; together
+         * they retain that instance without an authored level.
          */
         listLevel?: number | null;
+        numbering?: FolioAIListReference | null;
         /**
          * Direct `w:jc` for the inserted block. `null` clears alignment copied
          * from the anchor and lets the inserted paragraph's style decide.
@@ -289,6 +313,8 @@ export type FolioAIEditOperation = FolioAIEditReviewMeta & {
          * copied from the anchor and lets the inserted paragraph's style decide.
          */
         spacing?: FolioAIParagraphSpacing | null;
+        /** Direct `w:ind` for the inserted block. `null` clears copied indentation. */
+        indentation?: FolioAIParagraphIndentation | null;
         comment?: FolioAIComment;
       }
     | {
@@ -606,9 +632,8 @@ export type FolioAIEditSkippedOperation = {
  */
 export type FolioAIEditNormalization =
   /**
-   * A line-break in `insertAfterBlock` / `insertBeforeBlock`'s `text` cannot
-   * become one paragraph with an embedded break (Word paragraphs are single
-   * lines); the applier split it into one paragraph per non-blank line.
+   * A line-break in paragraph-mode `insertAfterBlock` /
+   * `insertBeforeBlock` text was split into one paragraph per non-blank line.
    */
   | {
       id: string;
