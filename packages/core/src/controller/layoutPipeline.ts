@@ -752,6 +752,13 @@ export function runLayoutPipeline<THfPMs>(
         pageGap,
         mirrorMargins,
       };
+      if (document?.package.document.sections !== undefined) {
+        nextLayoutOpts.sectionVerticalAlignments = document.package.document.sections.map(
+          ({ properties }) => properties.verticalAlign,
+        );
+      } else if (sectionProperties !== null && sectionProperties !== undefined) {
+        nextLayoutOpts.sectionVerticalAlignments = [sectionProperties.verticalAlign];
+      }
       if (hasTitlePg) {
         nextLayoutOpts.firstPageMargins = bodyMarginsClearHeaderFooter({
           authoredMargins: margins,
