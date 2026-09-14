@@ -24,6 +24,7 @@ import type {
 } from "../../layout-engine/types";
 import type {
   DisplayColor,
+  DisplayCommentAnnotation,
   DisplayHitRegionKind,
   DisplayLink,
   DisplayLinkTarget,
@@ -32,9 +33,11 @@ import type {
   DisplayOutlineEntry,
   DisplayPage,
   DisplayPrimitive,
+  DisplayRect,
 } from "../types";
 import { HIT_REGION_KINDS } from "../primitives";
 import { AuthorColorTable, type BuildContext } from "./buildContext";
+import type { DisplayCommentInput } from "./commentAnnotations";
 import { DOC_CANVAS } from "./colors";
 import { collectFloatingImages, pageGeometryOf } from "./floatingImages";
 import { FontTable } from "./fontTable";
@@ -101,6 +104,49 @@ export type BuildDisplayListOptions = PageFurnitureInputs & {
    * that cannot find that name on the host paints the document in a substitute.
    */
   readonly embeddedFonts?: readonly EmbeddedFont[];
+  /** Comment bodies keyed by the `commentIds` already carried on layout runs. */
+  readonly comments?: readonly DisplayCommentInput[];
+};
+
+const rectKey = ({ xPx, yPx, widthPx, heightPx }: DisplayRect): string =>
+  `${String(xPx)}:${String(yPx)}:${String(widthPx)}:${String(heightPx)}`;
+
+const dedupeRects = (rects: readonly DisplayRect[]): readonly DisplayRect[] => {
+  const seen = new Set<string>();
+  const unique: DisplayRect[] = [];
+  for (const rect of rects) {
+    const key = rectKey(rect);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(rect);
+  }
+  return unique;
+};
+
+const buildCommentAnnotations = (
+  commentsById: Map<number, DisplayCommentInput>,
+  commentRects: Map<number, DisplayRect[]>,
+): readonly DisplayCommentAnnotation[] => {
+  const annotations: DisplayCommentAnnotation[] = [];
+  for (const [commentId, rects] of commentRects) {
+    const comment = commentsById.get(commentId);
+    if (comment === undefined) {
+      continue;
+    }
+    const uniqueRects = dedupeRects(rects);
+    if (uniqueRects.length === 0) {
+      continue;
+    }
+    annotations.push({
+      commentId,
+      rects: uniqueRects,
+      contents: comment.contents,
+      author: comment.author,
+    });
+  }
+  return annotations;
 };
 
 const paragraphTextOf = (block: ParagraphBlock): string =>
@@ -249,6 +295,7 @@ type BuildPageOptions = {
   readonly unsupported: UnsupportedCollector;
   readonly authorColors: AuthorColorTable;
   readonly furniture: PageFurnitureInputs;
+  readonly commentsById: Map<number, DisplayCommentInput>;
 };
 
 const buildPage = ({
@@ -263,14 +310,17 @@ const buildPage = ({
   unsupported,
   authorColors,
   furniture,
+  commentsById,
 }: BuildPageOptions): DisplayPage => {
   const links: DisplayLink[] = [];
+  const commentRects = new Map<number, DisplayRect[]>();
   const context: BuildContext = {
     fonts,
     images,
     unsupported,
     authorColors,
     links,
+    commentRects,
     bookmarkTargets,
     story: { kind: "body" },
     pageIndex,
@@ -364,6 +414,7 @@ const buildPage = ({
     primitives: composer.primitives(),
     regions: composer.regions(),
     links,
+    comments: buildCommentAnnotations(commentsById, commentRects),
   };
 };
 
@@ -418,6 +469,7 @@ export const createDisplayListBuilder = ({
   pageBackground,
   documentFeatures,
   embeddedFonts,
+  comments,
   ...furniture
 }: BuildDisplayListOptions): DisplayListBuilder => {
   const fonts = new FontTable(embeddedFonts ?? []);
@@ -425,6 +477,10 @@ export const createDisplayListBuilder = ({
   const unsupported = new UnsupportedCollector();
   const authorColors = new AuthorColorTable();
   const { bookmarkTargets, outline } = collectDocumentTargets(layout, blockLookup);
+  const commentsById = new Map<number, DisplayCommentInput>();
+  for (const comment of comments ?? []) {
+    commentsById.set(comment.id, comment);
+  }
 
   // Nothing on a page betrays a page border or a watermark the caller withheld,
   // so the gap is stated once per document rather than per page. A
@@ -466,6 +522,7 @@ export const createDisplayListBuilder = ({
       unsupported,
       authorColors,
       furniture,
+      commentsById,
     });
     built.set(pageIndex, display);
     return display;
