@@ -694,6 +694,78 @@ describe("createBilingualDocx", () => {
     });
   });
 
+  test("keeps a field-only table paragraph out of every table layout's references", async () => {
+    const fieldOnlyCellTable = (): Table => ({
+      type: "table",
+      rows: [
+        {
+          type: "tableRow",
+          cells: [
+            cell([
+              paragraph("Translate me"),
+              {
+                type: "paragraph",
+                content: [
+                  {
+                    type: "complexField",
+                    instruction: " PAGE ",
+                    fieldType: "PAGE",
+                    fieldCode: [],
+                    fieldResult: [{ type: "run", content: [{ type: "text", text: "7" }] }],
+                  },
+                ],
+              },
+            ]),
+          ],
+        },
+      ],
+    });
+
+    for (const tableLayout of ["inline", "stacked"] as const) {
+      const source = createEmptyDocument({ preset: createStellaStyleDocumentPreset() });
+      source.package.document.content = [fieldOnlyCellTable()];
+      // oxlint-disable-next-line no-await-in-loop -- each layout needs its own save
+      const { rows } = await createBilingualDocx(await createDocx(source), {
+        targetStyleSuffix: SUFFIX,
+        tableLayout,
+      });
+      const tableRow = rows.at(0);
+
+      expect(tableRow?.kind).toBe("table");
+      if (tableRow?.kind !== "table") {
+        throw new Error("Expected a table row");
+      }
+      expect(tableRow.paragraphs.map(({ sourceText }) => sourceText)).toEqual(["Translate me"]);
+    }
+  });
+
+  test("keeps a paragraph that only surrounds a field as an editable row", async () => {
+    const source = createEmptyDocument({ preset: createStellaStyleDocumentPreset() });
+    source.package.document.content = [
+      {
+        type: "paragraph",
+        content: [
+          { type: "run", content: [{ type: "text", text: "see Clause " }] },
+          {
+            type: "complexField",
+            instruction: " REF _Ref1 ",
+            fieldType: "REF",
+            fieldCode: [],
+            fieldResult: [{ type: "run", content: [{ type: "text", text: "3.6(a)" }] }],
+          },
+          { type: "run", content: [{ type: "text", text: " above" }] },
+        ],
+      },
+    ];
+
+    const { rows } = await createBilingualDocx(await createDocx(source), {
+      targetStyleSuffix: SUFFIX,
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows.at(0)).toMatchObject({ sourceText: "see Clause 3.6(a) above" });
+  });
+
   test("keeps a structural-only source table out of the editable row manifest", async () => {
     const source = createEmptyDocument({ preset: createStellaStyleDocumentPreset() });
     const structuralTable: Table = {

@@ -34,6 +34,8 @@ import {
   THEME_COLOR_SLOT_VALUES,
   UNDERLINE_STYLE_VALUES,
 } from "../../types/documentEnumValues";
+import { GRAPHIC_FRAME_LOCK_KEYS } from "../../docx/graphicFrameLocks";
+import { allowsDirectDrawingEdit, isDrawingRawXmlMode } from "../../docx/imageRawXml";
 import type { ParagraphFormatting } from "../../types/document";
 import { canonicalJson } from "../../utils/canonicalJson";
 import { normalizeHorizontalScalePercent } from "../../utils/horizontalScale";
@@ -719,8 +721,18 @@ export const readImageAttrs = (node: PMNode): ReadProseMirrorAttrsResult<ImageAt
   optionalNumber(attrs, "distBottom", "image.attrs.distBottom", issues);
   optionalNumber(attrs, "distLeft", "image.attrs.distLeft", issues);
   optionalNumber(attrs, "distRight", "image.attrs.distRight", issues);
+  optionalNumber(attrs, "opacity", "image.attrs.opacity", issues);
+  optionalNumber(attrs, "cropTop", "image.attrs.cropTop", issues);
+  optionalNumber(attrs, "cropRight", "image.attrs.cropRight", issues);
+  optionalNumber(attrs, "cropBottom", "image.attrs.cropBottom", issues);
+  optionalNumber(attrs, "cropLeft", "image.attrs.cropLeft", issues);
+  optionalNumber(attrs, "paddingTop", "image.attrs.paddingTop", issues);
+  optionalNumber(attrs, "paddingRight", "image.attrs.paddingRight", issues);
+  optionalNumber(attrs, "paddingBottom", "image.attrs.paddingBottom", issues);
+  optionalNumber(attrs, "paddingLeft", "image.attrs.paddingLeft", issues);
   optionalImagePosition(attrs, "position", "image.attrs.position", issues);
   optionalBoolean(attrs, "layoutInCell", "image.attrs.layoutInCell", issues);
+  optionalImageFrameLocks(attrs, "frameLocks", "image.attrs.frameLocks", issues);
   optionalNumber(attrs, "borderWidth", "image.attrs.borderWidth", issues);
   optionalString(attrs, "borderColor", "image.attrs.borderColor", issues);
   optionalString(attrs, "borderStyle", "image.attrs.borderStyle", issues);
@@ -735,14 +747,17 @@ export const readImageAttrs = (node: PMNode): ReadProseMirrorAttrsResult<ImageAt
     issues,
     Object.values(DRAWING_RAW_XML_MODES),
   );
+  optionalString(attrs, "_docxRawImageFingerprint", "image.attrs._docxRawImageFingerprint", issues);
   const rawXml = attrs["_docxRawXml"];
+  // Every mode classifies captured raw XML, so a classified drawing without it
+  // is incoherent: the model union makes `rawXml` required on both branches.
   if (
-    attrs["_docxRawXmlMode"] === DRAWING_RAW_XML_MODES.PRESERVE_ONLY &&
+    isDrawingRawXmlMode(attrs["_docxRawXmlMode"]) &&
     (typeof rawXml !== "string" || rawXml.trim().length === 0)
   ) {
     issues.push({
       path: "image.attrs._docxRawXml",
-      message: "Preservation-only drawings require raw XML.",
+      message: "Classified drawings require raw XML.",
     });
   }
   optionalBoolean(attrs, "_docxObjectPreview", "image.attrs._docxObjectPreview", issues);
@@ -1480,6 +1495,7 @@ const IMAGE_RESOURCE_ATTRS: ReadonlySet<string> = new Set([
   "rId",
   "_docxRawXml",
   "_docxRawXmlMode",
+  "_docxRawImageFingerprint",
   "_docxObjectPreview",
 ]);
 
@@ -1500,12 +1516,17 @@ export const mergeImageAttrs = (node: PMNode, patch: NodeAttrPatch<ImageAttrs>):
     ([key, value]) =>
       !IMAGE_RESOURCE_ATTRS.has(key) && !imageAttrValuesEqual(Reflect.get(current, key), value),
   );
-  if (
-    !changesEditableProjection ||
-    current._docxRawXml === undefined ||
-    current._docxRawXmlMode === DRAWING_RAW_XML_MODES.PRESERVE_ONLY
-  ) {
+  if (!changesEditableProjection || current._docxRawXml === undefined) {
     return merged;
+  }
+
+  // One seam, two consequences. An editable drawing drops its raw XML and
+  // regenerates faithfully from the model. A classified drawing must keep its
+  // raw XML — it is the only faithful representation — so it drops the capture
+  // marker instead, and the missing marker is what blocks the next save.
+  if (!allowsDirectDrawingEdit(current._docxRawXmlMode)) {
+    const { _docxRawImageFingerprint: _discardedFingerprint, ...editedAttrs } = merged;
+    return editedAttrs;
   }
 
   const { _docxRawXml: _discardedRawXml, ...editableAttrs } = merged;
@@ -2815,6 +2836,27 @@ const validatePropertyChangeInfo = (
     TRACKED_CHANGE_PROVENANCE_VALUES,
   );
   optionalString(value, "suggestionId", `${path}.suggestionId`, issues);
+};
+
+const optionalImageFrameLocks = (
+  attrs: Record<string, unknown>,
+  key: string,
+  path: string,
+  issues: ProseMirrorAttrIssue[],
+): void => {
+  const value = attrs[key];
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  if (!isRecord(value)) {
+    issues.push({ path, message: "Expected an object." });
+    return;
+  }
+
+  for (const lock of GRAPHIC_FRAME_LOCK_KEYS) {
+    optionalBoolean(value, lock, `${path}.${lock}`, issues);
+  }
 };
 
 const optionalImagePosition = (

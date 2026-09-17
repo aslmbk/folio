@@ -67,6 +67,7 @@ import {
   buildPageBreakRunSourceDescendantIndex,
   type PageBreakRunSourceDescendantIndex,
 } from "../../internal/pageBreakRunSourceDescendantIndex";
+import { DRAWING_RAW_XML_MODES } from "@stll/docx-core/model";
 import { mergeTextFormatting } from "../../utils/textFormattingMerge";
 import { tableOfContentsStyleLevel } from "../../utils/tableOfContentsStyle";
 import { emuToPixels } from "../../utils/units";
@@ -3358,6 +3359,10 @@ function convertRunContent(
             image: content.image,
             rawXml: content.rawXml,
             rawXmlMode: content.rawXmlMode,
+            rawImageFingerprint:
+              content.rawXmlMode === DRAWING_RAW_XML_MODES.PRESERVE_ONLY
+                ? undefined
+                : content.rawImageFingerprint,
           }),
           marks,
         ),
@@ -3452,9 +3457,15 @@ type ConvertImageOptions = {
   image: Image;
   rawXml: DrawingContent["rawXml"];
   rawXmlMode: DrawingContent["rawXmlMode"];
+  rawImageFingerprint: string | undefined;
 };
 
-function convertImage({ image, rawXml, rawXmlMode }: ConvertImageOptions): PMNode {
+function convertImage({
+  image,
+  rawXml,
+  rawXmlMode,
+  rawImageFingerprint,
+}: ConvertImageOptions): PMNode {
   // Convert EMU to pixels for proper sizing
   const imageData: { size?: PartialImageSize } = image;
   const imageSize = imageData.size;
@@ -3636,8 +3647,17 @@ function convertImage({ image, rawXml, rawXmlMode }: ConvertImageOptions): PMNod
     cropRight: image.crop?.right,
     cropBottom: image.crop?.bottom,
     cropLeft: image.crop?.left,
+    // wp:effectExtent stays in EMU: nothing renders it and emuToPixels rounds.
+    paddingTop: image.padding?.top,
+    paddingRight: image.padding?.right,
+    paddingBottom: image.padding?.bottom,
+    paddingLeft: image.padding?.left,
     position,
     layoutInCell: image.layoutInCell,
+    // Copy: ProseMirror keeps object-valued attrs by reference, so sharing this
+    // with the source Image would let a mutation of either reach the other
+    // outside a transaction. `position` below is already built fresh.
+    frameLocks: image.frameLocks ? { ...image.frameLocks } : undefined,
     borderWidth,
     borderColor,
     borderStyle,
@@ -3646,6 +3666,7 @@ function convertImage({ image, rawXml, rawXmlMode }: ConvertImageOptions): PMNod
     hlinkRId: image.hlinkRId,
     _docxRawXml: rawXml,
     _docxRawXmlMode: rawXmlMode,
+    _docxRawImageFingerprint: rawImageFingerprint,
     _docxObjectPreview:
       rawXml !== undefined && /<(?:[A-Za-z_][\w.-]*:)?object(?:\s|>)/u.test(rawXml),
   });

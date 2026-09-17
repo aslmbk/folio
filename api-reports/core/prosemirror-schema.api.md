@@ -155,8 +155,13 @@ export type ImageAttrs = {
     cropRight?: number;
     cropBottom?: number;
     cropLeft?: number;
+    paddingTop?: number;
+    paddingRight?: number;
+    paddingBottom?: number;
+    paddingLeft?: number;
     position?: ImagePositionAttrs;
     layoutInCell?: boolean;
+    frameLocks?: import__stll_docx_core_model.ImageFrameLocks;
     borderWidth?: number;
     borderColor?: string;
     borderStyle?: string;
@@ -165,6 +170,7 @@ export type ImageAttrs = {
     hlinkRId?: string;
     _docxRawXml?: string;
     _docxRawXmlMode?: import__stll_docx_core_model.DrawingRawXmlMode;
+    _docxRawImageFingerprint?: string;
     _docxObjectPreview?: boolean;
 };
 
