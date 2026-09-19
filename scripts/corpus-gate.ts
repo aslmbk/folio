@@ -28,12 +28,20 @@ import {
 import { CensusBuilder, type CorpusCensus, mergeCensuses, renderCensus } from "./lib/corpus-census";
 import {
   BASELINE_PATH,
+  EXPECTED_REFUSALS_PATH,
   corpusCacheRoot,
   corpusLockDigest,
   loadCorpusLock,
   writeJsonFile,
 } from "./lib/corpus-manifest";
 import { type CorpusTask, runCorpusPool } from "./lib/corpus-pool";
+import {
+  type ExpectedRefusals,
+  compareToExpectedRefusals,
+  partitionExpectedRefusals,
+  refreshedExpectedRefusals,
+  renderExpectedRefusals,
+} from "./lib/corpus-refusals";
 
 class CorpusGateError extends TaggedError("CorpusGateError")<{ message: string }> {}
 
@@ -204,6 +212,19 @@ const loadBaseline = async (): Promise<CorpusBaseline> => {
   return (await file.json()) as CorpusBaseline;
 };
 
+const loadExpectedRefusals = async (): Promise<ExpectedRefusals> => {
+  const file = Bun.file(EXPECTED_REFUSALS_PATH);
+  if (!(await file.exists())) {
+    // Absent, every deliberate refusal would read as a defect and
+    // `write-baseline` would bake those signatures into the baseline.
+    throw new CorpusGateError({
+      message:
+        "corpus/expected-refusals.json is missing. It is committed; restore it rather than running without it.",
+    });
+  }
+  return (await file.json()) as ExpectedRefusals;
+};
+
 const loadCensuses = async (paths: readonly string[]): Promise<CorpusCensus> => {
   if (paths.length === 0) {
     throw new CorpusGateError({ message: "Pass at least one census file" });
@@ -215,10 +236,16 @@ const loadCensuses = async (paths: readonly string[]): Promise<CorpusCensus> => 
 };
 
 const checkAgainstBaseline = async (census: CorpusCensus): Promise<void> => {
-  const violations = compareToBaseline(await loadBaseline(), census);
+  const refusals = await loadExpectedRefusals();
+  const { defects, refusals: observedRefusals } = partitionExpectedRefusals(census, refusals);
+  const violations = [
+    ...compareToBaseline(await loadBaseline(), defects),
+    ...compareToExpectedRefusals(refusals, observedRefusals),
+  ];
+  const rendered = renderExpectedRefusals(refusals, observedRefusals);
   if (violations.length === 0) {
     process.stdout.write(
-      `Corpus gate: no change against the baseline (${census.failedFiles} known failures)\n`,
+      `Corpus gate: no change against the baseline (${defects.signatures.length} known defects, ${refusals.entries.length} expected refusals)\n${rendered}\n`,
     );
     return;
   }
@@ -262,9 +289,17 @@ const main = async (args: string[]): Promise<void> => {
 
   if (command === "write-baseline") {
     const census = await loadCensuses(rest);
-    await writeJsonFile(BASELINE_PATH, baselineFromCensus(census));
+    const refusals = await loadExpectedRefusals();
+    const { defects, refusals: observedRefusals } = partitionExpectedRefusals(census, refusals);
+    await writeJsonFile(BASELINE_PATH, baselineFromCensus(defects));
+    // Counts only: which signatures are expected refusals, and why, is a
+    // decision recorded by hand in corpus/expected-refusals.json.
+    await writeJsonFile(
+      EXPECTED_REFUSALS_PATH,
+      refreshedExpectedRefusals(refusals, observedRefusals),
+    );
     process.stdout.write(
-      `corpus/baseline.json written: ${census.signatures.length} signatures over ${census.failedFiles} files\n`,
+      `corpus/baseline.json written: ${defects.signatures.length} defect signatures, ${refusals.entries.length} expected refusals\n`,
     );
     return;
   }
