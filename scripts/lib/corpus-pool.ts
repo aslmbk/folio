@@ -11,7 +11,13 @@ import path from "node:path";
 
 import { REPOSITORY_ROOT } from "./corpus-manifest";
 import type { CorpusCheckResult } from "./corpus-check";
-import { CORPUS_INVARIANTS, type CorpusFailure, failureFromAssertion } from "./corpus-signature";
+import { EXTENDED_CORPUS_INVARIANTS } from "./corpus-invariants/contract";
+import {
+  CORPUS_INVARIANTS,
+  type CorpusFailure,
+  type CorpusInvariant,
+  failureFromAssertion,
+} from "./corpus-signature";
 
 const WORKER_ENTRY = path.join(REPOSITORY_ROOT, "scripts", "lib", "corpus-worker.ts");
 
@@ -30,7 +36,7 @@ export type CorpusTask = {
 
 export type CorpusTaskOutcome = CorpusCheckResult | { kind: "aborted"; failures: CorpusFailure[] };
 
-type PendingLine = { line: string } | { line: null };
+type PendingLine = { line: string } | { line: null; ended: "eof" | "timeout" };
 
 const readLines = async function* (
   stream: ReadableStream<Uint8Array>,
@@ -94,13 +100,14 @@ class PooledWorker {
 
     const timeout = Promise.withResolvers<PendingLine>();
     const timer = setTimeout(() => {
-      timeout.resolve({ line: null });
+      timeout.resolve({ line: null, ended: "timeout" });
     }, timeoutMs);
     const answered = await Promise.race([
       lines
         .next()
         .then(
-          (result): PendingLine => (result.done === true ? { line: null } : { line: result.value }),
+          (result): PendingLine =>
+            result.done === true ? { line: null, ended: "eof" } : { line: result.value },
         ),
       timeout.promise,
     ]);
@@ -108,9 +115,15 @@ class PooledWorker {
 
     if (answered.line === null) {
       this.kill();
-      return abortedOutcome(
-        `no verdict within ${Math.round(timeoutMs / 1000)}s (hang or process abort)`,
-      );
+      // A worker that exited without answering died, which is a fact about the
+      // file and gates. A watchdog that expired cannot tell a hung worker from
+      // a slow machine, so that one is a timing finding.
+      return answered.ended === "eof"
+        ? abortedOutcome("the worker exited without a verdict")
+        : abortedOutcome(
+            `no verdict within ${Math.round(timeoutMs / 1000)}s (watchdog expired)`,
+            EXTENDED_CORPUS_INVARIANTS.performance,
+          );
     }
     const parsed = JSON.parse(answered.line) as { id: number; result: CorpusCheckResult };
     if (parsed.id !== id) {
@@ -121,9 +134,12 @@ class PooledWorker {
   }
 }
 
-const abortedOutcome = (detail: string): CorpusTaskOutcome => ({
+const abortedOutcome = (
+  detail: string,
+  invariant: CorpusInvariant = CORPUS_INVARIANTS.completes,
+): CorpusTaskOutcome => ({
   kind: "aborted",
-  failures: [failureFromAssertion(CORPUS_INVARIANTS.completes, detail)],
+  failures: [failureFromAssertion(invariant, detail)],
 });
 
 export type RunPoolOptions = {

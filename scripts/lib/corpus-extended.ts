@@ -89,6 +89,8 @@ export type ExtendedChecksResult = {
   failures: CorpusFailure[];
   /** `<invariant>.<stage>` to milliseconds, for the performance census. */
   timings: StageTimings;
+  /** The invariant the file budget ran out before, when it did. */
+  truncatedAt?: string;
 };
 
 const BUDGET_INVARIANT = EXTENDED_CORPUS_INVARIANTS.performance;
@@ -117,11 +119,13 @@ export const runExtendedChecks = async ({
   };
 
   let spentMs = 0;
+  let truncatedAt: string | undefined;
   for (const invariant of INVARIANT_ORDER) {
     if (only !== undefined && !only.has(invariant)) {
       continue;
     }
     if (spentMs > fileBudgetMs) {
+      truncatedAt ??= invariant;
       failures.push(
         failureFromAssertion(
           BUDGET_INVARIANT,
@@ -147,6 +151,10 @@ export const runExtendedChecks = async ({
       timings[`${invariant}.${stage}`] = ms;
     }
     if (elapsedMs > invariantBudgetMs) {
+      // The stage ran to completion, only slowly. That is a timing finding and
+      // nothing more: the loop continues, so this file's later invariants are
+      // still measured and its gating findings still count. Only the file
+      // budget above, which skips what it has not reached, truncates.
       failures.push(
         failureFromAssertion(BUDGET_INVARIANT, `${invariant} exceeded its per-file time budget`),
       );
@@ -159,6 +167,7 @@ export const runExtendedChecks = async ({
       : producer.value,
     failures,
     timings,
+    ...(truncatedAt === undefined ? {} : { truncatedAt }),
   };
 };
 

@@ -14,8 +14,19 @@
  * "no worse" means.
  */
 
-import type { CorpusCensus } from "./corpus-census";
+import { type CorpusCensus, MAX_TRUNCATED_FRACTION } from "./corpus-census";
+import { isGatingFailure } from "./corpus-invariants/contract";
 import type { CorpusInvariant } from "./corpus-signature";
+
+/**
+ * `corpus/baseline.json` aggregates every invariant, so the report-only
+ * families reach it too and would ratchet here even after giving up their own
+ * baseline file. They are dropped on the way in and on the way out, so the two
+ * sides always compare the same set.
+ */
+const gatingSignatures = <T extends { invariant: CorpusInvariant }>(
+  signatures: readonly T[],
+): T[] => signatures.filter(isGatingFailure);
 
 export type CorpusBaselineEntry = {
   signature: string;
@@ -32,11 +43,23 @@ export type CorpusBaseline = {
   entries: CorpusBaselineEntry[];
 };
 
+/**
+ * Whether a run measured enough of the corpus to be written down or compared.
+ *
+ * A truncated file contributes no gating evidence, so a run that truncated a
+ * lot has counts that are low for a reason that has nothing to do with the
+ * code. Recording those as the baseline would report the next healthy run as a
+ * regression. A handful of pathological files always stop at a budget, so the
+ * bar is a share of the run rather than none at all.
+ */
+export const isDegradedRun = (census: CorpusCensus): boolean =>
+  (census.truncated ?? 0) > census.files * MAX_TRUNCATED_FRACTION;
+
 export const baselineFromCensus = (census: CorpusCensus): CorpusBaseline => ({
   schemaVersion: 1,
   lockDigest: census.lockDigest,
   failedFiles: census.failedFiles,
-  entries: census.signatures
+  entries: gatingSignatures(census.signatures)
     .map(({ signature, invariant, message, frame, files }) => ({
       signature,
       invariant,
@@ -48,10 +71,33 @@ export const baselineFromCensus = (census: CorpusCensus): CorpusBaseline => ({
 });
 
 export type BaselineViolation = {
-  kind: "new-signature" | "more-files" | "fewer-files" | "resolved-signature" | "corpus-changed";
+  kind:
+    | "new-signature"
+    | "more-files"
+    | "fewer-files"
+    | "resolved-signature"
+    | "corpus-changed"
+    | "run-degraded"
+    | "unobserved-truncated";
   signature: string;
   detail: string;
 };
+
+/**
+ * Findings that report what a run could not see, rather than what it saw.
+ *
+ * Truncation only ever removes evidence: a file that stopped at a budget can
+ * make a signature look smaller or gone, never bigger or new. So a shrink
+ * measured by a run that truncated anything is a shrink that may not be real,
+ * and demanding the baseline be written down to it would bake the truncation
+ * in. These are printed and do not fail the gate.
+ */
+const INFORMATIONAL_KINDS: ReadonlySet<BaselineViolation["kind"]> = new Set([
+  "unobserved-truncated",
+]);
+
+export const isFailingViolation = (violation: { kind: string }): boolean =>
+  !INFORMATIONAL_KINDS.has(violation.kind as BaselineViolation["kind"]);
 
 export const compareToBaseline = (
   baseline: CorpusBaseline,
@@ -67,9 +113,25 @@ export const compareToBaseline = (
     ];
   }
 
-  const recorded = new Map(baseline.entries.map((entry) => [entry.signature, entry]));
+  // Past this share of the corpus the run has not measured enough to be
+  // compared at all: too many files stopped early for "no new signature" to
+  // mean anything.
+  const truncated = census.truncated ?? 0;
+  if (isDegradedRun(census)) {
+    return [
+      {
+        kind: "run-degraded",
+        signature: "-",
+        detail: `${truncated} of ${census.files} files stopped at a budget (over ${MAX_TRUNCATED_FRACTION * 100}%); the run is too thin to compare, rerun it`,
+      },
+    ];
+  }
+
+  const recorded = new Map(
+    gatingSignatures(baseline.entries).map((entry) => [entry.signature, entry]),
+  );
   const violations: BaselineViolation[] = [];
-  for (const observed of census.signatures) {
+  for (const observed of gatingSignatures(census.signatures)) {
     const entry = recorded.get(observed.signature);
     if (entry === undefined) {
       const example = observed.examples.at(0);
@@ -90,19 +152,35 @@ export const compareToBaseline = (
       continue;
     }
     if (observed.files < entry.files) {
-      violations.push({
-        kind: "fewer-files",
-        signature: observed.signature,
-        detail: `${observed.files} files fail, down from ${entry.files}; rerun with \`write-baseline\``,
-      });
+      violations.push(
+        truncated
+          ? {
+              kind: "unobserved-truncated",
+              signature: observed.signature,
+              detail: `${observed.files} files fail, down from ${entry.files}, but ${truncated} file(s) stopped at a budget this run`,
+            }
+          : {
+              kind: "fewer-files",
+              signature: observed.signature,
+              detail: `${observed.files} files fail, down from ${entry.files}; rerun with \`write-baseline\``,
+            },
+      );
     }
   }
   for (const entry of recorded.values()) {
-    violations.push({
-      kind: "resolved-signature",
-      signature: entry.signature,
-      detail: `no longer fails; remove it with \`write-baseline\``,
-    });
+    violations.push(
+      truncated
+        ? {
+            kind: "unobserved-truncated",
+            signature: entry.signature,
+            detail: `not seen this run, but ${truncated} file(s) stopped at a budget; kept`,
+          }
+        : {
+            kind: "resolved-signature",
+            signature: entry.signature,
+            detail: "no longer fails; remove it with `write-baseline`",
+          },
+    );
   }
   return violations;
 };
