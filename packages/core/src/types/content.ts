@@ -1,5 +1,6 @@
 export type {
   BlockContent,
+  BlockRangeMarkerCapture,
   BlockSdt,
   BookmarkEnd,
   BookmarkStart,
@@ -11,6 +12,7 @@ export type {
   CommentReference,
   ComplexField,
   Deletion,
+  DisplacedByCustomXml,
   DocumentBody,
   DrawingContent,
   DrawingRawXmlMode,

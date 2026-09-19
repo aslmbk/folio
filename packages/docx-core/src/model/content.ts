@@ -248,13 +248,28 @@ export type Hyperlink = {
 };
 
 /**
- * Bookmark start marker (w:bookmarkStart)
+ * Which side of a `w:customXml` element a range marker was displaced to
+ * (`w:displacedByCustomXml`, ST_DisplacedByCustomXml).
  */
-export type BookmarkStart = {
-  type: "bookmarkStart";
-  /** Bookmark ID */
+export type DisplacedByCustomXml = "next" | "prev";
+
+/**
+ * The attributes of `CT_MarkupRange`, the base type of every range marker:
+ * bookmarks, comment ranges, move ranges and their ends.
+ *
+ * The three types below mirror the schema's own derivation chain
+ * (`CT_MarkupRange` → `CT_Bookmark` → `CT_MoveBookmark`) so a marker's model
+ * is the element's attribute set rather than a hand-picked subset of it. Every
+ * marker that lost attributes on save lost them by declaring its own fields.
+ */
+export type MarkupRangeMarker = {
+  /** Pairs a start with its end (`w:id`). */
   id: number;
-  /** Bookmark name */
+  displacedByCustomXml?: DisplacedByCustomXml;
+};
+
+/** `CT_Bookmark`: a named range, optionally scoped to table columns. */
+export type BookmarkRangeMarker = MarkupRangeMarker & {
   name: string;
   /** Column index for table bookmarks */
   colFirst?: number;
@@ -262,13 +277,28 @@ export type BookmarkStart = {
 };
 
 /**
+ * `CT_MoveBookmark`: a bookmark range attributed to the move that created it.
+ *
+ * The schema makes `w:author` required, so the field is not optional: a marker
+ * that cannot name an author cannot be written at all, and the parser supplies
+ * the same `Unknown` fallback a tracked change gets. `w:date` is required too,
+ * but a date folio does not have is not a date it may invent, so a document
+ * that arrived without one keeps arriving without one.
+ */
+export type MoveBookmarkMarker = BookmarkRangeMarker & {
+  author: string;
+  date?: string;
+};
+
+/**
+ * Bookmark start marker (w:bookmarkStart)
+ */
+export type BookmarkStart = { type: "bookmarkStart" } & BookmarkRangeMarker;
+
+/**
  * Bookmark end marker (w:bookmarkEnd)
  */
-export type BookmarkEnd = {
-  type: "bookmarkEnd";
-  /** Bookmark ID */
-  id: number;
-};
+export type BookmarkEnd = { type: "bookmarkEnd" } & MarkupRangeMarker;
 
 // ============================================================================
 // FIELDS
@@ -964,7 +994,7 @@ export type Table = {
   columnWidths?: number[];
   /** Table rows */
   rows: TableRow[];
-};
+} & BlockRangeMarkerCapture;
 
 // ============================================================================
 // COMMENTS
@@ -995,18 +1025,12 @@ export type Comment = {
 /**
  * Comment range start marker in paragraph content
  */
-export type CommentRangeStart = {
-  type: "commentRangeStart";
-  id: number;
-};
+export type CommentRangeStart = { type: "commentRangeStart" } & MarkupRangeMarker;
 
 /**
  * Comment range end marker in paragraph content
  */
-export type CommentRangeEnd = {
-  type: "commentRangeEnd";
-  id: number;
-};
+export type CommentRangeEnd = { type: "commentRangeEnd" } & MarkupRangeMarker;
 
 /**
  * Point comment reference (w:commentReference without an explicit range).
@@ -1160,37 +1184,23 @@ export type MoveTo = {
  * Move-from range start marker (w:moveFromRangeStart) — ECMA-376 §17.13.5.22
  * Pairs with moveFromRangeEnd to delimit the source of a move in the document.
  */
-export type MoveFromRangeStart = {
-  type: "moveFromRangeStart";
-  id: number;
-  name: string;
-};
+export type MoveFromRangeStart = { type: "moveFromRangeStart" } & MoveBookmarkMarker;
 
 /**
  * Move-from range end marker (w:moveFromRangeEnd)
  */
-export type MoveFromRangeEnd = {
-  type: "moveFromRangeEnd";
-  id: number;
-};
+export type MoveFromRangeEnd = { type: "moveFromRangeEnd" } & MarkupRangeMarker;
 
 /**
  * Move-to range start marker (w:moveToRangeStart) — ECMA-376 §17.13.5.24
  * Pairs with moveToRangeEnd to delimit the destination of a move.
  */
-export type MoveToRangeStart = {
-  type: "moveToRangeStart";
-  id: number;
-  name: string;
-};
+export type MoveToRangeStart = { type: "moveToRangeStart" } & MoveBookmarkMarker;
 
 /**
  * Move-to range end marker (w:moveToRangeEnd)
  */
-export type MoveToRangeEnd = {
-  type: "moveToRangeEnd";
-  id: number;
-};
+export type MoveToRangeEnd = { type: "moveToRangeEnd" } & MarkupRangeMarker;
 
 /**
  * Run-level tracked wrappers represented in WordprocessingML.
@@ -1430,7 +1440,7 @@ export type BlockSdt = {
   properties: SdtProperties;
   /** Block content inside the control. */
   content: BlockContent[];
-};
+} & BlockRangeMarkerCapture;
 
 // ============================================================================
 // PARAGRAPH
@@ -1521,7 +1531,7 @@ export type Paragraph = {
   renderedPageBreakBefore?: boolean;
   /** Section properties (if this paragraph ends a section) */
   sectionProperties?: SectionProperties;
-};
+} & BlockRangeMarkerCapture;
 
 // ============================================================================
 // HEADERS & FOOTERS
@@ -1924,6 +1934,23 @@ export type SectionProperties = {
 // ============================================================================
 // SECTION & DOCUMENT BODY
 // ============================================================================
+
+/**
+ * Range markers captured verbatim from between two blocks.
+ *
+ * `w:permStart`, `w:customXml*Range*`, and a comment or move range that opens
+ * or closes between blocks are all legal children of `w:body`, `w:tc` and a
+ * header. folio has no model for most of them, and their position is the whole
+ * of their meaning: a protected range that spans three paragraphs is defined
+ * by where its `w:permStart` sits. So they ride on the block they precede or
+ * follow and are replayed there.
+ */
+export type BlockRangeMarkerCapture = {
+  /** Markup that stood immediately before this block. */
+  rawMarkersBefore?: string;
+  /** Markup that stood after this block, which only the last block can carry. */
+  rawMarkersAfter?: string;
+};
 
 /**
  * Block-level content types

@@ -18,26 +18,34 @@ export type AbstractNumbering = {
 export type BlockContent = Paragraph | Table | BlockSdt;
 
 // @public
+export type BlockRangeMarkerCapture = {
+    rawMarkersBefore?: string;
+    rawMarkersAfter?: string;
+};
+
+// @public
 export type BlockSdt = {
     type: "blockSdt";
     properties: SdtProperties;
     content: BlockContent[];
-};
+} & BlockRangeMarkerCapture;
 
 // @public
 export type BookmarkEnd = {
     type: "bookmarkEnd";
-    id: number;
+} & MarkupRangeMarker;
+
+// @public
+export type BookmarkRangeMarker = MarkupRangeMarker & {
+    name: string;
+    colFirst?: number;
+    colLast?: number;
 };
 
 // @public
 export type BookmarkStart = {
     type: "bookmarkStart";
-    id: number;
-    name: string;
-    colFirst?: number;
-    colLast?: number;
-};
+} & BookmarkRangeMarker;
 
 // @public
 export type BorderSpec = {
@@ -100,14 +108,12 @@ export { Comment_2 as Comment }
 // @public
 export type CommentRangeEnd = {
     type: "commentRangeEnd";
-    id: number;
-};
+} & MarkupRangeMarker;
 
 // @public
 export type CommentRangeStart = {
     type: "commentRangeStart";
-    id: number;
-};
+} & MarkupRangeMarker;
 
 // @public
 export type CommentReference = {
@@ -149,6 +155,9 @@ export type Deletion = {
     info: TrackedChangeInfo;
     content: TrackedRunContent[];
 };
+
+// @public
+export type DisplacedByCustomXml = "next" | "prev";
 
 // @public
 export type DocDefaults = {
@@ -589,6 +598,12 @@ export type ListRendering = {
 };
 
 // @public
+export type MarkupRangeMarker = {
+    id: number;
+    displacedByCustomXml?: DisplacedByCustomXml;
+};
+
+// @public
 export type MathEquation = {
     type: "mathEquation";
     display: "inline" | "block";
@@ -613,6 +628,12 @@ export type MediaFile = {
 };
 
 // @public
+export type MoveBookmarkMarker = BookmarkRangeMarker & {
+    author: string;
+    date?: string;
+};
+
+// @public
 export type MoveFrom = {
     type: "moveFrom";
     info: TrackedChangeInfo;
@@ -622,15 +643,12 @@ export type MoveFrom = {
 // @public
 export type MoveFromRangeEnd = {
     type: "moveFromRangeEnd";
-    id: number;
-};
+} & MarkupRangeMarker;
 
 // @public
 export type MoveFromRangeStart = {
     type: "moveFromRangeStart";
-    id: number;
-    name: string;
-};
+} & MoveBookmarkMarker;
 
 // @public
 export type MoveTo = {
@@ -642,15 +660,12 @@ export type MoveTo = {
 // @public
 export type MoveToRangeEnd = {
     type: "moveToRangeEnd";
-    id: number;
-};
+} & MarkupRangeMarker;
 
 // @public
 export type MoveToRangeStart = {
     type: "moveToRangeStart";
-    id: number;
-    name: string;
-};
+} & MoveBookmarkMarker;
 
 // @public
 export type NoBreakHyphenContent = {
@@ -705,7 +720,7 @@ export type Paragraph = {
     listRendering?: ListRendering;
     renderedPageBreakBefore?: boolean;
     sectionProperties?: SectionProperties;
-};
+} & BlockRangeMarkerCapture;
 
 // @public
 export const PARAGRAPH_MARK_CHANGE_KINDS: readonly ["moveFrom", "moveTo", "ins", "del"];
@@ -1207,7 +1222,7 @@ export type Table = {
     propertyChanges?: TablePropertyChange[];
     columnWidths?: number[];
     rows: TableRow[];
-};
+} & BlockRangeMarkerCapture;
 
 // @public
 export type TabLeader = "none" | "dot" | "hyphen" | "underscore" | "heavy" | "middleDot";
