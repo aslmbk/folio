@@ -401,6 +401,9 @@ export type ShapeAttrs = {
     shapeType?: string;
     geometryAdjustments?: string;
     shapeId?: string;
+    shapeName?: string;
+    alt?: string;
+    title?: string;
     width?: number;
     height?: number;
     fillColor?: string;
@@ -414,6 +417,7 @@ export type ShapeAttrs = {
     outlineColorValue?: import__stll_docx_core_model.ShapeOutline["color"];
     outlineStyle?: OutlineStyleAttr;
     outlineCap?: NonNullable<import__stll_docx_core_model.ShapeOutline["cap"]>;
+    outlineJoin?: NonNullable<import__stll_docx_core_model.ShapeOutline["join"]>;
     outlineHeadEnd?: NonNullable<import__stll_docx_core_model.ShapeOutline["headEnd"]>;
     outlineTailEnd?: NonNullable<import__stll_docx_core_model.ShapeOutline["tailEnd"]>;
     transform?: string;
@@ -579,6 +583,9 @@ export type TextBoxAttrs = {
     wordArt?: import__stll_docx_core_model.ShapeTextBody["wordArt"];
     textWrap?: import__stll_docx_core_model.ShapeTextBody["textWrap"];
     textBoxId?: string;
+    textBoxName?: string;
+    alt?: string;
+    title?: string;
     fillColor?: string;
     outlineWidth?: number;
     outlineColor?: string;

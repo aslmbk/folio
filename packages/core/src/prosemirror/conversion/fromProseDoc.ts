@@ -1680,6 +1680,9 @@ type BooleanToggleKey = Extract<
   StyleResolvedParagraphField,
   | "pageBreakBefore"
   | "widowControl"
+  | "keepNext"
+  | "keepLines"
+  | "runInWithNext"
   | "snapToGrid"
   | "kinsoku"
   | "overflowPunctuation"
@@ -1844,6 +1847,9 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
     }
     assignBooleanToggle(result, attrs, orig, "pageBreakBefore");
     assignBooleanToggle(result, attrs, orig, "widowControl");
+    assignBooleanToggle(result, attrs, orig, "keepNext");
+    assignBooleanToggle(result, attrs, orig, "keepLines");
+    assignBooleanToggle(result, attrs, orig, "runInWithNext");
     assignBooleanToggle(result, attrs, orig, "snapToGrid");
     assignBooleanToggle(result, attrs, orig, "kinsoku");
     assignBooleanToggle(result, attrs, orig, "overflowPunctuation");
@@ -1900,6 +1906,9 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
   const contextualSpacing = authored("contextualSpacing", attrs.contextualSpacing);
   const pageBreakBefore = authored("pageBreakBefore", attrs.pageBreakBefore);
   const widowControl = authored("widowControl", attrs.widowControl);
+  const keepNext = authored("keepNext", attrs.keepNext);
+  const keepLines = authored("keepLines", attrs.keepLines);
+  const runInWithNext = authored("runInWithNext", attrs.runInWithNext);
   const kinsoku = authored("kinsoku", attrs.kinsoku);
   const overflowPunctuation = authored("overflowPunctuation", attrs.overflowPunctuation);
   const suppressAutoHyphens = authored("suppressAutoHyphens", attrs.suppressAutoHyphens);
@@ -1930,6 +1939,9 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
     bidi != null ||
     pageBreakBefore != null ||
     widowControl != null ||
+    keepNext != null ||
+    keepLines != null ||
+    runInWithNext != null ||
     kinsoku != null ||
     overflowPunctuation != null ||
     suppressAutoHyphens != null;
@@ -2009,6 +2021,15 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
   }
   if (widowControl != null) {
     f.widowControl = widowControl;
+  }
+  if (keepNext != null) {
+    f.keepNext = keepNext;
+  }
+  if (keepLines != null) {
+    f.keepLines = keepLines;
+  }
+  if (runInWithNext != null) {
+    f.runInWithNext = runInWithNext;
   }
   if (kinsoku != null) {
     f.kinsoku = kinsoku;
@@ -3702,6 +3723,16 @@ function createShapeRun(node: PMNode): Run {
   if (attrs.shapeId) {
     shape.id = attrs.shapeId;
   }
+  // `""` is a name someone wrote, so presence is the test, not truthiness.
+  if (attrs.shapeName !== undefined) {
+    shape.name = attrs.shapeName;
+  }
+  if (attrs.alt !== undefined) {
+    shape.alt = attrs.alt;
+  }
+  if (attrs.title !== undefined) {
+    shape.title = attrs.title;
+  }
   const geometryAdjustments = parseShapeGeometryAdjustments(attrs.geometryAdjustments);
   if (geometryAdjustments !== undefined) {
     shape.geometryAdjustments = geometryAdjustments;
@@ -3778,6 +3809,7 @@ function createShapeRun(node: PMNode): Run {
       attrs.outlineColor ||
       attrs.outlineStyle ||
       attrs.outlineCap ||
+      attrs.outlineJoin ||
       attrs.outlineHeadEnd ||
       attrs.outlineTailEnd)
   ) {
@@ -3786,10 +3818,16 @@ function createShapeRun(node: PMNode): Run {
       shapeOutline.width = pixelsToEmu(attrs.outlineWidth);
     }
     if (attrs.outlineStyle) {
-      shapeOutline.style = normalizeShapeOutlineStyle(attrs.outlineStyle) ?? "solid";
+      const style = normalizeShapeOutlineStyle(attrs.outlineStyle);
+      if (style !== undefined) {
+        shapeOutline.style = style;
+      }
     }
     if (attrs.outlineCap) {
       shapeOutline.cap = attrs.outlineCap;
+    }
+    if (attrs.outlineJoin) {
+      shapeOutline.join = attrs.outlineJoin;
     }
     if (attrs.outlineHeadEnd) {
       shapeOutline.headEnd = attrs.outlineHeadEnd;
@@ -5465,6 +5503,16 @@ function convertPMTextBox(node: PMNode, styleResolver: StyleEngine | null = null
 
   if (attrs.textBoxId) {
     shape.id = attrs.textBoxId;
+  }
+  // `""` is a name someone wrote, so presence is the test, not truthiness.
+  if (attrs.textBoxName !== undefined) {
+    shape.name = attrs.textBoxName;
+  }
+  if (attrs.alt !== undefined) {
+    shape.alt = attrs.alt;
+  }
+  if (attrs.title !== undefined) {
+    shape.title = attrs.title;
   }
 
   const transform = parseTransformAttr(attrs.transform);

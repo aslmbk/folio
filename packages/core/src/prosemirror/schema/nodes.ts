@@ -587,6 +587,12 @@ export type ShapeAttrs = {
   geometryAdjustments?: string;
   /** Unique identifier */
   shapeId?: string;
+  /** Authored non-visual drawing name (`wp:docPr@name` / `wps:cNvPr@name`) */
+  shapeName?: string;
+  /** Alt text for accessibility (`wp:docPr@descr`) */
+  alt?: string;
+  /** Authored non-visual drawing title (`wp:docPr@title`) */
+  title?: string;
   /** Width in pixels */
   width?: number;
   /** Height in pixels */
@@ -613,6 +619,8 @@ export type ShapeAttrs = {
   outlineStyle?: OutlineStyleAttr;
   /** Line cap */
   outlineCap?: NonNullable<ShapeOutline["cap"]>;
+  /** Line join */
+  outlineJoin?: NonNullable<ShapeOutline["join"]>;
   /** Head arrow/end marker */
   outlineHeadEnd?: NonNullable<ShapeOutline["headEnd"]>;
   /** Tail arrow/end marker */
@@ -686,6 +694,12 @@ export type TextBoxAttrs = {
   textWrap?: ShapeTextBody["textWrap"];
   /** Unique identifier */
   textBoxId?: string;
+  /** Authored non-visual drawing name (`wp:docPr@name` / `wps:cNvPr@name`) */
+  textBoxName?: string;
+  /** Alt text for accessibility (`wp:docPr@descr`) */
+  alt?: string;
+  /** Authored non-visual drawing title (`wp:docPr@title`) */
+  title?: string;
   /** Fill color as CSS color */
   fillColor?: string;
   /** Outline width in pixels */

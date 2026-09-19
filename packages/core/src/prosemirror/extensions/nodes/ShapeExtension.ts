@@ -487,6 +487,9 @@ export const ShapeExtension = createNodeExtension({
       geometryAdjustments: { default: null },
       _docxRunFormatting: { default: null },
       shapeId: { default: null },
+      shapeName: { default: null },
+      alt: { default: null },
+      title: { default: null },
       width: { default: 100 },
       height: { default: 80 },
       fillColor: { default: null },
@@ -498,8 +501,11 @@ export const ShapeExtension = createNodeExtension({
       outlineWidth: { default: 1 },
       outlineColor: { default: "var(--doc-shape-outline, #000000)" },
       outlineColorValue: { default: null },
-      outlineStyle: { default: "solid" },
+      // An outline with no `a:prstDash` states no style; `"solid"` here would
+      // become the shape's own dash pattern on the next save.
+      outlineStyle: { default: null },
       outlineCap: { default: null },
+      outlineJoin: { default: null },
       outlineHeadEnd: { default: null },
       outlineTailEnd: { default: null },
       transform: { default: null },

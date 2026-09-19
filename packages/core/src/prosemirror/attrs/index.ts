@@ -148,6 +148,10 @@ const SHAPE_OUTLINE_CAPS = ["flat", "round", "square"] as const satisfies readon
   ShapeAttrs["outlineCap"]
 >[];
 
+const SHAPE_OUTLINE_JOINS = ["bevel", "miter", "round"] as const satisfies readonly NonNullable<
+  ShapeAttrs["outlineJoin"]
+>[];
+
 const SHAPE_LINE_END_TYPES = [
   "none",
   "triangle",
@@ -867,6 +871,9 @@ export const readShapeAttrs = (node: PMNode): ReadProseMirrorAttrsResult<ShapeAt
   optionalString(attrs, "shapeType", "shape.attrs.shapeType", issues);
   optionalString(attrs, "geometryAdjustments", "shape.attrs.geometryAdjustments", issues);
   optionalString(attrs, "shapeId", "shape.attrs.shapeId", issues);
+  optionalString(attrs, "shapeName", "shape.attrs.shapeName", issues);
+  optionalString(attrs, "alt", "shape.attrs.alt", issues);
+  optionalString(attrs, "title", "shape.attrs.title", issues);
   optionalNumber(attrs, "width", "shape.attrs.width", issues);
   optionalNumber(attrs, "height", "shape.attrs.height", issues);
   optionalString(attrs, "fillColor", "shape.attrs.fillColor", issues);
@@ -886,6 +893,7 @@ export const readShapeAttrs = (node: PMNode): ReadProseMirrorAttrsResult<ShapeAt
     OUTLINE_STYLE_ATTR_VALUES,
   );
   optionalOneOf(attrs, "outlineCap", "shape.attrs.outlineCap", issues, SHAPE_OUTLINE_CAPS);
+  optionalOneOf(attrs, "outlineJoin", "shape.attrs.outlineJoin", issues, SHAPE_OUTLINE_JOINS);
   optionalShapeLineEnd(attrs, "outlineHeadEnd", "shape.attrs.outlineHeadEnd", issues);
   optionalShapeLineEnd(attrs, "outlineTailEnd", "shape.attrs.outlineTailEnd", issues);
   optionalString(attrs, "transform", "shape.attrs.transform", issues);
@@ -922,6 +930,9 @@ export const readTextBoxAttrs = (node: PMNode): ReadProseMirrorAttrsResult<TextB
   optionalWordArt(attrs, "wordArt", "textBox.attrs.wordArt", issues);
   optionalOneOf(attrs, "textWrap", "textBox.attrs.textWrap", issues, TEXT_BOX_TEXT_WRAP_VALUES);
   optionalString(attrs, "textBoxId", "textBox.attrs.textBoxId", issues);
+  optionalString(attrs, "textBoxName", "textBox.attrs.textBoxName", issues);
+  optionalString(attrs, "alt", "textBox.attrs.alt", issues);
+  optionalString(attrs, "title", "textBox.attrs.title", issues);
   optionalString(attrs, "fillColor", "textBox.attrs.fillColor", issues);
   optionalNumber(attrs, "outlineWidth", "textBox.attrs.outlineWidth", issues);
   optionalString(attrs, "outlineColor", "textBox.attrs.outlineColor", issues);
