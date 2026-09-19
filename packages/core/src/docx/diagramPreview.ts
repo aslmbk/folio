@@ -1,4 +1,6 @@
 import type { Image, MediaFile, RelationshipMap } from "../types/document";
+import { bytesToDataUrl } from "../utils/base64";
+import { PREVIEW_KINDS } from "./previewBudget";
 import {
   findChildByNamespaceUri,
   getAttribute,
@@ -34,23 +36,52 @@ const WORD_DRAWING_NAMESPACE_URIS = new Set([
   "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
   "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
 ]);
+/**
+ * The preview is a megapixel raster, so both checksums run over megabytes.
+ * `for (const byte of bytes)` drives the array iterator protocol once per
+ * byte, which profiles as the dominant cost of parsing a SmartArt document;
+ * indexed loops and a table-driven CRC produce the same numbers without it.
+ */
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
 const crc32 = (bytes: Uint8Array): number => {
   let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
+  for (let index = 0; index < bytes.length; index += 1) {
+    // SAFETY: `index` is below `bytes.length`, and the table covers every byte.
+    crc = (crc >>> 8) ^ (CRC32_TABLE[(crc ^ (bytes[index] as number)) & 0xff] as number);
   }
   return (crc ^ 0xffffffff) >>> 0;
 };
 
+/**
+ * `a` and `b` stay below 2^31 for 5552 iterations from any legal state, so the
+ * modulo runs per block rather than per byte.
+ */
+const ADLER32_BLOCK = 5552;
+
 const adler32 = (bytes: Uint8Array): number => {
   let a = 1;
   let b = 0;
-  for (const byte of bytes) {
-    a = (a + byte) % 65521;
-    b = (b + a) % 65521;
+  let index = 0;
+  while (index < bytes.length) {
+    const end = Math.min(index + ADLER32_BLOCK, bytes.length);
+    for (; index < end; index += 1) {
+      // SAFETY: `index` is below `end`, itself at most `bytes.length`.
+      a += bytes[index] as number;
+      b += a;
+    }
+    a %= 65521;
+    b %= 65521;
   }
   return (b << 16) | a;
 };
@@ -121,10 +152,11 @@ const previewPng = (width: number, height: number, shapes: PreviewShape[]): Uint
     cursor += length;
     offset += length;
   }
-  const output = new Uint8Array(cursor + 4);
-  output.set(compressed.subarray(0, cursor));
-  const adler = new DataView(output.buffer);
-  adler.setUint32(cursor, adler32(pixels));
+  // `compressed` was sized for exactly these four trailing bytes, so the
+  // stream is finished in place rather than copied into a second buffer the
+  // same size as the raster.
+  new DataView(compressed.buffer).setUint32(cursor, adler32(pixels));
+  const output = compressed;
   const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const header = new Uint8Array(13);
   new DataView(header.buffer).setUint32(0, w);
@@ -244,6 +276,15 @@ const cachedDiagramShapes = (
   return shapes;
 };
 
+const matchesNamespace = (
+  element: XmlElement,
+  namespaceUris: ReadonlySet<string>,
+  localName: string,
+): boolean =>
+  element.namespaceUri !== undefined &&
+  namespaceUris.has(element.namespaceUri) &&
+  getLocalName(element.name ?? "") === localName;
+
 const descendantsByNamespace = (
   root: XmlElement,
   namespaceUris: ReadonlySet<string>,
@@ -251,11 +292,7 @@ const descendantsByNamespace = (
 ): XmlElement[] => {
   const result: XmlElement[] = [];
   const visit = (element: XmlElement): void => {
-    if (
-      element.namespaceUri &&
-      namespaceUris.has(element.namespaceUri) &&
-      getLocalName(element.name ?? "") === localName
-    ) {
+    if (matchesNamespace(element, namespaceUris, localName)) {
       result.push(element);
     }
     for (const child of element.elements ?? []) {
@@ -268,6 +305,27 @@ const descendantsByNamespace = (
   return result;
 };
 
+/** The first match in document order, without walking the rest of the subtree. */
+const firstDescendantByNamespace = (
+  root: XmlElement,
+  namespaceUris: ReadonlySet<string>,
+  localName: string,
+): XmlElement | null => {
+  if (matchesNamespace(root, namespaceUris, localName)) {
+    return root;
+  }
+  for (const child of root.elements ?? []) {
+    if (child.type !== "element") {
+      continue;
+    }
+    const found = firstDescendantByNamespace(child, namespaceUris, localName);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+};
+
 /** Create a deliberately simple, bounded preview; it is never an editable diagram projection. */
 export const parseDiagramPreview = (
   drawing: XmlElement,
@@ -277,9 +335,7 @@ export const parseDiagramPreview = (
   if (!rels || !media) {
     return null;
   }
-  const graphicData = descendantsByNamespace(drawing, DRAWINGML_NAMESPACE_URIS, "graphicData").at(
-    0,
-  );
+  const graphicData = firstDescendantByNamespace(drawing, DRAWINGML_NAMESPACE_URIS, "graphicData");
   if (!graphicData || !DIAGRAM_NAMESPACE_URIS.has(getAttribute(graphicData, null, "uri") ?? "")) {
     return null;
   }
@@ -288,16 +344,12 @@ export const parseDiagramPreview = (
     return null;
   }
   const png = previewPng(width, height, cachedDiagramShapes(graphicData, rels, media));
-  let binary = "";
-  for (let offset = 0; offset < png.length; offset += 0x8000) {
-    binary += String.fromCodePoint(...png.subarray(offset, offset + 0x8000));
-  }
   const image: Image = {
     type: "image",
     rId: "",
-    src: `data:image/png;base64,${btoa(binary)}`,
-    mimeType: "image/png",
-    filename: "smartart-preview.png",
+    src: bytesToDataUrl(png, PREVIEW_KINDS.smartArt.mimeType),
+    mimeType: PREVIEW_KINDS.smartArt.mimeType,
+    filename: PREVIEW_KINDS.smartArt.filename,
     size: { width, height },
     wrap: { type: "inline" },
   };
