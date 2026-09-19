@@ -81,6 +81,7 @@ import {
   type AuthoredRunFormattingCarrier,
 } from "../extensions/marks/markUtils";
 import { directionFromBidi } from "../paragraphDirection";
+import { styleResolvedParagraphFormatting } from "../paragraphFormattingProvenance";
 import {
   pageBreakRunParagraphProjectionDispositionForFeatures,
   type PageBreakRunParagraphProjectionReason,
@@ -957,6 +958,13 @@ function paragraphFormattingToAttrs(
   if (styleResolver) {
     const resolved = styleResolver.resolveParagraphStyleInTable(styleId, tableParagraphOverlay);
     stylePpr = resolved.paragraphFormatting;
+    // What the paragraph would render as if it stated nothing of its own,
+    // narrowed to the fields a save could otherwise materialise (see
+    // ParagraphAttrs._resolvedFormatting).
+    const resolvedFormatting = styleResolvedParagraphFormatting(stylePpr);
+    if (resolvedFormatting) {
+      attrs._resolvedFormatting = resolvedFormatting;
+    }
 
     // Apply style-based values as defaults (inline overrides)
     set("alignment", formatting?.alignment ?? stylePpr?.alignment);
@@ -1708,9 +1716,11 @@ function convertTable(
   if (resolvedTableBidi !== undefined) {
     attrs._resolvedBidi = resolvedTableBidi;
   }
-  if (table.formatting) {
-    attrs._originalFormatting = table.formatting;
-  }
+  // Always set on import, even when the table had no `w:tblPr`: this attr is
+  // also what tells `convertPMTable` the table came from a document, and a
+  // table that arrived without table borders must not acquire them from a
+  // bordered cell on the way back out.
+  attrs._originalFormatting = table.formatting ?? {};
   // Carry `w:tblPrChange` opaquely through PM (same rationale as the
   // paragraph `_propertyChanges` attr) so edits don't strip the tracked
   // property-change history and accept/reject can resolve it.
@@ -2644,7 +2654,13 @@ function convertRun(
   }
 
   for (const content of run.content) {
-    const contentNodes = convertRunContent(content, marks, mergedFormatting, textBoxAnchors);
+    const contentNodes = convertRunContent(
+      content,
+      marks,
+      mergedFormatting,
+      textBoxAnchors,
+      run.formatting,
+    );
     nodes.push(...contentNodes);
   }
 
@@ -3302,6 +3318,18 @@ const noteReferenceVertAlign = (
 };
 
 /**
+ * The run properties an inline atom has to carry itself.
+ *
+ * `withRunBoundaryMarks` keeps the run's formatting marks off an image or
+ * shape node, so the node is the only place left to record the `w:rPr` the
+ * run was authored with.
+ */
+const carriedRunFormatting = (
+  formatting: TextFormatting | undefined,
+): TextFormatting | undefined =>
+  formatting && Object.keys(formatting).length > 0 ? formatting : undefined;
+
+/**
  * Convert RunContent to ProseMirror nodes
  */
 function convertRunContent(
@@ -3309,6 +3337,13 @@ function convertRunContent(
   marks: ReturnType<typeof schema.mark>[],
   formatting?: TextFormatting,
   textBoxAnchors?: ReadonlyMap<Shape, string>,
+  /**
+   * The run's own `w:rPr`, NOT the style-resolved `formatting` above. An
+   * inline atom carries it verbatim so the save can rebuild the run; carrying
+   * the resolved value instead would write the style's run properties into
+   * the run as direct formatting.
+   */
+  authoredFormatting?: TextFormatting,
 ): PMNode[] {
   switch (content.type) {
     case "text":
@@ -3364,6 +3399,7 @@ function convertRunContent(
               content.rawXmlMode === DRAWING_RAW_XML_MODES.PRESERVE_ONLY
                 ? undefined
                 : content.rawImageFingerprint,
+            runFormatting: carriedRunFormatting(authoredFormatting),
           }),
           marks,
         ),
@@ -3377,7 +3413,9 @@ function convertRunContent(
         const anchorId = textBoxAnchors?.get(shp);
         return anchorId ? [schema.node("textBoxAnchor", { anchorId }).mark(marks)] : [];
       }
-      return [withRunBoundaryMarks(convertShape(shp), marks)];
+      return [
+        withRunBoundaryMarks(convertShape(shp, carriedRunFormatting(authoredFormatting)), marks),
+      ];
     }
 
     case "footnoteRef": {
@@ -3453,6 +3491,8 @@ type ConvertImageOptions = {
   rawXml: DrawingContent["rawXml"];
   rawXmlMode: DrawingContent["rawXmlMode"];
   rawImageFingerprint: string | undefined;
+  /** The `w:rPr` of the run the drawing came from; see `carriedRunFormatting`. */
+  runFormatting: TextFormatting | undefined;
 };
 
 function convertImage({
@@ -3460,6 +3500,7 @@ function convertImage({
   rawXml,
   rawXmlMode,
   rawImageFingerprint,
+  runFormatting,
 }: ConvertImageOptions): PMNode {
   // Convert EMU to pixels for proper sizing
   const imageData: { size?: PartialImageSize } = image;
@@ -3664,6 +3705,7 @@ function convertImage({
     _docxRawImageFingerprint: rawImageFingerprint,
     _docxObjectPreview:
       rawXml !== undefined && /<(?:[A-Za-z_][\w.-]*:)?object(?:\s|>)/u.test(rawXml),
+    _docxRunFormatting: runFormatting,
   });
 }
 
@@ -3761,7 +3803,15 @@ function convertHyperlink(
       // silently dropped TOC entries' tab between title and page number,
       // collapsing the right-aligned page number flush against the title.
       for (const content of child.content) {
-        nodes.push(...convertRunContent(content, allMarks, mergedFormatting, textBoxAnchors));
+        nodes.push(
+          ...convertRunContent(
+            content,
+            allMarks,
+            mergedFormatting,
+            textBoxAnchors,
+            child.formatting,
+          ),
+        );
       }
     }
   }
@@ -3776,7 +3826,7 @@ function convertHyperlink(
 /**
  * Convert a Shape to a ProseMirror shape node (inline SVG)
  */
-function convertShape(shape: Shape): PMNode {
+function convertShape(shape: Shape, runFormatting?: TextFormatting): PMNode {
   const shapeData: { size?: Partial<Shape["size"]> } = shape;
   const shapeSize = shapeData.size;
   const widthPx = shapeSize?.width ? emuToPixels(shapeSize.width) : 100;
@@ -3882,6 +3932,7 @@ function convertShape(shape: Shape): PMNode {
   }
 
   return schema.node("shape", {
+    _docxRunFormatting: runFormatting,
     shapeType: shapeAttrs.shapeType ?? "rect",
     geometryAdjustments:
       shape.geometryAdjustments === undefined

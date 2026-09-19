@@ -272,6 +272,20 @@ export type ParagraphAttrs = {
    *  Used by fromProseDoc for lossless round-trip serialization. */
   _originalFormatting?: ParagraphFormatting;
 
+  /**
+   * The `w:pPr` the style cascade resolves to for this paragraph: document
+   * defaults, the enclosing table style, then the `w:pStyle` chain. PM-only;
+   * never serialized.
+   *
+   * The formatting attrs above hold the EFFECTIVE value, because that is what
+   * the editor renders with. A save must write only what the paragraph states
+   * itself, so it needs this companion to tell an inherited value from an
+   * authored one — writing an inherited value back as direct `w:pPr` outranks
+   * the style it came from, and a later edit to that style stops reaching the
+   * paragraph. `TableCellAttrs._resolvedBorders` is the same device.
+   */
+  _resolvedFormatting?: ParagraphFormatting;
+
   /** Import-effective spacing baseline for HTML auto-spacing detection.
    *  PM-only; never serialized back into DOCX formatting. */
   _autospacingBase?: {
@@ -449,6 +463,14 @@ export type ImageAttrs = {
   _docxRawImageFingerprint?: string;
   /** Embedded-object previews use their authored box as the exact line height. */
   _docxObjectPreview?: boolean;
+  /**
+   * The `w:rPr` of the run this atom came from. Inline atoms do not carry the
+   * run's formatting marks (see `withRunBoundaryMarks`), so without this the
+   * run properties of an embedded object, picture or shape are lost on save
+   * (`content[].content[].formatting: object became absent` in the corpus
+   * census).
+   */
+  _docxRunFormatting?: TextFormatting;
 };
 
 /**
@@ -627,6 +649,14 @@ export type ShapeAttrs = {
   glowColor?: string;
   /** Glow radius in pixels */
   glowRadius?: number;
+  /**
+   * The `w:rPr` of the run this atom came from. Inline atoms do not carry the
+   * run's formatting marks (see `withRunBoundaryMarks`), so without this the
+   * run properties of an embedded object, picture or shape are lost on save
+   * (`content[].content[].formatting: object became absent` in the corpus
+   * census).
+   */
+  _docxRunFormatting?: TextFormatting;
 };
 
 /**
