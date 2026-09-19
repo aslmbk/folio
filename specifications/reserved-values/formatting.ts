@@ -212,6 +212,7 @@ export const PARAGRAPH_FORMATTING_RESERVED = {
   suppressAutoHyphens: toggle("w:suppressAutoHyphens@val"),
   runProperties: NO_RESERVED_VALUE,
   runInWithNext: toggle("w:specVanish@val"),
+  numberingChangeXml: NO_RESERVED_VALUE,
 } satisfies Record<keyof ParagraphFormatting, ReservedValueDisposition>;
 
 export type ExhaustiveParagraphFormattingReserved = ExhaustiveFields<
@@ -369,13 +370,33 @@ export type ExhaustiveCellMarginsReserved = ExhaustiveFields<
   keyof typeof CELL_MARGINS_RESERVED
 >;
 
+/**
+ * A `w:tblLook` flag is `ST_OnOff`, and folio now models all three of its
+ * states. An explicit `0|false|off` is not absence: absence falls back to the
+ * matching bit of `w:val`, an explicit off overrides that bit, and the two
+ * select different conditional formats out of the table style. `w:val` itself
+ * carries the mirror-image reserved value — a bit whose flag was stated means
+ * nothing — so both sides are read through the one resolver.
+ */
+const tableLookFlag = (attribute: string): ReservedValueDisposition =>
+  readerOwned({
+    slot: `w:tblLook@${attribute}`,
+    sentinel: "0|false|off",
+    reader: RESERVED_VALUE_READERS.tableLook,
+  });
+
 export const TABLE_LOOK_RESERVED = {
-  firstColumn: NO_RESERVED_VALUE,
-  firstRow: NO_RESERVED_VALUE,
-  lastColumn: NO_RESERVED_VALUE,
-  lastRow: NO_RESERVED_VALUE,
-  noHBand: NO_RESERVED_VALUE,
-  noVBand: NO_RESERVED_VALUE,
+  val: readerOwned({
+    slot: "w:tblLook@val",
+    sentinel: "superseded-by-flag",
+    reader: RESERVED_VALUE_READERS.tableLook,
+  }),
+  firstColumn: tableLookFlag("firstColumn"),
+  firstRow: tableLookFlag("firstRow"),
+  lastColumn: tableLookFlag("lastColumn"),
+  lastRow: tableLookFlag("lastRow"),
+  noHBand: tableLookFlag("noHBand"),
+  noVBand: tableLookFlag("noVBand"),
 } satisfies Record<keyof TableLook, ReservedValueDisposition>;
 
 export type ExhaustiveTableLookReserved = ExhaustiveFields<
@@ -431,6 +452,7 @@ export const TABLE_FORMATTING_RESERVED = {
   floating: NO_RESERVED_VALUE,
   bidi: toggle("w:bidiVisual@val"),
   gridSourceXml: NO_RESERVED_VALUE,
+  gridChangeXml: NO_RESERVED_VALUE,
   sourceXml: NO_RESERVED_VALUE,
 } satisfies Record<keyof TableFormatting, ReservedValueDisposition>;
 

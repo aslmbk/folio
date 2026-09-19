@@ -32,9 +32,10 @@ import type {
   TrackedChangeInfo,
   TrackedRunChange,
   MathEquation,
+  BidiWrapper,
   RunContent,
 } from "../types/document";
-import { PARAGRAPH_MARK_CHANGE_KINDS, REVIEW_CARRIERS } from "@stll/docx-core/model";
+import { BIDI_CONTROLS, PARAGRAPH_MARK_CHANGE_KINDS, REVIEW_CARRIERS } from "@stll/docx-core/model";
 import { panic } from "better-result";
 import { isValidHexId } from "../utils/hexId";
 import { paraIdInRange } from "./paraIdRangeNormalization";
@@ -77,6 +78,7 @@ import {
   getAttribute,
   getChildElements,
   getLocalName,
+  getNamespaceUri,
   matchesName,
   mergeXmlnsDeclarations,
   parseBooleanElement,
@@ -612,6 +614,14 @@ export function parseParagraphProperties(
         }
       }
     }
+
+    // `w:numberingChange` records the numbering the paragraph carried before a
+    // reviewer changed it. Nothing derives it from the current model, so a
+    // rebuilt `w:numPr` that does not carry it discards the revision.
+    const numberingChange = findChild(numPr, "w", "numberingChange");
+    if (numberingChange) {
+      formatting.numberingChangeXml = captureVerbatimXml(numberingChange);
+    }
   }
 
   // === Outline Level ===
@@ -1123,6 +1133,33 @@ const hyperlinkRevisionWrapperType = (node: XmlElement): TrackedChangeWrapperTyp
     default:
       return undefined;
   }
+};
+
+const OMML_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+
+/**
+ * A bare OMML element as an inline equation, or nothing when the child is not one.
+ *
+ * `m:oMath` and `m:oMathPara` have branches of their own. This is for the rest
+ * of `m:EG_OMathMathElements` — `m:f`, `m:acc`, `m:rad` and their siblings —
+ * which the schema admits wherever `m:oMath` is admitted. They carry no
+ * structure the editable model holds, so they travel as the markup they
+ * arrived as, exactly like the equations that do have a wrapper.
+ */
+const mathContentOf = (child: XmlElement): MathEquation | undefined => {
+  if (getNamespaceUri(child) !== OMML_NAMESPACE) {
+    return undefined;
+  }
+  const equation: MathEquation = {
+    type: "mathEquation",
+    display: "inline",
+    ommlXml: captureVerbatimXml(child),
+  };
+  const plainText = extractMathText(child);
+  if (plainText) {
+    equation.plainText = plainText;
+  }
+  return equation;
 };
 
 const isHyperlinkChildContent = (
@@ -1792,6 +1829,33 @@ function parseParagraphContents(
         break;
       }
 
+      case "bdo":
+      case "dir": {
+        // A bidirectional embedding (`w:dir`) or override (`w:bdo`). Both hold
+        // paragraph content and change only how it is laid out, so the
+        // recursion is the ordinary one and the wrapper carries its direction.
+        const direction = getAttribute(child, "w", "val");
+        const wrapper: BidiWrapper = {
+          type: "bidiWrapper",
+          control: localName === "bdo" ? BIDI_CONTROLS.override : BIDI_CONTROLS.embedding,
+          content: parseParagraphContents(
+            child,
+            styles,
+            theme,
+            null,
+            rels,
+            media,
+            trackedContext,
+            inScopeXmlns,
+          ),
+        };
+        if (direction === "ltr" || direction === "rtl") {
+          wrapper.direction = direction;
+        }
+        contents.push(wrapper);
+        break;
+      }
+
       case "oMath":
       case "oMathPara": {
         // Math equations — store raw OMML XML and extract text fallback
@@ -1810,9 +1874,19 @@ function parseParagraphContents(
         break;
       }
 
-      default:
-        // Unknown element - skip
+      default: {
+        // A bare OMML element is paragraph content in its own right: every
+        // group that admits `m:oMath` also admits `m:EG_OMathMathElements`,
+        // so `<w:ins><m:f/></w:ins>` is a tracked insertion of a fraction
+        // with no `m:oMath` around it. Reading only the wrapper left the
+        // revision in the document with its content gone, which is a reviewer
+        // accepting an edit that is no longer there.
+        const mathElement = mathContentOf(child);
+        if (mathElement !== undefined) {
+          contents.push(mathElement);
+        }
         break;
+      }
     }
   }
 
@@ -2272,6 +2346,9 @@ const getParagraphContentText = (content: ParagraphContent): string => {
       return content.content.map(getParagraphContentText).join("");
     case "insertion":
     case "moveTo":
+    // A bidirectional wrapper changes how its text is laid out and not what
+    // the text is, so plain text reads straight through it.
+    case "bidiWrapper":
       return content.content.map(getParagraphContentText).join("");
     case "deletion":
     case "moveFrom":

@@ -47,6 +47,7 @@ import type {
   BookmarkStart,
 } from "../types/document";
 import { parseBookmarkEnd, parseBookmarkStart } from "./bookmarkParser";
+import { TABLE_LOOK_FLAGS } from "./tableLook";
 import {
   attachPendingRangeMarkers,
   attachTrailingRangeMarkers,
@@ -89,6 +90,7 @@ import {
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 import { parsePropertyChangeInfo, parseTrackedChangeInfo } from "./trackedChangeInfo";
+import { percentageSpelling, transitionalSlotEncoding } from "./transitionalSpelling";
 
 /**
  * Sanity cap on `w:gridSpan` (and the derived table column count). Word's
@@ -113,17 +115,44 @@ export function parseTableMeasurement(element: XmlElement | null): TableMeasurem
     return undefined;
   }
 
-  const typeStr = getAttribute(element, "w", "type") ?? "dxa";
+  const declared = getAttribute(element, "w", "type");
+  const declaredType: TableWidthType | undefined =
+    declared === "auto" || declared === "dxa" || declared === "nil" || declared === "pct"
+      ? declared
+      : undefined;
 
-  let type: TableWidthType = "dxa";
-  if (typeStr === "auto" || typeStr === "dxa" || typeStr === "nil" || typeStr === "pct") {
-    type = typeStr;
-  }
+  const type = tableWidthType(element, declaredType);
 
-  const value = parseTableMeasurementValue(element, type) ?? 0;
-
-  return { value, type };
+  return { value: parseTableMeasurementValue(element, type) ?? 0, type };
 }
+
+/**
+ * What unit `w:w` counts in.
+ *
+ * `w:type` is optional on `CT_TblWidth` and the schema gives it no default, so
+ * reading an absent one as `dxa` turned `w:w="50%"` into 50 twips: a
+ * full-width table became a hairline. `w:w` is `ST_MeasurementOrPercent`, so a
+ * value spelled with a `%` is a percentage whatever `w:type` says — the
+ * spelling carries its own unit, and no number of twips is ever written that
+ * way. `auto` and `nil` are left alone: neither reads `w:w` as a width at all.
+ */
+const tableWidthType = (
+  element: XmlElement,
+  declared: TableWidthType | undefined,
+): TableWidthType => {
+  if (declared === "auto" || declared === "nil") {
+    return declared;
+  }
+  const raw = getAttribute(element, "w", "w");
+  const spelledAsPercent = raw !== null && percentageSpelling(raw) !== undefined;
+  const slotTakesPercent =
+    transitionalSlotEncoding(element.namespaceUri, getLocalName(element.name), "w")?.percent !==
+    undefined;
+  if (spelledAsPercent && slotTakesPercent) {
+    return "pct";
+  }
+  return declared ?? "dxa";
+};
 
 /**
  * Parse width from an element (shorthand for common case)
@@ -275,7 +304,13 @@ export function parseCellMargins(marginsElement: XmlElement | null): CellMargins
 // ============================================================================
 
 /**
- * Parse table look flags (w:tblLook)
+ * Read a `w:tblLook` (the only reader; `styleParser` calls this one).
+ *
+ * What the author wrote, and nothing more: `w:val` verbatim and each flag as
+ * stated, absent, `false` or `true`. Folding `w:val`'s bits into the flags here
+ * would forget which of the two the document said, and writing the result back
+ * would invent attributes the author never had. `resolveTableLook` owns the
+ * other direction.
  *
  * @param lookElement - The w:tblLook element
  * @returns Parsed table look or undefined
@@ -287,60 +322,15 @@ export function parseTableLook(lookElement: XmlElement | null): TableLook | unde
 
   const look: TableLook = {};
 
-  // Parse individual flags
-  if (parseOnOffAttribute(lookElement, "w", "firstRow") === true) {
-    look.firstRow = true;
-  }
-
-  if (parseOnOffAttribute(lookElement, "w", "lastRow") === true) {
-    look.lastRow = true;
-  }
-
-  if (parseOnOffAttribute(lookElement, "w", "firstColumn") === true) {
-    look.firstColumn = true;
-  }
-
-  if (parseOnOffAttribute(lookElement, "w", "lastColumn") === true) {
-    look.lastColumn = true;
-  }
-
-  if (parseOnOffAttribute(lookElement, "w", "noHBand") === true) {
-    look.noHBand = true;
-  }
-
-  if (parseOnOffAttribute(lookElement, "w", "noVBand") === true) {
-    look.noVBand = true;
-  }
-
-  // Also check for the val attribute (hexadecimal flags)
   const val = getAttribute(lookElement, "w", "val");
-  if (val) {
-    const flags = Number.parseInt(val, 16);
-    if (!Number.isNaN(flags)) {
-      // oxlint-disable-next-line no-bitwise -- OOXML tblLook hex flag bit test
-      if (flags & 0x00_20) {
-        look.firstRow = true;
-      }
-      // oxlint-disable-next-line no-bitwise -- OOXML tblLook hex flag bit test
-      if (flags & 0x00_40) {
-        look.lastRow = true;
-      }
-      // oxlint-disable-next-line no-bitwise -- OOXML tblLook hex flag bit test
-      if (flags & 0x00_80) {
-        look.firstColumn = true;
-      }
-      // oxlint-disable-next-line no-bitwise -- OOXML tblLook hex flag bit test
-      if (flags & 0x01_00) {
-        look.lastColumn = true;
-      }
-      // oxlint-disable-next-line no-bitwise -- OOXML tblLook hex flag bit test
-      if (flags & 0x02_00) {
-        look.noHBand = true;
-      }
-      // oxlint-disable-next-line no-bitwise -- OOXML tblLook hex flag bit test
-      if (flags & 0x04_00) {
-        look.noVBand = true;
-      }
+  if (val !== null && val !== "") {
+    look.val = val;
+  }
+
+  for (const flag of TABLE_LOOK_FLAGS) {
+    const stated = parseOnOffAttribute(lookElement, "w", flag);
+    if (stated !== undefined) {
+      look[flag] = stated;
     }
   }
 
@@ -1570,10 +1560,17 @@ export function parseTable(
     table.columnWidths = columnWidths;
   }
   // The grid element travels with the table's formatting, so a save that did
-  // not resize a column writes it back with whatever it carried — a
-  // `w:tblGridChange` among it, which nothing in the model represents.
+  // not resize a column writes it back with whatever it carried. A save that
+  // did resize one rebuilds the grid, and `w:tblGridChange` — the tracked
+  // record of the grid a reviewer replaced — has to travel on its own to
+  // survive that rebuild.
   if (gridElement) {
-    table.formatting = { ...table.formatting, gridSourceXml: captureVerbatimXml(gridElement) };
+    const gridChange = findChild(gridElement, "w", "tblGridChange");
+    table.formatting = {
+      ...table.formatting,
+      gridSourceXml: captureVerbatimXml(gridElement),
+      ...(gridChange ? { gridChangeXml: captureVerbatimXml(gridChange) } : {}),
+    };
   }
 
   // Parse rows, threading the table's own xmlns down the in-scope set.

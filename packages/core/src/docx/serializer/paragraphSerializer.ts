@@ -94,13 +94,20 @@ type SerializeParagraphFormattingOptions = {
 type ParagraphPropertySource = NonNullable<ReturnType<typeof getParagraphPropertySource>>;
 
 const RESERVED_PARAGRAPH_PROPERTY_CHILDREN = new Set(["pPrChange", "sectPr"]);
+/**
+ * Revision records a captured `w:pPr` may not carry into a replay.
+ *
+ * `w:numberingChange` is not among them: the model holds it
+ * (`ParagraphFormatting.numberingChangeXml`) and the serializer writes it
+ * back, so both paths keep it. Refusing the capture used to force a rebuild
+ * that could not write it, which turned a replay gate into a lost revision.
+ */
 const RESERVED_PARAGRAPH_CAPTURE_CHILDREN: ReadonlySet<string> = new Set([
   ...RESERVED_PARAGRAPH_PROPERTY_CHILDREN,
   ...PARAGRAPH_MARK_CHANGE_KINDS,
   "cellDel",
   "cellIns",
   "cellMerge",
-  "numberingChange",
   "rPrChange",
   "tblGridChange",
   "tblPrChange",
@@ -194,7 +201,7 @@ const PARAGRAPH_MARK_BASE_CHILDREN: ReadonlySet<string> = new Set([
   "oMath",
 ]);
 const PARAGRAPH_NESTED_PROPERTY_CHILDREN: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ["numPr", new Set(["ilvl", "numId"])],
+  ["numPr", new Set(["ilvl", "numId", "numberingChange"])],
   ["pBdr", new Set(["top", "left", "bottom", "right", "between", "bar"])],
   ["tabs", new Set(["tab"])],
   ["rPr", PARAGRAPH_MARK_BASE_CHILDREN],
@@ -1092,6 +1099,18 @@ function serializeParagraphContent(
       return serializeMoveRangeStart("moveToRangeStart", content as MoveToRangeStart);
     case "moveToRangeEnd":
       return `<w:moveToRangeEnd ${markupRangeAttributes(content).join(" ")}/>`;
+    case "bidiWrapper": {
+      // `w:dir` is the embedding and `w:bdo` the override; the schema gives
+      // them the same content model, which is paragraph content, so the
+      // children go back through this function.
+      const tag = content.control === "override" ? "bdo" : "dir";
+      const value =
+        content.direction === undefined ? "" : ` w:val="${escapeXml(content.direction)}"`;
+      const inner = content.content
+        .map((child) => serializeParagraphContent(child, explicitCommentReferenceIds))
+        .join("");
+      return `<w:${tag}${value}>${inner}</w:${tag}>`;
+    }
     case "mathEquation":
       // Round-trip the raw OMML XML directly
       return content.ommlXml || "";
@@ -1230,64 +1249,6 @@ export function hasParagraphContent(paragraph: Paragraph): boolean {
  */
 export function hasParagraphFormatting(paragraph: Paragraph): boolean {
   return paragraph.formatting !== undefined && Object.keys(paragraph.formatting).length > 0;
-}
-
-/**
- * Get plain text from a paragraph (for comparison/debugging)
- */
-export function getParagraphPlainText(paragraph: Paragraph): string {
-  const texts: string[] = [];
-
-  for (const content of paragraph.content) {
-    if (content.type === "run") {
-      for (const item of content.content) {
-        if (item.type === "text") {
-          texts.push(item.text);
-        } else if (item.type === "tab") {
-          texts.push("\t");
-        } else if (item.type === "break") {
-          texts.push("\n");
-        }
-      }
-    } else if (content.type === "hyperlink") {
-      for (const child of content.children) {
-        if (child.type === "run") {
-          for (const item of child.content) {
-            if (item.type === "text") {
-              texts.push(item.text);
-            }
-          }
-        }
-      }
-    } else if (
-      content.type === "simpleField" ||
-      content.type === "inlineSdt" ||
-      content.type === "insertion" ||
-      content.type === "deletion" ||
-      content.type === "moveFrom" ||
-      content.type === "moveTo"
-    ) {
-      for (const item of content.content) {
-        if (item.type === "run") {
-          for (const subItem of item.content) {
-            if (subItem.type === "text") {
-              texts.push(subItem.text);
-            }
-          }
-        }
-      }
-    } else if (content.type === "complexField") {
-      for (const run of content.fieldResult) {
-        for (const item of run.content) {
-          if (item.type === "text") {
-            texts.push(item.text);
-          }
-        }
-      }
-    }
-  }
-
-  return texts.join("");
 }
 
 /**
