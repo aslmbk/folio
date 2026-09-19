@@ -36,12 +36,13 @@ import type {
   BlockContent,
   RunPropertyChange,
 } from "../../types/document";
-import { requiresXmlSpacePreserve } from "@stll/docx-core";
+import { escapeXmlAttribute, escapeXmlText, requiresXmlSpacePreserve } from "@stll/docx-core";
 import { isValidHexColor } from "../../utils/colorResolver";
 import { THEME_COLOR_TO_DRAWING_SCHEME } from "../drawingUtils";
 import { serializeGraphicFrameLocks } from "../graphicFrameLocks";
 import { canReplayEditableImageRawXml } from "../imageRawXml";
 import { serializeNonVisualDrawingNames } from "../nonVisualDrawingProps";
+import { DECORATIVE_EXTENSION_URI, DECORATIVE_NAMESPACE } from "../imageParser";
 // oxlint-disable-next-line import/no-cycle -- OOXML model is mutually recursive: shape textboxes hold paragraphs, paragraphs hold runs
 import { serializeParagraph } from "./paragraphSerializer";
 import { serializeTable } from "./tableSerializer";
@@ -50,7 +51,7 @@ import {
   getSingularRunPropertyChange,
   serializeTrackedChangeAttributes,
 } from "./trackedChangeAttributes";
-import { escapeXml, intAttr } from "./xmlUtils";
+import { intAttr } from "./xmlUtils";
 
 // ============================================================================
 // CONSTANTS
@@ -120,7 +121,7 @@ function serializeTextContent(content: TextContent): string {
 
   const spaceAttr = needsPreserve ? ' xml:space="preserve"' : "";
 
-  return `<w:t${spaceAttr}>${escapeXml(content.text)}</w:t>`;
+  return `<w:t${spaceAttr}>${escapeXmlText(content.text)}</w:t>`;
 }
 
 /**
@@ -132,10 +133,12 @@ function serializeTabContent(content: TabContent): string {
   }
   const attrs = [
     content.positional.relativeTo
-      ? ` w:relativeTo="${escapeXml(content.positional.relativeTo)}"`
+      ? ` w:relativeTo="${escapeXmlAttribute(content.positional.relativeTo)}"`
       : "",
-    content.positional.alignment ? ` w:alignment="${escapeXml(content.positional.alignment)}"` : "",
-    content.positional.leader ? ` w:leader="${escapeXml(content.positional.leader)}"` : "",
+    content.positional.alignment
+      ? ` w:alignment="${escapeXmlAttribute(content.positional.alignment)}"`
+      : "",
+    content.positional.leader ? ` w:leader="${escapeXmlAttribute(content.positional.leader)}"` : "",
   ].join("");
   return `<w:ptab${attrs}/>`;
 }
@@ -172,8 +175,8 @@ function serializeSymbolContent(content: SymbolContent): string {
   // Both attributes are optional on `CT_Sym`. An empty one is the parser's
   // record of an attribute the source did not write, so writing it back as
   // `w:font=""` would invent a value the document never had.
-  const font = content.font === "" ? "" : ` w:font="${escapeXml(content.font)}"`;
-  const char = content.char === "" ? "" : ` w:char="${escapeXml(content.char)}"`;
+  const font = content.font === "" ? "" : ` w:font="${escapeXmlAttribute(content.font)}"`;
+  const char = content.char === "" ? "" : ` w:char="${escapeXmlAttribute(content.char)}"`;
   return `<w:sym${font}${char}/>`;
 }
 
@@ -213,7 +216,7 @@ function serializeInstrText(content: InstrTextContent): string {
 
   const spaceAttr = needsPreserve ? ' xml:space="preserve"' : "";
 
-  return `<w:instrText${spaceAttr}>${escapeXml(content.text)}</w:instrText>`;
+  return `<w:instrText${spaceAttr}>${escapeXmlText(content.text)}</w:instrText>`;
 }
 
 /**
@@ -240,15 +243,15 @@ function serializeDrawingColor(color: ColorValue | undefined): string {
     return "";
   }
   if (color.rgb && isValidHexColor(color.rgb)) {
-    return `<a:srgbClr val="${escapeXml(color.rgb.replace("#", ""))}"/>`;
+    return `<a:srgbClr val="${escapeXmlAttribute(color.rgb.replace("#", ""))}"/>`;
   }
   if (color.themeColor) {
     const schemeColor = THEME_COLOR_TO_DRAWING_SCHEME[color.themeColor];
     let clr = `<a:schemeClr val="${schemeColor}"`;
     if (color.themeTint) {
-      clr += `><a:tint val="${escapeXml(color.themeTint)}"/></a:schemeClr>`;
+      clr += `><a:tint val="${escapeXmlAttribute(color.themeTint)}"/></a:schemeClr>`;
     } else if (color.themeShade) {
-      clr += `><a:shade val="${escapeXml(color.themeShade)}"/></a:schemeClr>`;
+      clr += `><a:shade val="${escapeXmlAttribute(color.themeShade)}"/></a:schemeClr>`;
     } else {
       clr += `/>`;
     }
@@ -411,7 +414,7 @@ function serializeWrap(wrap: ImageWrap): string {
 function serializePicGraphic(image: Image, imageRId: string, sharedId: string): string {
   const cx = image.size.width;
   const cy = image.size.height;
-  const rId = escapeXml(imageRId);
+  const rId = escapeXmlAttribute(imageRId);
   const id = sharedId;
   const name = image.filename || `image${id}`;
 
@@ -461,7 +464,7 @@ function serializePicGraphic(image: Image, imageRId: string, sharedId: string): 
     '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     "<pic:nvPicPr>",
-    `<pic:cNvPr id="${id}" name="${escapeXml(name)}"${image.alt ? ` descr="${escapeXml(image.alt)}"` : ""}/>`,
+    `<pic:cNvPr id="${id}" name="${escapeXmlAttribute(name)}"${image.alt ? ` descr="${escapeXmlAttribute(image.alt)}"` : ""}/>`,
     "<pic:cNvPicPr/>",
     "</pic:nvPicPr>",
     "<pic:blipFill>",
@@ -505,6 +508,24 @@ function serializeWrapDistanceAttrs(wrap: ImageWrap | undefined): string {
 }
 
 /**
+ * Serialize the `wp:docPr` extension list.
+ *
+ * The decorative flag is the one extension folio models; every other `a:ext`
+ * the source carried is replayed as it was captured, in its original order,
+ * because an extension dropped on save is a fact the document had and lost.
+ * The decorative extension goes first: it is the one folio may have added.
+ */
+function serializeDocPrExtensions(image: Image): string {
+  const preserved = image.docPrExtensions ?? [];
+  const decorative =
+    image.decorative === undefined
+      ? ""
+      : `<a:ext uri="${DECORATIVE_EXTENSION_URI}"><adec:decorative xmlns:adec="${DECORATIVE_NAMESPACE}" val="${image.decorative ? "1" : "0"}"/></a:ext>`;
+  const entries = `${decorative}${preserved.join("")}`;
+  return entries ? `<a:extLst>${entries}</a:extLst>` : "";
+}
+
+/**
  * Serialize drawing/image content (w:drawing) to full DrawingML XML
  */
 function serializeDrawingContent(content: DrawingContent): string {
@@ -528,15 +549,19 @@ function serializeDrawingContent(content: DrawingContent): string {
     ...(image.alt !== undefined ? { alt: image.alt } : {}),
     ...(image.title !== undefined ? { title: image.title } : {}),
   });
-  const hlinkClick = image.hlinkRId ? `<a:hlinkClick r:id="${escapeXml(image.hlinkRId)}"/>` : "";
-  const inlineDocPrAttrs = `id="${docPrId}"${docPrNames}${image.decorative ? ' hidden="1"' : ""}`;
-  const inlineDocPr = hlinkClick
-    ? `<wp:docPr ${inlineDocPrAttrs}>${hlinkClick}</wp:docPr>`
-    : `<wp:docPr ${inlineDocPrAttrs}/>`;
-  const anchorDocPrAttrs = `id="${docPrId}"${docPrNames}`;
-  const anchorDocPr = hlinkClick
-    ? `<wp:docPr ${anchorDocPrAttrs}>${hlinkClick}</wp:docPr>`
-    : `<wp:docPr ${anchorDocPrAttrs}/>`;
+  const hlinkClick = image.hlinkRId
+    ? `<a:hlinkClick r:id="${escapeXmlAttribute(image.hlinkRId)}"/>`
+    : "";
+  // `@hidden` is the drawing not being displayed; it says nothing about
+  // whether the image carries information. One `wp:docPr` for both anchorings:
+  // an attribute written on one and omitted on the other loses the fact the
+  // moment an inline image is anchored, or the reverse.
+  const docPrHidden = image.hidden === undefined ? "" : ` hidden="${image.hidden ? "1" : "0"}"`;
+  const docPrAttrs = `id="${docPrId}"${docPrNames}${docPrHidden}`;
+  const docPrChildren = `${hlinkClick}${serializeDocPrExtensions(image)}`;
+  const docPr = docPrChildren
+    ? `<wp:docPr ${docPrAttrs}>${docPrChildren}</wp:docPr>`
+    : `<wp:docPr ${docPrAttrs}/>`;
 
   const graphicFramePr = serializeGraphicFrameLocks(image.frameLocks);
 
@@ -553,7 +578,7 @@ function serializeDrawingContent(content: DrawingContent): string {
       `<wp:inline${wrapDistanceAttrs}>`,
       `<wp:extent cx="${intAttr(cx)}" cy="${intAttr(cy)}"/>`,
       effectExtentEl,
-      inlineDocPr,
+      docPr,
       graphicFramePr,
       graphic,
       "</wp:inline>",
@@ -580,7 +605,7 @@ function serializeDrawingContent(content: DrawingContent): string {
     `<wp:extent cx="${intAttr(cx)}" cy="${intAttr(cy)}"/>`,
     effectExtentEl,
     wrap,
-    anchorDocPr,
+    docPr,
     graphicFramePr,
     graphic,
     "</wp:anchor>",
@@ -623,7 +648,10 @@ function serializeGeometryAdjustments(shape: ShapeContent["shape"]): string {
     return "<a:avLst/>";
   }
   const adjustments = shape.geometryAdjustments
-    .map(({ name, formula }) => `<a:gd name="${escapeXml(name)}" fmla="${escapeXml(formula)}"/>`)
+    .map(
+      ({ name, formula }) =>
+        `<a:gd name="${escapeXmlAttribute(name)}" fmla="${escapeXmlAttribute(formula)}"/>`,
+    )
     .join("");
   return `<a:avLst>${adjustments}</a:avLst>`;
 }
@@ -711,12 +739,12 @@ function serializeShapeContent(content: ShapeContent): string {
       autoFitXml = "<a:noAutofit/>";
     }
     const wordArtWarp = tb.wordArt?.preset
-      ? `<a:prstTxWarp prst="${escapeXml(tb.wordArt.preset)}">${
+      ? `<a:prstTxWarp prst="${escapeXmlAttribute(tb.wordArt.preset)}">${
           tb.wordArt.adjustments && tb.wordArt.adjustments.length > 0
             ? `<a:avLst>${tb.wordArt.adjustments
                 .map(
                   ({ name, formula }) =>
-                    `<a:gd name="${escapeXml(name)}" fmla="${escapeXml(formula)}"/>`,
+                    `<a:gd name="${escapeXmlAttribute(name)}" fmla="${escapeXmlAttribute(formula)}"/>`,
                 )
                 .join("")}</a:avLst>`
             : "<a:avLst/>"
