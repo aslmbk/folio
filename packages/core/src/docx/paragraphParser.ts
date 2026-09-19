@@ -22,9 +22,6 @@ import type {
   ComplexField,
   TextFormatting,
   Theme,
-  ColorValue,
-  BorderSpec,
-  ShadingProperties,
   TabStop,
   RelationshipMap,
   MediaFile,
@@ -52,25 +49,23 @@ import { markerFormattingFromLevel, numberingLevelHasMarkerSlot } from "./number
 import type { NumberingMap } from "./numberingParser";
 import { isNumberingReference } from "./numberingReference";
 import {
-  BorderStyleSchema,
   FrameWrapSchema,
   FrameXAlignSchema,
   FrameYAlignSchema,
   LineSpacingRuleSchema,
   ParagraphAlignmentSchema,
-  ShadingPatternSchema,
   TabLeaderSchema,
   TabStopAlignmentSchema,
-  ThemeColorSlotSchema,
   narrowEnum,
 } from "./parserEnums";
 import { consolidateParagraphContent } from "./runConsolidator";
 import { parseRun, parseRunProperties } from "./runParser";
 import { parseSdtProperties } from "./sdtProperties";
 import { parseSectionProperties } from "./sectionParser";
-import { isValidHexColor } from "../utils/colorResolver";
 import type { StyleMap } from "./styleParser";
 import { captureVerbatimXml } from "./verbatimCapture";
+import { parseShading } from "./shadingParser";
+import { parseBorderSpec } from "./borderParser";
 import {
   cloneElement,
   findChild,
@@ -88,6 +83,7 @@ import {
   parseNumericAttribute,
   selectAlternateContentBranch,
   WORDPROCESSINGML_NAMESPACE_URIS,
+  parseOnOffAttribute,
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 import { parsePropertyChangeInfo, parseTrackedChangeInfo } from "./trackedChangeInfo";
@@ -138,137 +134,6 @@ function extractMathText(el: XmlElement): string {
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
-
-/**
- * Parse color value from attributes
- */
-function parseColorValue(
-  rgb: string | null,
-  themeColor: string | null,
-  themeTint: string | null,
-  themeShade: string | null,
-): ColorValue {
-  const color: ColorValue = {};
-
-  if (rgb && rgb !== "auto") {
-    color.rgb = rgb;
-  } else if (rgb === "auto") {
-    color.auto = true;
-  }
-
-  const validatedThemeColor = narrowEnum(themeColor, ThemeColorSlotSchema);
-  if (validatedThemeColor) {
-    color.themeColor = validatedThemeColor;
-  }
-
-  if (themeTint) {
-    color.themeTint = themeTint;
-  }
-
-  if (themeShade) {
-    color.themeShade = themeShade;
-  }
-
-  return color;
-}
-
-/**
- * Parse shading properties (w:shd)
- */
-function parseShadingProperties(shd: XmlElement | null): ShadingProperties | undefined {
-  if (!shd) {
-    return undefined;
-  }
-
-  const props: ShadingProperties = {};
-
-  // `w:color` and `w:fill` are ST_HexColor: `auto` or hex digits. Both values
-  // are resolved straight into a rendered style declaration, so a value that is
-  // not a colour is dropped here rather than carried through the model.
-  const color = getAttribute(shd, "w", "color");
-  if (color && color !== "auto" && isValidHexColor(color)) {
-    props.color = { rgb: color };
-  }
-
-  const fill = getAttribute(shd, "w", "fill");
-  if (fill && fill !== "auto" && isValidHexColor(fill)) {
-    props.fill = { rgb: fill };
-  }
-
-  const themeFill = getAttribute(shd, "w", "themeFill");
-  const validatedThemeFill = narrowEnum(themeFill, ThemeColorSlotSchema);
-  if (validatedThemeFill) {
-    props.fill = props.fill || {};
-    props.fill.themeColor = validatedThemeFill;
-  }
-
-  const themeFillTint = getAttribute(shd, "w", "themeFillTint");
-  if (themeFillTint && props.fill) {
-    props.fill.themeTint = themeFillTint;
-  }
-
-  const themeFillShade = getAttribute(shd, "w", "themeFillShade");
-  if (themeFillShade && props.fill) {
-    props.fill.themeShade = themeFillShade;
-  }
-
-  const pattern = narrowEnum(getAttribute(shd, "w", "val"), ShadingPatternSchema);
-  if (pattern) {
-    props.pattern = pattern;
-  }
-
-  return Object.keys(props).length > 0 ? props : undefined;
-}
-
-/**
- * Parse border specification (w:top, w:bottom, w:left, w:right, etc.)
- */
-function parseBorderSpec(border: XmlElement | null): BorderSpec | undefined {
-  if (!border) {
-    return undefined;
-  }
-
-  const rawStyle = getAttribute(border, "w", "val");
-  if (!rawStyle) {
-    return undefined;
-  }
-
-  const style = narrowEnum(rawStyle, BorderStyleSchema) ?? rawStyle;
-  const spec: BorderSpec = { style };
-
-  const colorVal = getAttribute(border, "w", "color");
-  const themeColor = getAttribute(border, "w", "themeColor");
-  if (colorVal || themeColor) {
-    spec.color = parseColorValue(
-      colorVal,
-      themeColor,
-      getAttribute(border, "w", "themeTint"),
-      getAttribute(border, "w", "themeShade"),
-    );
-  }
-
-  const sz = parseNumericAttribute(border, "w", "sz");
-  if (sz !== undefined) {
-    spec.size = sz;
-  }
-
-  const space = parseNumericAttribute(border, "w", "space");
-  if (space !== undefined) {
-    spec.space = space;
-  }
-
-  const shadowAttr = getAttribute(border, "w", "shadow");
-  if (shadowAttr) {
-    spec.shadow = shadowAttr === "1" || shadowAttr === "true";
-  }
-
-  const frame = getAttribute(border, "w", "frame");
-  if (frame) {
-    spec.frame = frame === "1" || frame === "true";
-  }
-
-  return spec;
-}
 
 /**
  * Parse tab stops (w:tabs)
@@ -591,14 +456,14 @@ export function parseParagraphProperties(
       formatting.lineSpacingRule = lineRule;
     }
 
-    const beforeAuto = getAttribute(spacing, "w", "beforeAutospacing");
-    if (beforeAuto) {
-      formatting.beforeAutospacing = beforeAuto === "1" || beforeAuto === "true";
+    const beforeAutospacing = parseOnOffAttribute(spacing, "w", "beforeAutospacing");
+    if (beforeAutospacing !== undefined) {
+      formatting.beforeAutospacing = beforeAutospacing;
     }
 
-    const afterAuto = getAttribute(spacing, "w", "afterAutospacing");
-    if (afterAuto) {
-      formatting.afterAutospacing = afterAuto === "1" || afterAuto === "true";
+    const afterAutospacing = parseOnOffAttribute(spacing, "w", "afterAutospacing");
+    if (afterAutospacing !== undefined) {
+      formatting.afterAutospacing = afterAutospacing;
     }
   }
 
@@ -682,7 +547,7 @@ export function parseParagraphProperties(
   // === Shading ===
   const shd = propertyChildren.shd;
   if (shd) {
-    const shadingResult = parseShadingProperties(shd);
+    const shadingResult = parseShading(shd);
     if (shadingResult !== undefined) {
       formatting.shading = shadingResult;
     }
@@ -1394,14 +1259,12 @@ function parseSimpleField(
   };
 
   // Check for fldLock
-  const fldLock = getAttribute(node, "w", "fldLock");
-  if (fldLock === "1" || fldLock === "true") {
+  if (parseOnOffAttribute(node, "w", "fldLock") === true) {
     field.fldLock = true;
   }
 
   // Check for dirty
-  const dirty = getAttribute(node, "w", "dirty");
-  if (dirty === "1" || dirty === "true") {
+  if (parseOnOffAttribute(node, "w", "dirty") === true) {
     field.dirty = true;
   }
 

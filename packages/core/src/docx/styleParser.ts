@@ -27,8 +27,6 @@ import type {
   TableRowFormatting,
   TableCellFormatting,
   ColorValue,
-  BorderSpec,
-  ShadingProperties,
   TabStop,
   TableBorders,
   TableCellBorders,
@@ -39,10 +37,8 @@ import type {
 import { resolveDefaultParagraphStyle } from "./defaultParagraphStyle";
 import { mergeParagraphFormatting } from "../utils/paragraphFormattingMerge";
 import { mergeStyleTextFormatting } from "../utils/textFormattingMerge";
-import { isValidHexColor } from "../utils/colorResolver";
 import { parseHorizontalScalePercent } from "../utils/horizontalScale";
 import {
-  BorderStyleSchema,
   ConditionalStyleTypeSchema,
   EmphasisMarkSchema,
   FontHintSchema,
@@ -50,7 +46,6 @@ import {
   HighlightColorSchema,
   LineSpacingRuleSchema,
   ParagraphAlignmentSchema,
-  ShadingPatternSchema,
   StyleTypeSchema,
   TableCellTextDirectionSchema,
   TableRowHeightRuleSchema,
@@ -63,6 +58,8 @@ import {
   narrowEnum,
 } from "./parserEnums";
 import { resolveThemeFontRef } from "./themeParser";
+import { parseShading } from "./shadingParser";
+import { parseBorderSpec } from "./borderParser";
 import {
   parseXmlDocument,
   findChild,
@@ -74,6 +71,7 @@ import {
   parseNumericAttribute,
   parseOnOffValue,
   parseTableMeasurementValue,
+  parseOnOffAttribute,
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 
@@ -204,7 +202,7 @@ function parseRunProperties(
   // Character shading
   const shd = findChild(rPr, "w", "shd");
   if (shd) {
-    const shadingResult = parseShadingProperties(shd);
+    const shadingResult = parseShading(shd);
     if (shadingResult) {
       formatting.shading = shadingResult;
     }
@@ -445,106 +443,6 @@ function parseColorValue(
 }
 
 /**
- * Parse shading properties (w:shd)
- */
-function parseShadingProperties(shd: XmlElement | null): ShadingProperties | undefined {
-  if (!shd) {
-    return undefined;
-  }
-
-  const props: ShadingProperties = {};
-
-  // `w:color` and `w:fill` are ST_HexColor: `auto` or hex digits. Both values
-  // are resolved straight into a rendered style declaration, so a value that is
-  // not a colour is dropped here rather than carried through the model.
-  const color = getAttribute(shd, "w", "color");
-  if (color && color !== "auto" && isValidHexColor(color)) {
-    props.color = { rgb: color };
-  }
-
-  const fill = getAttribute(shd, "w", "fill");
-  if (fill && fill !== "auto" && isValidHexColor(fill)) {
-    props.fill = { rgb: fill };
-  }
-
-  const themeFill = getAttribute(shd, "w", "themeFill");
-  const validatedThemeFill = narrowEnum(themeFill, ThemeColorSlotSchema);
-  if (validatedThemeFill) {
-    if (!props.fill) {
-      props.fill = {};
-    }
-    props.fill.themeColor = validatedThemeFill;
-  }
-
-  const themeFillTint = getAttribute(shd, "w", "themeFillTint");
-  if (themeFillTint && props.fill) {
-    props.fill.themeTint = themeFillTint;
-  }
-
-  const themeFillShade = getAttribute(shd, "w", "themeFillShade");
-  if (themeFillShade && props.fill) {
-    props.fill.themeShade = themeFillShade;
-  }
-
-  const pattern = narrowEnum(getAttribute(shd, "w", "val"), ShadingPatternSchema);
-  if (pattern) {
-    props.pattern = pattern;
-  }
-
-  return Object.keys(props).length > 0 ? props : undefined;
-}
-
-/**
- * Parse border specification
- */
-function parseBorderSpec(border: XmlElement | null): BorderSpec | undefined {
-  if (!border) {
-    return undefined;
-  }
-
-  const rawStyle = getAttribute(border, "w", "val");
-  if (!rawStyle) {
-    return undefined;
-  }
-
-  const style = narrowEnum(rawStyle, BorderStyleSchema) ?? rawStyle;
-  const spec: BorderSpec = { style };
-
-  const colorVal = getAttribute(border, "w", "color");
-  const themeColor = getAttribute(border, "w", "themeColor");
-  if (colorVal || themeColor) {
-    spec.color = parseColorValue(
-      colorVal,
-      themeColor,
-      getAttribute(border, "w", "themeTint"),
-      getAttribute(border, "w", "themeShade"),
-    );
-  }
-
-  const sz = parseNumericAttribute(border, "w", "sz");
-  if (sz !== undefined) {
-    spec.size = sz;
-  }
-
-  const space = parseNumericAttribute(border, "w", "space");
-  if (space !== undefined) {
-    spec.space = space;
-  }
-
-  const shadowAttr = getAttribute(border, "w", "shadow");
-  if (shadowAttr) {
-    spec.shadow = parseOnOffValue(shadowAttr) ?? false;
-  }
-
-  const frame = getAttribute(border, "w", "frame");
-  if (frame) {
-    spec.frame = parseOnOffValue(frame) ?? false;
-  }
-
-  return spec;
-}
-
-/**
  * Parse tab stops (w:tabs)
  */
 function parseTabStops(tabs: XmlElement | null): TabStop[] | undefined {
@@ -637,14 +535,14 @@ function parseParagraphProperties(
       formatting.lineSpacingRule = lineRule;
     }
 
-    const beforeAuto = getAttribute(spacing, "w", "beforeAutospacing");
-    if (beforeAuto) {
-      formatting.beforeAutospacing = parseOnOffValue(beforeAuto) ?? false;
+    const beforeAutospacing = parseOnOffAttribute(spacing, "w", "beforeAutospacing");
+    if (beforeAutospacing !== undefined) {
+      formatting.beforeAutospacing = beforeAutospacing;
     }
 
-    const afterAuto = getAttribute(spacing, "w", "afterAutospacing");
-    if (afterAuto) {
-      formatting.afterAutospacing = parseOnOffValue(afterAuto) ?? false;
+    const afterAutospacing = parseOnOffAttribute(spacing, "w", "afterAutospacing");
+    if (afterAutospacing !== undefined) {
+      formatting.afterAutospacing = afterAutospacing;
     }
   }
 
@@ -710,7 +608,7 @@ function parseParagraphProperties(
   // Shading
   const shd = findChild(pPr, "w", "shd");
   if (shd) {
-    const shadingResult = parseShadingProperties(shd);
+    const shadingResult = parseShading(shd);
     if (shadingResult) {
       formatting.shading = shadingResult;
     }
@@ -1107,7 +1005,7 @@ function parseTableProperties(
   // Shading
   const shd = findChild(tblPr, "w", "shd");
   if (shd) {
-    const shadingResult = parseShadingProperties(shd);
+    const shadingResult = parseShading(shd);
     if (shadingResult) {
       formatting.shading = shadingResult;
     }
@@ -1218,7 +1116,7 @@ function parseTableCellProperties(
   // Shading
   const shd = findChild(tcPr, "w", "shd");
   if (shd) {
-    const shadingResult = parseShadingProperties(shd);
+    const shadingResult = parseShading(shd);
     if (shadingResult) {
       formatting.shading = shadingResult;
     }

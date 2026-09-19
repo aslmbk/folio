@@ -41,9 +41,6 @@ import type {
   ConditionalFormatStyle,
   Paragraph,
   Theme,
-  BorderSpec,
-  ShadingProperties,
-  ColorValue,
   RelationshipMap,
   MediaFile,
   BookmarkEnd,
@@ -61,16 +58,15 @@ import type { NumberingMap } from "./numberingParser";
 import { parseParagraph } from "./paragraphParser";
 import { enrichParagraphTextBoxes } from "./paragraphTextBoxEnrichment";
 import {
-  BorderStyleSchema,
   FloatingTableXSpecSchema,
   FloatingTableYSpecSchema,
-  ShadingPatternSchema,
   TableCellTextDirectionSchema,
-  ThemeColorSlotSchema,
   narrowEnum,
 } from "./parserEnums";
 import type { StyleMap } from "./styleParser";
 import { captureVerbatimXml } from "./verbatimCapture";
+import { parseBorderSpec } from "./borderParser";
+import { parseShading } from "./shadingParser";
 import {
   cloneElement,
   findChild,
@@ -84,6 +80,7 @@ import {
   parseTableMeasurementValue,
   parseBooleanElement,
   selectAlternateContentBranch,
+  parseOnOffAttribute,
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 import { parsePropertyChangeInfo, parseTrackedChangeInfo } from "./trackedChangeInfo";
@@ -140,67 +137,6 @@ function parseWidth(element: XmlElement | null): TableMeasurement | undefined {
  * @param element - Border element (w:top, w:bottom, etc.)
  * @returns Parsed border or undefined
  */
-export function parseBorderSpec(element: XmlElement | null): BorderSpec | undefined {
-  if (!element) {
-    return undefined;
-  }
-
-  const rawStyle = getAttribute(element, "w", "val") ?? "none";
-  const style = narrowEnum(rawStyle, BorderStyleSchema) ?? rawStyle;
-
-  const border: BorderSpec = { style };
-
-  // Size in eighths of a point
-  const sz = parseNumericAttribute(element, "w", "sz");
-  if (sz !== undefined) {
-    border.size = sz;
-  }
-
-  // Space from text in points
-  const space = parseNumericAttribute(element, "w", "space");
-  if (space !== undefined) {
-    border.space = space;
-  }
-
-  // Color (border uses w:color, not w:val)
-  const color = getAttribute(element, "w", "color");
-  const themeColor = getAttribute(element, "w", "themeColor");
-  const themeTint = getAttribute(element, "w", "themeTint");
-  const themeShade = getAttribute(element, "w", "themeShade");
-  if (color || themeColor || themeTint || themeShade) {
-    const colorVal: ColorValue = {};
-    if (color === "auto") {
-      colorVal.auto = true;
-    } else if (color !== null) {
-      colorVal.rgb = color;
-    }
-    const validatedThemeColor = narrowEnum(themeColor, ThemeColorSlotSchema);
-    if (validatedThemeColor) {
-      colorVal.themeColor = validatedThemeColor;
-    }
-    if (themeTint !== null) {
-      colorVal.themeTint = themeTint;
-    }
-    if (themeShade !== null) {
-      colorVal.themeShade = themeShade;
-    }
-    border.color = colorVal;
-  }
-
-  // Shadow effect
-  const shadow = getAttribute(element, "w", "shadow");
-  if (shadow === "1" || shadow === "true") {
-    border.shadow = true;
-  }
-
-  // Frame effect
-  const frame = getAttribute(element, "w", "frame");
-  if (frame === "1" || frame === "true") {
-    border.frame = true;
-  }
-
-  return border;
-}
 
 /**
  * Parse table borders (w:tblBorders or w:tcBorders)
@@ -329,60 +265,6 @@ export function parseCellMargins(marginsElement: XmlElement | null): CellMargins
 // SHADING PARSING
 // ============================================================================
 
-/**
- * Parse shading properties (w:shd)
- *
- * @param shdElement - The w:shd element
- * @returns Parsed shading or undefined
- */
-export function parseShading(shdElement: XmlElement | null): ShadingProperties | undefined {
-  if (!shdElement) {
-    return undefined;
-  }
-
-  const shading: ShadingProperties = {};
-
-  // Fill color (background)
-  const fillStr = getAttribute(shdElement, "w", "fill");
-  if (fillStr && fillStr !== "auto") {
-    shading.fill = { rgb: fillStr };
-  }
-
-  // Theme fill
-  const themeFill = narrowEnum(getAttribute(shdElement, "w", "themeFill"), ThemeColorSlotSchema);
-  if (themeFill) {
-    shading.fill = { themeColor: themeFill };
-
-    const themeFillTint = getAttribute(shdElement, "w", "themeFillTint");
-    if (themeFillTint) {
-      shading.fill.themeTint = themeFillTint;
-    }
-
-    const themeFillShade = getAttribute(shdElement, "w", "themeFillShade");
-    if (themeFillShade) {
-      shading.fill.themeShade = themeFillShade;
-    }
-  }
-
-  // Pattern color
-  const colorStr = getAttribute(shdElement, "w", "color");
-  if (colorStr && colorStr !== "auto") {
-    shading.color = { rgb: colorStr };
-  }
-
-  // Pattern value
-  const pattern = narrowEnum(getAttribute(shdElement, "w", "val"), ShadingPatternSchema);
-  if (pattern) {
-    shading.pattern = pattern;
-  }
-
-  if (Object.keys(shading).length === 0) {
-    return undefined;
-  }
-
-  return shading;
-}
-
 // ============================================================================
 // TABLE LOOK PARSING
 // ============================================================================
@@ -401,33 +283,27 @@ export function parseTableLook(lookElement: XmlElement | null): TableLook | unde
   const look: TableLook = {};
 
   // Parse individual flags
-  const firstRow = getAttribute(lookElement, "w", "firstRow");
-  if (firstRow === "1" || firstRow === "true") {
+  if (parseOnOffAttribute(lookElement, "w", "firstRow") === true) {
     look.firstRow = true;
   }
 
-  const lastRow = getAttribute(lookElement, "w", "lastRow");
-  if (lastRow === "1" || lastRow === "true") {
+  if (parseOnOffAttribute(lookElement, "w", "lastRow") === true) {
     look.lastRow = true;
   }
 
-  const firstColumn = getAttribute(lookElement, "w", "firstColumn");
-  if (firstColumn === "1" || firstColumn === "true") {
+  if (parseOnOffAttribute(lookElement, "w", "firstColumn") === true) {
     look.firstColumn = true;
   }
 
-  const lastColumn = getAttribute(lookElement, "w", "lastColumn");
-  if (lastColumn === "1" || lastColumn === "true") {
+  if (parseOnOffAttribute(lookElement, "w", "lastColumn") === true) {
     look.lastColumn = true;
   }
 
-  const noHBand = getAttribute(lookElement, "w", "noHBand");
-  if (noHBand === "1" || noHBand === "true") {
+  if (parseOnOffAttribute(lookElement, "w", "noHBand") === true) {
     look.noHBand = true;
   }
 
-  const noVBand = getAttribute(lookElement, "w", "noVBand");
-  if (noVBand === "1" || noVBand === "true") {
+  if (parseOnOffAttribute(lookElement, "w", "noVBand") === true) {
     look.noVBand = true;
   }
 
@@ -988,64 +864,52 @@ export function parseConditionalFormatStyle(
   const style: ConditionalFormatStyle = {};
 
   // Parse individual flags
-  const firstRow = getAttribute(cnfElement, "w", "firstRow");
-  if (firstRow === "1" || firstRow === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "firstRow") === true) {
     style.firstRow = true;
   }
 
-  const lastRow = getAttribute(cnfElement, "w", "lastRow");
-  if (lastRow === "1" || lastRow === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "lastRow") === true) {
     style.lastRow = true;
   }
 
-  const firstColumn = getAttribute(cnfElement, "w", "firstColumn");
-  if (firstColumn === "1" || firstColumn === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "firstColumn") === true) {
     style.firstColumn = true;
   }
 
-  const lastColumn = getAttribute(cnfElement, "w", "lastColumn");
-  if (lastColumn === "1" || lastColumn === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "lastColumn") === true) {
     style.lastColumn = true;
   }
 
-  const oddHBand = getAttribute(cnfElement, "w", "oddHBand");
-  if (oddHBand === "1" || oddHBand === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "oddHBand") === true) {
     style.oddHBand = true;
   }
 
-  const evenHBand = getAttribute(cnfElement, "w", "evenHBand");
-  if (evenHBand === "1" || evenHBand === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "evenHBand") === true) {
     style.evenHBand = true;
   }
 
-  const oddVBand = getAttribute(cnfElement, "w", "oddVBand");
-  if (oddVBand === "1" || oddVBand === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "oddVBand") === true) {
     style.oddVBand = true;
   }
 
-  const evenVBand = getAttribute(cnfElement, "w", "evenVBand");
-  if (evenVBand === "1" || evenVBand === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "evenVBand") === true) {
     style.evenVBand = true;
   }
 
   // Corner cells
-  const nwCell = getAttribute(cnfElement, "w", "firstRowFirstColumn");
-  if (nwCell === "1" || nwCell === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "firstRowFirstColumn") === true) {
     style.nwCell = true;
   }
 
-  const neCell = getAttribute(cnfElement, "w", "firstRowLastColumn");
-  if (neCell === "1" || neCell === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "firstRowLastColumn") === true) {
     style.neCell = true;
   }
 
-  const swCell = getAttribute(cnfElement, "w", "lastRowFirstColumn");
-  if (swCell === "1" || swCell === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "lastRowFirstColumn") === true) {
     style.swCell = true;
   }
 
-  const seCell = getAttribute(cnfElement, "w", "lastRowLastColumn");
-  if (seCell === "1" || seCell === "true") {
+  if (parseOnOffAttribute(cnfElement, "w", "lastRowLastColumn") === true) {
     style.seCell = true;
   }
 
