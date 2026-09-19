@@ -52,7 +52,13 @@ import type {
   Run,
   TrackedRunContent,
 } from "../types/content";
-import type { Document, HeaderFooterType, Watermark } from "../types/document";
+import type {
+  Document,
+  HeaderFooterType,
+  Style,
+  StyleDefinitions,
+  Watermark,
+} from "../types/document";
 import { applyReplyThreadMarkers } from "./commentReplyMarkers";
 import { parseHeaderFooterType } from "./headerFooterRefParser";
 import { withoutOrphanCommentRanges } from "./commentRangeIntegrity";
@@ -87,6 +93,7 @@ import { serializeNumberingXml } from "./serializer/numberingSerializer";
 import { readRootNamespaceBindings } from "./serializer/partNamespaces";
 import { serializeFontTableXml } from "./serializer/fontTableSerializer";
 import { serializeSettingsXml } from "./serializer/settingsSerializer";
+import { missingNoteReferenceStyles, noteReferenceNeeds } from "./noteReferenceStyles";
 import { serializeStyle, serializeStylesXml } from "./serializer/stylesSerializer";
 import { serializeThemeXml } from "./serializer/themeSerializer";
 import { escapeXml } from "./serializer/xmlUtils";
@@ -2504,6 +2511,50 @@ async function serializeNumberingIntoZip(
 
 const STYLES_PART_PATH = "word/styles.xml";
 const STYLES_CLOSE_ROOT = "</w:styles>";
+
+/**
+ * The style table a package folio creates starts from: `docDefaults` and
+ * `Normal`, and nothing else. A document that carries its own style table
+ * replaces this part wholesale.
+ */
+const SEED_STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>
+        <w:sz w:val="22"/>
+      </w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr>
+        <w:spacing w:after="200" w:line="276" w:lineRule="auto"/>
+      </w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+  </w:style>
+</w:styles>`;
+
+/**
+ * The seed part plus the reference styles this package's comments and notes
+ * need. A document with no style table of its own never reaches
+ * {@link styleDefinitionsToSerialize}, so without this its reference marks
+ * would carry a `w:rStyle` naming nothing — the defect
+ * `noteReferenceStyles.ts` exists to remove, on the one path that skips it.
+ */
+const seedStylesXmlWith = (missing: readonly Style[]): string => {
+  if (missing.length === 0) {
+    return SEED_STYLES_XML;
+  }
+  const rootClose = SEED_STYLES_XML.lastIndexOf(STYLES_CLOSE_ROOT);
+  return (
+    SEED_STYLES_XML.slice(0, rootClose) +
+    missing.map(serializeStyle).join("") +
+    SEED_STYLES_XML.slice(rootClose)
+  );
+};
 const STYLE_ID_PATTERN = /<w:style\b[^>]*?\bw:styleId="(?<id>[^"]+)"/gu;
 
 /**
@@ -2513,6 +2564,27 @@ const STYLE_ID_PATTERN = /<w:style\b[^>]*?\bw:styleId="(?<id>[^"]+)"/gu;
  * per-language clones a bilingual transform adds, are emitted before the root
  * close so paragraphs referencing them resolve on reopen.
  */
+/**
+ * The styles to write into a package folio is authoring: the model's, plus any
+ * reference character style the serializers are about to emit for this
+ * package's comments and notes but the style table does not define. See
+ * `noteReferenceStyles.ts` — the reference mark would otherwise carry a
+ * `w:rStyle` pointing at nothing.
+ *
+ * Only for a package folio writes from scratch. Repacking a document someone
+ * else authored preserves `word/styles.xml` byte for byte, and adding a
+ * definition there would rewrite a part the user never edited: their document,
+ * their style table, missing reference style included.
+ */
+const styleDefinitionsToSerialize = (doc: Document): StyleDefinitions | undefined => {
+  const styles = doc.package.styles;
+  if (!styles) {
+    return undefined;
+  }
+  const missing = missingNoteReferenceStyles(styles, noteReferenceNeeds(doc.package));
+  return missing.length === 0 ? styles : { ...styles, styles: [...styles.styles, ...missing] };
+};
+
 async function serializeAddedStylesIntoZip(
   doc: Document,
   originalZip: JSZip,
@@ -2839,28 +2911,7 @@ const createEmptyDocxZip = ({ creator, application }: DocumentPropertiesOptions)
   );
 
   // Minimal styles
-  zip.file(
-    "word/styles.xml",
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:docDefaults>
-    <w:rPrDefault>
-      <w:rPr>
-        <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>
-        <w:sz w:val="22"/>
-      </w:rPr>
-    </w:rPrDefault>
-    <w:pPrDefault>
-      <w:pPr>
-        <w:spacing w:after="200" w:line="276" w:lineRule="auto"/>
-      </w:pPr>
-    </w:pPrDefault>
-  </w:docDefaults>
-  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
-    <w:name w:val="Normal"/>
-  </w:style>
-</w:styles>`,
-  );
+  zip.file(STYLES_PART_PATH, SEED_STYLES_XML);
 
   // Core properties
   const now = new Date().toISOString();
@@ -2938,9 +2989,15 @@ const createDocumentSeedZip = async (
   const overrides: string[] = [];
   let nextRelationshipId = 2;
 
-  if (doc.package.styles) {
+  const styleDefinitions = styleDefinitionsToSerialize(doc);
+  if (styleDefinitions) {
     assertStyleNumberingReferences(doc);
-    zip.file("word/styles.xml", serializeStylesXml(doc.package.styles));
+    zip.file(STYLES_PART_PATH, serializeStylesXml(styleDefinitions));
+  } else {
+    zip.file(
+      STYLES_PART_PATH,
+      seedStylesXmlWith(missingNoteReferenceStyles(undefined, noteReferenceNeeds(doc.package))),
+    );
   }
 
   const numbering = doc.package.numbering;

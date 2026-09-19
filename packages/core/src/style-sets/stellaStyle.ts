@@ -1,4 +1,10 @@
 import {
+  BODY_TEXT_OUTLINE_LEVEL,
+  BUILT_IN_STYLE_NAME,
+  builtInHeadingStyleName,
+  builtInTableOfContentsStyleName,
+} from "../docx/builtInStyles";
+import {
   DOCUMENT_PRESET_VERSION,
   DOCUMENT_STYLE_SET_VERSION,
   type DocumentPreset,
@@ -46,7 +52,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "Normal",
         type: "paragraph",
-        name: "Normal",
+        name: BUILT_IN_STYLE_NAME.normal,
         default: true,
         qFormat: true,
         uiPriority: 0,
@@ -60,7 +66,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "DefaultParagraphFont",
         type: "character",
-        name: "Default Paragraph Font",
+        name: BUILT_IN_STYLE_NAME.defaultParagraphFont,
         default: true,
         semiHidden: true,
         unhideWhenUsed: true,
@@ -68,7 +74,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "BodyText",
         type: "paragraph",
-        name: "Body Text",
+        name: BUILT_IN_STYLE_NAME.bodyText,
         basedOn: "Normal",
         qFormat: true,
         uiPriority: 1,
@@ -76,7 +82,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "Title",
         type: "paragraph",
-        name: "Title",
+        name: BUILT_IN_STYLE_NAME.title,
         basedOn: "BodyText",
         next: "BodyText",
         qFormat: true,
@@ -97,7 +103,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "Subtitle",
         type: "paragraph",
-        name: "Subtitle",
+        name: BUILT_IN_STYLE_NAME.subtitle,
         basedOn: "Title",
         next: "BodyText",
         qFormat: true,
@@ -116,7 +122,10 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
         next: "Recital",
         qFormat: true,
         uiPriority: 5,
-        pPr: { keepNext: true },
+        // A recitals heading is a heading: the outline level is what puts it in
+        // the navigation pane and in a `TOC \u` field, and what every folio
+        // consumer classifies on (`docx/builtInStyles.ts`).
+        pPr: { keepNext: true, outlineLevel: 0 },
         rPr: { bold: true },
       },
       {
@@ -155,7 +164,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "ListParagraph",
         type: "paragraph",
-        name: "List Paragraph",
+        name: BUILT_IN_STYLE_NAME.listParagraph,
         basedOn: "BodyText",
         qFormat: true,
         uiPriority: 31,
@@ -178,12 +187,12 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
         next: "BodyText",
         qFormat: true,
         uiPriority: 33,
-        pPr: { pageBreakBefore: true, keepNext: true, spaceAfter: 240 },
+        pPr: { pageBreakBefore: true, keepNext: true, spaceAfter: 240, outlineLevel: 0 },
       },
       {
         styleId: "FootnoteText",
         type: "paragraph",
-        name: "Footnote Text",
+        name: BUILT_IN_STYLE_NAME.footnoteText,
         basedOn: "Normal",
         link: "FootnoteTextChar",
         semiHidden: true,
@@ -195,7 +204,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "FootnoteTextChar",
         type: "character",
-        name: "Footnote Text Char",
+        name: BUILT_IN_STYLE_NAME.footnoteTextChar,
         basedOn: "DefaultParagraphFont",
         link: "FootnoteText",
         semiHidden: true,
@@ -206,7 +215,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "FootnoteReference",
         type: "character",
-        name: "Footnote Reference",
+        name: BUILT_IN_STYLE_NAME.footnoteReference,
         basedOn: "DefaultParagraphFont",
         semiHidden: true,
         unhideWhenUsed: true,
@@ -216,7 +225,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "EndnoteText",
         type: "paragraph",
-        name: "Endnote Text",
+        name: BUILT_IN_STYLE_NAME.endnoteText,
         basedOn: "Normal",
         link: "EndnoteTextChar",
         semiHidden: true,
@@ -228,7 +237,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "EndnoteTextChar",
         type: "character",
-        name: "Endnote Text Char",
+        name: BUILT_IN_STYLE_NAME.endnoteTextChar,
         basedOn: "DefaultParagraphFont",
         link: "EndnoteText",
         semiHidden: true,
@@ -239,7 +248,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "EndnoteReference",
         type: "character",
-        name: "Endnote Reference",
+        name: BUILT_IN_STYLE_NAME.endnoteReference,
         basedOn: "DefaultParagraphFont",
         semiHidden: true,
         unhideWhenUsed: true,
@@ -249,7 +258,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "Footer",
         type: "paragraph",
-        name: "Footer",
+        name: BUILT_IN_STYLE_NAME.footer,
         basedOn: "Normal",
         pPr: { alignment: "right", spaceAfter: 0 },
         rPr: { color: { rgb: "7F7F7F" }, fontSize: 18, fontSizeCs: 18 },
@@ -257,7 +266,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "Hyperlink",
         type: "character",
-        name: "Hyperlink",
+        name: BUILT_IN_STYLE_NAME.hyperlink,
         basedOn: "DefaultParagraphFont",
         unhideWhenUsed: true,
         uiPriority: 99,
@@ -266,7 +275,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "TableNormal",
         type: "table",
-        name: "Normal Table",
+        name: BUILT_IN_STYLE_NAME.normalTable,
         default: true,
         semiHidden: true,
         unhideWhenUsed: true,
@@ -275,7 +284,7 @@ export const createStellaStyleSet = (): DocumentStyleSet => ({
       {
         styleId: "TableGrid",
         type: "table",
-        name: "Table Grid",
+        name: BUILT_IN_STYLE_NAME.tableGrid,
         basedOn: "TableNormal",
         qFormat: true,
         uiPriority: 59,
@@ -324,12 +333,12 @@ export const createStellaStyleDocumentPreset = (): DocumentPreset => ({
  */
 const createHeadingStyles = (): DocumentStyleSet["styles"]["styles"] => {
   const levels = [
-    { styleId: "Heading1", name: "heading 1", fontSize: 28, spaceBefore: 360 },
-    { styleId: "Heading2", name: "heading 2", fontSize: 24, spaceBefore: 240 },
-    { styleId: "Heading3", name: "heading 3", fontSize: 22, spaceBefore: 240 },
-    { styleId: "Heading4", name: "heading 4", fontSize: 20, spaceBefore: 120 },
-    { styleId: "Heading5", name: "heading 5", fontSize: 20, spaceBefore: 120 },
-    { styleId: "Heading6", name: "heading 6", fontSize: 20, spaceBefore: 120 },
+    { styleId: "Heading1", name: builtInHeadingStyleName(0), fontSize: 28, spaceBefore: 360 },
+    { styleId: "Heading2", name: builtInHeadingStyleName(1), fontSize: 24, spaceBefore: 240 },
+    { styleId: "Heading3", name: builtInHeadingStyleName(2), fontSize: 22, spaceBefore: 240 },
+    { styleId: "Heading4", name: builtInHeadingStyleName(3), fontSize: 20, spaceBefore: 120 },
+    { styleId: "Heading5", name: builtInHeadingStyleName(4), fontSize: 20, spaceBefore: 120 },
+    { styleId: "Heading6", name: builtInHeadingStyleName(5), fontSize: 20, spaceBefore: 120 },
   ] as const;
   return levels.map(({ styleId, name, fontSize, spaceBefore }, level) => ({
     styleId,
@@ -347,20 +356,22 @@ const createHeadingStyles = (): DocumentStyleSet["styles"]["styles"] => {
 /** `TOCHeading` plus `TOC1`..`TOC3`, the styles a `TOC \o "1-3"` field fills. */
 const createTableOfContentsStyles = (): DocumentStyleSet["styles"]["styles"] => {
   const levels = [
-    { styleId: "TOC1", name: "toc 1", indent: 0 },
-    { styleId: "TOC2", name: "toc 2", indent: 220 },
-    { styleId: "TOC3", name: "toc 3", indent: 440 },
+    { styleId: "TOC1", name: builtInTableOfContentsStyleName(1), indent: 0 },
+    { styleId: "TOC2", name: builtInTableOfContentsStyleName(2), indent: 220 },
+    { styleId: "TOC3", name: builtInTableOfContentsStyleName(3), indent: 440 },
   ] as const;
   return [
     {
       styleId: "TOCHeading",
       type: "paragraph",
-      name: "TOC Heading",
+      name: BUILT_IN_STYLE_NAME.tocHeading,
       basedOn: "Heading1",
       next: "BodyText",
       unhideWhenUsed: true,
       uiPriority: 39,
-      pPr: { outlineLevel: 9 },
+      // Based on `Heading1`, so the level has to be reset: this titles the
+      // table of contents, it is not an entry in it.
+      pPr: { outlineLevel: BODY_TEXT_OUTLINE_LEVEL },
     },
     ...levels.map(({ styleId, name, indent }) => ({
       styleId,
@@ -426,6 +437,10 @@ const createClauseStyles = (): DocumentStyleSet["styles"]["styles"] => {
         numPr: { numId: CLAUSE_NUMBERING_ID, ilvl: level },
         keepNext: level < 2,
         spaceBefore: clauseSpaceBefore(level),
+        // The top clause style is the document's numbered heading; the deeper
+        // ones are body text under it. Without the level, the only thing
+        // marking `ClauseHeading1` as a heading was the word in its style id.
+        outlineLevel: level === 0 ? 0 : BODY_TEXT_OUTLINE_LEVEL,
       },
     } satisfies DocumentStyleSet["styles"]["styles"][number];
     if (bold) {

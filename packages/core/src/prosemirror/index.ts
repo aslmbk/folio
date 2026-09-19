@@ -56,6 +56,7 @@ export {
   selectionTrackerKey,
   createDocumentStylesPlugin,
   getDocumentStyleResolver,
+  getDocumentBuiltInStyles,
   documentStylesKey,
 } from "./plugins";
 export type { SelectionContext, SelectionChangeCallback } from "./plugins";
@@ -159,7 +160,7 @@ export {
   // Page break
   insertPageBreak,
   // Table of Contents
-  generateTOC,
+  generateTableOfContents,
 } from "./commands";
 export type { TableContextInfo, BorderPreset, TableBorderPreset } from "./commands";
 export type { CapturedTextFormatting } from "./commands";
