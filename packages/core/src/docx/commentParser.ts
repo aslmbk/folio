@@ -17,6 +17,9 @@
  * - Comment content: child w:p elements
  */
 
+import { PARSE_WARNING_CODES } from "@stll/docx-core/model";
+
+import type { ParseContext } from "./parseContext";
 import type {
   Comment,
   Paragraph,
@@ -38,6 +41,9 @@ import {
   type XmlElement,
   parseOnOffValue,
 } from "./xmlParser";
+
+/** The whole lexical form of `ST_DecimalNumber`: an optional sign and digits. */
+const DECIMAL_NUMBER = /^[+-]?\d+$/u;
 
 type ParsedFirstCommentParagraph = {
   paragraph: Paragraph;
@@ -200,6 +206,7 @@ export function parseComments(
   media: Map<string, MediaFile>,
   commentsExtensibleXml?: string | null,
   commentsExtendedXml?: string | null,
+  context?: ParseContext,
 ): Comment[] {
   if (!commentsXml) {
     return [];
@@ -232,7 +239,24 @@ export function parseComments(
       continue;
     }
 
-    const id = Number.parseInt(getAttribute(child, "w", "id") ?? "0", 10);
+    // Reading a missing or unparseable `w:id` as 0 manufactured a duplicate of
+    // whichever comment genuinely holds id 0, and made a comment no marker can
+    // address look addressable. A comment with no id anchors nothing, so drop
+    // it and say so.
+    const rawId = getAttribute(child, "w", "id");
+    // The whole attribute has to be the number: `parseInt` reads `7pt` as 7,
+    // which is the duplicate this guard exists to prevent, wearing an id that
+    // another comment genuinely holds.
+    const id =
+      rawId !== null && DECIMAL_NUMBER.test(rawId) ? Number.parseInt(rawId, 10) : Number.NaN;
+    if (Number.isNaN(id)) {
+      context?.warn({
+        code: PARSE_WARNING_CODES.missingCommentId,
+        element: "w:comment",
+        ...(rawId === null ? {} : { value: rawId }),
+      });
+      continue;
+    }
     const rawAuthor = getAttribute(child, "w", "author");
     const author = parseCommentAuthor(rawAuthor);
     const rawInitials = getAttribute(child, "w", "initials");
