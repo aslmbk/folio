@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { panic } from "better-result";
 
 import { serializeRun } from "../serializer/runSerializer";
 import { parseShapeFromDrawing } from "../shapeParser";
@@ -316,35 +317,31 @@ describe("shape parse → serialize round-trip", () => {
     expect(reopenedShape?.outline?.style).toBe("solid");
   });
 
-  test("preserves an explicitly authored empty shape name", () => {
+  test("reads an empty shape name as no name, and writes one back", () => {
     const root = parseXmlDocument(
       shapeDrawingXml({ prst: "line" }).replaceAll('name="Shape 9"', 'name=""'),
     );
     const shape = root ? parseShapeFromDrawing(root) : null;
-    expect(shape?.name).toBe("");
-    if (!shape) {
-      return;
-    }
+    // A shape that did not parse would satisfy every `?.name` below without
+    // exercising anything, so presence is asserted before the names are.
+    expect(shape).not.toBeNull();
+    // `@name` is schema-required, so `""` is what the writer below mints for a
+    // shape carrying no name. Reading it back as authored content would make
+    // the round trip land on `""` instead of the absence the source had.
+    expect(shape?.name).toBeUndefined();
 
+    // A generated "Shape 9" would read back as an authored name, so the
+    // required attribute stays empty.
     const xml = serializeRun({
       type: "run",
-      content: [{ type: "shape", shape }],
+      content: [{ type: "shape", shape: shape ?? panic("The drawing did not parse to a shape.") }],
     });
     expect(xml).toContain('<wp:docPr id="9" name=""/>');
 
     const reopenedRoot = parseXmlDocument(xml);
     const reopenedDrawing = findDeep(reopenedRoot, "w", "drawing");
     const reopenedShape = reopenedDrawing ? parseShapeFromDrawing(reopenedDrawing) : null;
-    expect(reopenedShape?.name).toBe("");
-
-    // `@name` is schema-required, so a shape carrying none writes the empty
-    // string. A generated "Shape 9" would read back as an authored name.
-    const shapeWithoutName = { ...shape };
-    delete shapeWithoutName.name;
-    const fallbackXml = serializeRun({
-      type: "run",
-      content: [{ type: "shape", shape: shapeWithoutName }],
-    });
-    expect(fallbackXml).toContain('<wp:docPr id="9" name=""/>');
+    expect(reopenedShape).not.toBeNull();
+    expect(reopenedShape?.name).toBeUndefined();
   });
 });
