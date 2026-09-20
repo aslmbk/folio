@@ -1081,6 +1081,38 @@ describe("toFlowBlocks style cascade", () => {
     }
   });
 
+  // `start` and `end` reach the flow engine as logical left and right. The
+  // engine applies `w:bidiVisual` once when it chooses the physical side.
+  test.each([
+    { bidi: false, placement: "start" as const, expected: "left" as const },
+    { bidi: false, placement: "end" as const, expected: "right" as const },
+    { bidi: true, placement: "start" as const, expected: "left" as const },
+    { bidi: true, placement: "end" as const, expected: "right" as const },
+  ])(
+    "preserves $placement as logical $expected in a bidi=$bidi table",
+    ({ bidi, placement, expected }) => {
+      const table: Table = {
+        type: "table",
+        formatting: { justification: placement, ...(bidi ? { bidi: true } : {}) },
+        rows: [
+          {
+            type: "tableRow",
+            formatting: { justification: placement },
+            cells: [{ type: "tableCell", content: [{ type: "paragraph", content: [] }] }],
+          },
+        ],
+      };
+      const document: Document = { package: { document: { content: [table] } } };
+      const tableBlock = toFlowBlocks(toProseDoc(document), {}).at(0);
+
+      expect(tableBlock?.kind).toBe("table");
+      if (tableBlock?.kind === "table") {
+        expect(tableBlock.justification).toBe(expected);
+        expect(tableBlock.rows.at(0)?.justification).toBe(expected);
+      }
+    },
+  );
+
   test("explicit table styles do not fall back to the default table style borders or margins", () => {
     const gridBorder = {
       style: "single" as const,

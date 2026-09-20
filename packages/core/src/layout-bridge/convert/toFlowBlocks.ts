@@ -96,6 +96,7 @@ import type {
   ImageAttrs,
   ParagraphPropertyChangeAttrs,
   ParagraphAttrs as PMParagraphAttrs,
+  TableAttrs,
 } from "../../prosemirror/schema/nodes";
 import { assertValidProseMirrorDocument } from "../../prosemirror/validation";
 import {
@@ -3047,18 +3048,47 @@ function convertTableCell(
 }
 
 /**
+ * Resolve an `ST_JcTable` placement to the flow engine's logical alignment.
+ *
+ * `start` and `end` name an edge of the writing direction, not a side of the
+ * page, the same distinction `ST_Jc` draws for a paragraph. The flow engine
+ * applies `w:bidiVisual` when it resolves that logical alignment to a physical
+ * side, so the bridge must not mirror it first.
+ */
+const resolveTablePlacement = (
+  placement: NonNullable<TableAttrs["justification"]>,
+): NonNullable<TableBlock["justification"]> => {
+  switch (placement) {
+    case "start":
+      return "left";
+    case "end":
+      return "right";
+    case "left":
+    case "center":
+    case "right":
+      return placement;
+    default:
+      return placement satisfies never;
+  }
+};
+
+/**
  * Convert a table row node.
  */
-function convertTableRow(
-  node: PMNode,
-  startPos: number,
-  options: FlowConversionOptions,
-  tableCellMargins?: {
+type TableRowConversionContext = {
+  cellMargins?: {
     top?: number;
     bottom?: number;
     left?: number;
     right?: number;
-  },
+  };
+};
+
+function convertTableRow(
+  node: PMNode,
+  startPos: number,
+  options: FlowConversionOptions,
+  { cellMargins }: TableRowConversionContext,
 ): TableRow {
   const cells: TableCell[] = [];
   let offset = startPos + 1; // +1 for opening tag
@@ -3069,7 +3099,7 @@ function convertTableRow(
     if (child.type.name === "tableCell" || child.type.name === "tableHeader") {
       const attrs = expectTableCellAttrs(child);
       if (!attrs._omittedGridSlot) {
-        const converted = convertTableCell(child, offset, options, tableCellMargins);
+        const converted = convertTableCell(child, offset, options, cellMargins);
         if (converted.breakBefore !== undefined) {
           breakBefore = converted.breakBefore;
         }
@@ -3111,7 +3141,7 @@ function convertTableRow(
   const effectiveJustification =
     attrs._originalFormatting?.justification ?? attrs._resolvedJustification;
   if (effectiveJustification) {
-    row.justification = effectiveJustification;
+    row.justification = resolveTablePlacement(effectiveJustification);
   }
   return row;
 }
@@ -3123,12 +3153,15 @@ function convertTable(node: PMNode, startPos: number, options: FlowConversionOpt
   const rows: TableRow[] = [];
   let offset = startPos + 1; // +1 for opening tag
   const attrs = expectTableAttrs(node);
-  const tableCellMargins = attrs.cellMargins;
+  const rightToLeft = (attrs._resolvedBidi ?? attrs._originalFormatting?.bidi) === true;
+  const rowContext: TableRowConversionContext = {
+    ...(attrs.cellMargins === undefined ? {} : { cellMargins: attrs.cellMargins }),
+  };
 
   // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
   node.forEach((child) => {
     if (child.type.name === "tableRow") {
-      rows.push(convertTableRow(child, offset, options, tableCellMargins));
+      rows.push(convertTableRow(child, offset, options, rowContext));
     }
     offset += child.nodeSize;
   });
@@ -3153,7 +3186,9 @@ function convertTable(node: PMNode, startPos: number, options: FlowConversionOpt
 
   // Keep authored justification separate in ProseMirror so style-derived
   // placement never becomes direct formatting on save.
-  const justification = attrs.justification ?? attrs._resolvedJustification;
+  const authoredJustification = attrs.justification ?? attrs._resolvedJustification;
+  const justification =
+    authoredJustification === undefined ? undefined : resolveTablePlacement(authoredJustification);
 
   // Extract table indent + RTL column order from _originalFormatting
   // (w:tblInd, w:bidiVisual). bidiVisual is import-only — folio has no UI to
@@ -3253,8 +3288,7 @@ function convertTable(node: PMNode, startPos: number, options: FlowConversionOpt
   if (floatingPx) {
     tableBlock.floating = floatingPx;
   }
-  const effectiveBidi = attrs._resolvedBidi ?? originalFormatting?.bidi;
-  if (effectiveBidi) {
+  if (rightToLeft) {
     tableBlock.bidi = true;
   }
   return tableBlock;

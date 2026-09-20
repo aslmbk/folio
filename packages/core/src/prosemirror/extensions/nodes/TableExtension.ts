@@ -25,12 +25,15 @@ import { statesNoBorder } from "@stll/docx-core/model";
 
 import type { BorderStyleValue, ColorValue, BorderSpec } from "../../../types/colors";
 import {
-  TABLE_CELL_TEXT_DIRECTION_VALUES,
+  TABLE_JUSTIFICATION_VALUES,
   TABLE_WIDTH_TYPE_VALUES,
+  TEXT_DIRECTION_VALUES,
 } from "../../../types/documentEnumValues";
-import type { TableBorders, TableCellTextDirection } from "../../../types/formatting";
+import type { TableBorders, TextDirection } from "../../../types/formatting";
 import { cssBorderStyle } from "../../../utils/borderCss";
 import { isValidHexColor, resolveColor } from "../../../utils/colorResolver";
+import { resolveTablePlacementAlignment } from "../../../utils/tablePlacement";
+import { textFlowCss } from "../../../utils/textDirectionFlow";
 import {
   expectTableAttrs,
   expectTableCellAttrs,
@@ -371,9 +374,7 @@ const tableSpec: NodeSpec = {
         const styleId = dom.dataset["styleId"];
         const rawJustification = dom.dataset["justification"];
         const justification: TableAttrs["justification"] =
-          rawJustification === "left" ||
-          rawJustification === "center" ||
-          rawJustification === "right"
+          rawJustification !== undefined && isOneOf(rawJustification, TABLE_JUSTIFICATION_VALUES)
             ? rawJustification
             : undefined;
         return {
@@ -404,11 +405,7 @@ const tableSpec: NodeSpec = {
     }
     styles.push("table-layout: fixed");
 
-    if (attrs.justification === "center") {
-      styles.push("margin-left: auto", "margin-right: auto");
-    } else if (attrs.justification === "right") {
-      styles.push("margin-left: auto");
-    }
+    styles.push(...tablePlacementStyles(attrs));
     domAttrs["style"] = styles.join("; ");
 
     return ["table", domAttrs, ["tbody", 0]];
@@ -500,65 +497,28 @@ function buildCellPaddingStyles(attrs: TableCellAttrs): string[] {
   return [`padding: ${top}px ${right}px ${bottom}px ${left}px`];
 }
 
-/** The CSS a cell's text flow renders as. */
-type CellTextFlow = {
-  /** `horizontal-tb` needs no declaration; the others are written out. */
-  writingMode: "horizontal-tb" | "vertical-lr" | "vertical-rl";
-  /** Inline direction inside that writing mode. */
-  direction?: "rtl";
-  /**
-   * CSS has no writing mode for a bottom-to-top flow, so the nearest one is
-   * turned upside down.
-   */
-  rotateDegrees?: 180;
+const tablePlacementStyles = (attrs: TableAttrs): string[] => {
+  if (attrs.justification === undefined) {
+    return [];
+  }
+  const alignment = resolveTablePlacementAlignment(
+    attrs.justification,
+    attrs._resolvedBidi === true,
+  );
+  if (alignment === "center") {
+    return ["margin-left: auto", "margin-right: auto"];
+  }
+  return alignment === "right" ? ["margin-left: auto"] : [];
 };
 
-/**
- * Every `ST_TextDirection` member, and the CSS flow it renders as.
- *
- * Total on purpose: the previous `switch` ended in a silent `default`, so a
- * member nobody had mapped rendered as horizontal text with nothing to say it
- * had been dropped. Each of the twelve now states its flow, and a member CSS
- * cannot express falls back to the nearest one it can, named here.
- *
- * The enumeration carries two spellings of each flow — a short one and a long
- * one naming the character and line progressions in full — and which short
- * spelling pairs with which long one is not settled in this file. The map
- * preserves the rendering every member already had and gives each new one the
- * rendering its like-spelled neighbours have; it does not re-decide the
- * pairing.
- */
-const CELL_TEXT_FLOW = {
-  // Horizontal, the default flow.
-  lr: { writingMode: "horizontal-tb" },
-  lrV: { writingMode: "horizontal-tb" },
-  lrTb: { writingMode: "horizontal-tb" },
-  lrTbV: { writingMode: "horizontal-tb" },
-  // Horizontal, laid out right to left.
-  rl: { writingMode: "horizontal-tb", direction: "rtl" },
-  rlV: { writingMode: "horizontal-tb", direction: "rtl" },
-  // Vertical, columns running left to right.
-  tb: { writingMode: "vertical-lr" },
-  tbV: { writingMode: "vertical-lr" },
-  tbLrV: { writingMode: "vertical-lr" },
-  // Vertical, columns running right to left.
-  tbRl: { writingMode: "vertical-rl" },
-  tbRlV: { writingMode: "vertical-rl" },
-  // Bottom to top: vertical-lr, turned over.
-  btLr: { writingMode: "vertical-lr", rotateDegrees: 180 },
-} as const satisfies Record<TableCellTextDirection, CellTextFlow>;
-
-function buildTextDirectionStyles(textDirection?: TableCellTextDirection | null): string[] {
+function buildTextDirectionStyles(textDirection?: TextDirection | null): string[] {
   if (!textDirection) {
     return [];
   }
-  const flow: CellTextFlow = CELL_TEXT_FLOW[textDirection];
+  const flow = textFlowCss(textDirection);
   const styles: string[] = [];
   if (flow.writingMode !== "horizontal-tb") {
     styles.push(`writing-mode: ${flow.writingMode}`);
-  }
-  if (flow.direction !== undefined) {
-    styles.push(`direction: ${flow.direction}`);
   }
   if (flow.rotateDegrees !== undefined) {
     styles.push(`transform: rotate(${String(flow.rotateDegrees)}deg)`);
@@ -2267,7 +2227,7 @@ export const TablePluginExtension = createExtension({
         }
 
         if (dispatch) {
-          if (direction !== null && !isOneOf(direction, TABLE_CELL_TEXT_DIRECTION_VALUES)) {
+          if (direction !== null && !isOneOf(direction, TEXT_DIRECTION_VALUES)) {
             return false;
           }
 

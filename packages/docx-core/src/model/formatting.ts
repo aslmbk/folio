@@ -8,8 +8,9 @@
 import type { ColorValue, BorderSpec, ShadingProperties } from "./colors";
 import type {
   ParagraphAlignment,
-  TableCellTextDirection,
+  TableAlignment,
   TabStopAlignment,
+  TextDirection,
 } from "./ooxmlEnumerations.gen";
 
 // ============================================================================
@@ -199,10 +200,22 @@ export type TextFormatting = {
 export type { TabStopAlignment };
 
 /**
- * A table cell's text flow (`w:textDirection/@w:val`), generated from
- * `ST_TextDirection`.
+ * A table's or a row's placement (`w:jc/@w:val`), generated from `ST_JcTable`.
+ *
+ * `start` and `end` are members in their own right, not spellings of `left`
+ * and `right`: they name an edge of the table's own direction, which
+ * `w:bidiVisual` sets, and the layout resolves them against it.
  */
-export type { TableCellTextDirection };
+export type { TableAlignment };
+
+/**
+ * A text flow (`w:textDirection/@w:val`), generated from `ST_TextDirection`.
+ *
+ * One type for the three places the format declares the element: a table cell,
+ * a section and a paragraph. Twelve tokens for six flows; `TEXT_DIRECTION_FLOW_BY_TOKEN`
+ * says which flow each token names.
+ */
+export type { TextDirection };
 
 /**
  * Tab leader character
@@ -502,8 +515,8 @@ export type TableGridChange = {
 export type TableFormatting = {
   /** Table width */
   width?: TableMeasurement;
-  /** Table justification */
-  justification?: "left" | "center" | "right";
+  /** Table placement (`w:tblPr/w:jc`) */
+  justification?: TableAlignment;
   /** Cell spacing */
   cellSpacing?: TableMeasurement;
   /** Table indent from left margin */
@@ -581,8 +594,8 @@ export type TableRowFormatting = {
   header?: boolean;
   /** Allow row to break across pages */
   cantSplit?: boolean;
-  /** Row justification */
-  justification?: "left" | "center" | "right";
+  /** Row placement (`w:trPr/w:jc`) */
+  justification?: TableAlignment;
   /** Hidden row */
   hidden?: boolean;
   /** Conditional format style */
@@ -649,7 +662,7 @@ export type TableCellFormatting = {
   /** Vertical alignment */
   verticalAlign?: "top" | "center" | "bottom";
   /** Text direction (`w:textDirection`) */
-  textDirection?: TableCellTextDirection;
+  textDirection?: TextDirection;
   /** Grid span (horizontal merge) */
   gridSpan?: number;
   /** Vertical merge */
