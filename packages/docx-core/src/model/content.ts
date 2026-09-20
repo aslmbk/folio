@@ -478,6 +478,49 @@ export type ImageWrap = {
 };
 
 /**
+ * The three authored strings every `CT_NonVisualDrawingProps` carries:
+ * `wp:docPr`, `pic:cNvPr` and `wps:cNvPr` each have their own set, and they are
+ * the object's accessible name and alt text rather than folio's to mint.
+ */
+export type NonVisualDrawingNames = {
+  /** `@name`, schema-required, so `""` means the object was never named. */
+  name?: string;
+  /** `@descr`: alt text, accessibility content. */
+  alt?: string;
+  /** `@title`. */
+  title?: string;
+};
+
+/**
+ * `wp:anchor`'s own attributes, and the `wp:simplePos` offsets beside them.
+ *
+ * A picture, a shape and a text box are the same `CT_Anchor` with a different
+ * graphic inside, so they share one record: a serializer that owned only the
+ * picture wrote constants for the other two, and two pictures a document
+ * deliberately stacked came back on one layer.
+ *
+ * Tri-state per attribute. Absent is the author having stated nothing, and a
+ * rebuild then writes OOXML's own default for the five `CT_Anchor` requires
+ * rather than a value folio chose.
+ */
+export type DrawingAnchor = {
+  /** `@simplePos`: position from `wp:simplePos` rather than `positionH`/`positionV`. */
+  useSimplePosition?: boolean;
+  /** `wp:simplePos` itself, in EMUs. */
+  simplePosition?: { x: number; y: number };
+  /** `@relativeHeight`: z-order among the anchors on a page. */
+  relativeHeight?: number;
+  /** `@locked`: the anchor may not be moved. */
+  locked?: boolean;
+  /** `@layoutInCell`: an anchor in a table cell is confined to the cell. */
+  layoutInCell?: boolean;
+  /** `@allowOverlap`: anchored objects may overlap one another. */
+  allowOverlap?: boolean;
+  /** `@hidden`: not `wp:docPr@hidden`, which hides the drawing itself. */
+  hidden?: boolean;
+};
+
+/**
  * Position for floating images
  */
 export type ImagePosition = {
@@ -595,6 +638,16 @@ export type Image = {
   alt?: string;
   /** Authored non-visual drawing title (`wp:docPr@title`) */
   title?: string;
+  /**
+   * `pic:cNvPr`'s own name, alt text and title.
+   *
+   * The drawing's are `docPrName`, `alt` and `title` above, off `wp:docPr`. A
+   * reader names the object from whichever of the two it is looking at, so
+   * folding them together loses whichever the source did not repeat, and a
+   * rebuild that wrote the media filename here renamed a picture the author
+   * had named.
+   */
+  pictureNames?: NonVisualDrawingNames;
   /** Image size */
   size: ImageSize;
   /** Original size before any transforms */
@@ -616,33 +669,8 @@ export type Image = {
    * fully opaque. Mirrors eigenpal docx-editor #424.
    */
   opacity?: number;
-  /**
-   * `wp:anchor layoutInCell` — when true (OOXML default), an anchored image
-   * inside a table cell is constrained to the cell. When false, the image
-   * escapes the cell into the page area. Round-tripped on save so the
-   * author's intent survives; undefined means "use the spec default".
-   */
-  layoutInCell?: boolean;
-  /**
-   * `wp:anchor allowOverlap` — when true (OOXML default), anchored objects
-   * may overlap; when false, Word repositions them to avoid collisions. We
-   * don't currently reposition, but we round-trip the flag so saving
-   * preserves the author's intent; undefined means "use the spec default".
-   */
-  allowOverlap?: boolean;
-  /**
-   * `wp:anchor relativeHeight` — z-order. The serializer wrote one constant,
-   * flattening a stack a document meant.
-   */
-  relativeHeight?: number;
-  /** `wp:anchor locked` — the anchor may not be moved. Absent states nothing. */
-  locked?: boolean;
-  /** `wp:anchor hidden` — not `hidden`, which is `wp:docPr @hidden`. */
-  anchorHidden?: boolean;
-  /** `wp:anchor simplePos` — position from `wp:simplePos`, not `positionH/V`. */
-  useSimplePosition?: boolean;
-  /** `wp:simplePos` itself, in EMUs; absent when the author wrote none. */
-  simplePosition?: { x: number; y: number };
+  /** `wp:anchor`'s own attributes; see {@link DrawingAnchor}. */
+  anchor?: DrawingAnchor;
   /**
    * The image carries no information a reader needs, so assistive technology
    * skips it. Word writes this as an extension on `wp:docPr`
@@ -991,12 +1019,20 @@ export type Shape = {
   alt?: string;
   /** Authored non-visual drawing title (`wp:docPr@title` / `wps:cNvPr@title`) */
   title?: string;
+  /**
+   * `wps:cNvPr`'s own name, alt text and title, where the source wrote a set
+   * separate from `wp:docPr`'s. A rebuild wrote no `wps:cNvPr` at all, so a
+   * shape named inside the graphic lost that name on every edit.
+   */
+  shapeNames?: NonVisualDrawingNames;
   /** Size in EMUs */
   size: ImageSize;
   /** Position for floating shapes */
   position?: ImagePosition;
   /** Wrap settings */
   wrap?: ImageWrap;
+  /** `wp:anchor`'s own attributes; see {@link DrawingAnchor}. */
+  anchor?: DrawingAnchor;
   /** Fill */
   fill?: ShapeFill;
   /** Outline/stroke */
@@ -1028,6 +1064,8 @@ export type TextBox = {
   position?: ImagePosition;
   /** Wrap settings */
   wrap?: ImageWrap;
+  /** `wp:anchor`'s own attributes; see {@link DrawingAnchor}. */
+  anchor?: DrawingAnchor;
   /** Fill */
   fill?: ShapeFill;
   /** Outline */

@@ -13,6 +13,7 @@ import type {
   ComplexField,
   Deletion,
   DocumentBody,
+  DrawingAnchor,
   DrawingContent,
   FieldCharContent,
   FooterReference,
@@ -38,6 +39,7 @@ import type {
   MoveToRangeEnd,
   MoveToRangeStart,
   NoBreakHyphenContent,
+  NonVisualDrawingNames,
   NoteReferenceContent,
   Paragraph,
   ParagraphMarkChange,
@@ -419,6 +421,7 @@ export const IMAGE_RESERVED = {
   docPrName: NO_RESERVED_VALUE,
   alt: NO_RESERVED_VALUE,
   title: NO_RESERVED_VALUE,
+  pictureNames: NO_RESERVED_VALUE,
   size: NO_RESERVED_VALUE,
   originalSize: NO_RESERVED_VALUE,
   wrap: NO_RESERVED_VALUE,
@@ -432,13 +435,7 @@ export const IMAGE_RESERVED = {
     sentinel: "100%",
     reader: RESERVED_VALUE_READERS.drawing,
   }),
-  layoutInCell: toggle("wp:anchor@layoutInCell"),
-  allowOverlap: toggle("wp:anchor@allowOverlap"),
-  locked: toggle("wp:anchor@locked"),
-  anchorHidden: toggle("wp:anchor@hidden"),
-  useSimplePosition: toggle("wp:anchor@simplePos"),
-  relativeHeight: NO_RESERVED_VALUE,
-  simplePosition: NO_RESERVED_VALUE,
+  anchor: NO_RESERVED_VALUE,
   decorative: NO_RESERVED_VALUE,
   hidden: NO_RESERVED_VALUE,
   docPrExtensions: NO_RESERVED_VALUE,
@@ -451,6 +448,32 @@ export const IMAGE_RESERVED = {
 } satisfies Record<keyof Image, ReservedValueDisposition>;
 
 export type ExhaustiveImageReserved = ExhaustiveFields<Image, keyof typeof IMAGE_RESERVED>;
+
+export const DRAWING_ANCHOR_RESERVED = {
+  useSimplePosition: toggle("wp:anchor@simplePos"),
+  simplePosition: NO_RESERVED_VALUE,
+  relativeHeight: NO_RESERVED_VALUE,
+  locked: toggle("wp:anchor@locked"),
+  layoutInCell: toggle("wp:anchor@layoutInCell"),
+  allowOverlap: toggle("wp:anchor@allowOverlap"),
+  hidden: toggle("wp:anchor@hidden"),
+} satisfies Record<keyof DrawingAnchor, ReservedValueDisposition>;
+
+export type ExhaustiveDrawingAnchorReserved = ExhaustiveFields<
+  DrawingAnchor,
+  keyof typeof DRAWING_ANCHOR_RESERVED
+>;
+
+export const NON_VISUAL_DRAWING_NAMES_RESERVED = {
+  name: NO_RESERVED_VALUE,
+  alt: NO_RESERVED_VALUE,
+  title: NO_RESERVED_VALUE,
+} satisfies Record<keyof NonVisualDrawingNames, ReservedValueDisposition>;
+
+export type ExhaustiveNonVisualDrawingNamesReserved = ExhaustiveFields<
+  NonVisualDrawingNames,
+  keyof typeof NON_VISUAL_DRAWING_NAMES_RESERVED
+>;
 
 export const IMAGE_EFFECTS_RESERVED = {
   brightness: NO_RESERVED_VALUE,
@@ -605,9 +628,11 @@ export const SHAPE_RESERVED = {
   name: NO_RESERVED_VALUE,
   alt: NO_RESERVED_VALUE,
   title: NO_RESERVED_VALUE,
+  shapeNames: NO_RESERVED_VALUE,
   size: NO_RESERVED_VALUE,
   position: NO_RESERVED_VALUE,
   wrap: NO_RESERVED_VALUE,
+  anchor: NO_RESERVED_VALUE,
   fill: NO_RESERVED_VALUE,
   outline: NO_RESERVED_VALUE,
   transform: NO_RESERVED_VALUE,
@@ -626,6 +651,7 @@ export const TEXT_BOX_RESERVED = {
   size: NO_RESERVED_VALUE,
   position: NO_RESERVED_VALUE,
   wrap: NO_RESERVED_VALUE,
+  anchor: NO_RESERVED_VALUE,
   fill: NO_RESERVED_VALUE,
   outline: NO_RESERVED_VALUE,
   transform: NO_RESERVED_VALUE,

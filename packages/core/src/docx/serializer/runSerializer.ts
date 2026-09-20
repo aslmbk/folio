@@ -41,6 +41,11 @@ import { escapeXmlAttribute, escapeXmlText, requiresXmlSpacePreserve } from "@st
 import { isValidHexColor } from "../../utils/colorResolver";
 import { normalizeImageLuminancePercent } from "../../utils/imageLuminance";
 import { serializePreservedAttributes } from "../attributeRemainder";
+import {
+  serializeAnchorAttributes,
+  serializeInlineAttributes,
+  serializeSimplePos,
+} from "../drawingAnchor";
 import { THEME_COLOR_TO_DRAWING_SCHEME } from "../drawingUtils";
 import { fieldStateAttributes } from "../fieldState";
 import { serializeGraphicFrameLocks } from "../graphicFrameLocks";
@@ -430,7 +435,15 @@ function serializePicGraphic(image: Image, imageRId: string, sharedId: string): 
   const cy = image.size.height;
   const rId = escapeXmlAttribute(imageRId);
   const id = sharedId;
-  const name = image.filename || `image${id}`;
+  // `pic:cNvPr` is the picture's accessible name and alt text. The rebuild
+  // spelled `@name` from the media filename, so an authored name was replaced
+  // by `image1.png` on every edit and `@descr` was written from the drawing's
+  // alt text rather than the picture's. `@name` is schema-required, so a
+  // picture that was never named still gets the media-derived one.
+  const picNames = serializeNonVisualDrawingNames({
+    ...image.pictureNames,
+    name: image.pictureNames?.name ?? image.filename ?? `image${id}`,
+  });
 
   const xfrmAttrs = serializeTransformAttrs(image.transform);
 
@@ -483,7 +496,7 @@ function serializePicGraphic(image: Image, imageRId: string, sharedId: string): 
     '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">',
     "<pic:nvPicPr>",
-    `<pic:cNvPr id="${id}" name="${escapeXmlAttribute(name)}"${image.alt ? ` descr="${escapeXmlAttribute(image.alt)}"` : ""}/>`,
+    `<pic:cNvPr id="${id}"${picNames}/>`,
     "<pic:cNvPicPr/>",
     "</pic:nvPicPr>",
     "<pic:blipFill>",
@@ -503,27 +516,6 @@ function serializePicGraphic(image: Image, imageRId: string, sharedId: string): 
     "</a:graphicData>",
     "</a:graphic>",
   ].join("");
-}
-
-/**
- * Serialize only authored wrap-distance attributes. OOXML defaults omitted
- * values to zero, but preserving absence keeps untouched models stable.
- */
-function serializeWrapDistanceAttrs(wrap: ImageWrap | undefined): string {
-  const attrs: string[] = [];
-  if (wrap?.distT !== undefined) {
-    attrs.push(`distT="${intAttr(wrap.distT)}"`);
-  }
-  if (wrap?.distB !== undefined) {
-    attrs.push(`distB="${intAttr(wrap.distB)}"`);
-  }
-  if (wrap?.distL !== undefined) {
-    attrs.push(`distL="${intAttr(wrap.distL)}"`);
-  }
-  if (wrap?.distR !== undefined) {
-    attrs.push(`distR="${intAttr(wrap.distR)}"`);
-  }
-  return attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
 }
 
 /**
@@ -578,7 +570,6 @@ function serializeDrawingContent(content: DrawingContent): string {
   // distances. Per §20.4.2.5, the visual-effect reservation lives on the
   // separate <wp:effectExtent> element. Don't fold `image.padding`
   // (effectExtent) into wrap dist* — that's the eigenpal #424 fix.
-  const wrapDistanceAttrs = serializeWrapDistanceAttrs(image.wrap);
   const effL = image.padding?.left ?? 0;
   const effT = image.padding?.top ?? 0;
   const effR = image.padding?.right ?? 0;
@@ -614,7 +605,7 @@ function serializeDrawingContent(content: DrawingContent): string {
     // Inline image
     return [
       "<w:drawing>",
-      `<wp:inline${wrapDistanceAttrs}>`,
+      `<wp:inline${serializeInlineAttributes(image.wrap)}>`,
       `<wp:extent cx="${intAttr(cx)}" cy="${intAttr(cy)}"/>`,
       effectExtentEl,
       docPr,
@@ -626,29 +617,19 @@ function serializeDrawingContent(content: DrawingContent): string {
   }
 
   // Floating (anchored) image
-  const behindDoc = image.wrap.type === "behind" ? "1" : "0";
   const position = image.position
     ? serializePosition(image.position)
     : '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>';
   const wrap = serializeWrap(image.wrap);
-  // Tri-state: explicit `false` → "0"; explicit `true` or absent →
-  // "1" (the OOXML default). Mirrors eigenpal #424.
-  const layoutInCellAttr = image.layoutInCell === false ? "0" : "1";
-  const allowOverlapAttr = image.allowOverlap === false ? "0" : "1";
-  // `CT_Anchor` requires all six, so an anchor folio builds from scratch still
-  // states a default for each; what the author stated wins over it, which is
-  // the difference between round-tripping a z-order and flattening it.
-  const simplePosAttr = image.useSimplePosition === true ? "1" : "0";
-  const relativeHeightAttr = intAttr(image.relativeHeight ?? 251_658_240);
-  const lockedAttr = image.locked === true ? "1" : "0";
-  const hiddenAttr =
-    image.anchorHidden === undefined ? "" : ` hidden="${image.anchorHidden ? "1" : "0"}"`;
-  const simplePos = image.simplePosition ?? { x: 0, y: 0 };
 
   return [
     "<w:drawing>",
-    `<wp:anchor${wrapDistanceAttrs} simplePos="${simplePosAttr}" relativeHeight="${relativeHeightAttr}" behindDoc="${behindDoc}" locked="${lockedAttr}" layoutInCell="${layoutInCellAttr}" allowOverlap="${allowOverlapAttr}"${hiddenAttr}>`,
-    `<wp:simplePos x="${intAttr(simplePos.x)}" y="${intAttr(simplePos.y)}"/>`,
+    `<wp:anchor${serializeAnchorAttributes({
+      anchor: image.anchor,
+      wrap: image.wrap,
+      behindDoc: image.wrap.type === "behind",
+    })}>`,
+    serializeSimplePos(image.anchor),
     position,
     `<wp:extent cx="${intAttr(cx)}" cy="${intAttr(cy)}"/>`,
     effectExtentEl,
@@ -713,13 +694,19 @@ function serializeShapeContent(content: ShapeContent): string {
   const cy = shape.size.height;
   const isTextBox = shape.shapeType === "textBox";
   const isFloating = shape.wrap && shape.wrap.type !== "inline";
-  const wrapDistances = serializeWrapDistanceAttrs(shape.wrap);
   const docPrId = getUniqueId(shape.id);
   const docPrNames = serializeNonVisualDrawingNames({
     ...(shape.name !== undefined ? { name: shape.name } : {}),
     ...(shape.alt !== undefined ? { alt: shape.alt } : {}),
     ...(shape.title !== undefined ? { title: shape.title } : {}),
   });
+  // `wps:cNvPr` is the shape's own `CT_NonVisualDrawingProps`, separate from
+  // the drawing's `wp:docPr` above. Written only where the source had one: the
+  // element is optional, and an invented one would name every rebuilt shape.
+  const shapeNames =
+    shape.shapeNames === undefined
+      ? ""
+      : `<wps:cNvPr id="${docPrId}"${serializeNonVisualDrawingNames(shape.shapeNames)}/>`;
 
   const xfrmAttrs = serializeTransformAttrs(shape.transform);
 
@@ -809,6 +796,7 @@ function serializeShapeContent(content: ShapeContent): string {
   // text, so a shape with no text body still writes an empty one.
   const wsp = [
     "<wps:wsp>",
+    shapeNames,
     `<wps:cNvSpPr${isTextBox ? ' txBox="1"' : ""}/>`,
     spPr,
     textBody === "" ? "<wps:bodyPr/>" : textBody,
@@ -827,7 +815,7 @@ function serializeShapeContent(content: ShapeContent): string {
   if (!isFloating) {
     return [
       "<w:drawing>",
-      `<wp:inline${wrapDistances}>`,
+      `<wp:inline${serializeInlineAttributes(shape.wrap)}>`,
       `<wp:extent cx="${intAttr(cx)}" cy="${intAttr(cy)}"/>`,
       '<wp:effectExtent l="0" t="0" r="0" b="0"/>',
       `<wp:docPr id="${docPrId}"${docPrNames}/>`,
@@ -839,7 +827,6 @@ function serializeShapeContent(content: ShapeContent): string {
   }
 
   // Floating shape
-  const behindDoc = shape.wrap?.type === "behind" ? "1" : "0";
   const position = shape.position
     ? serializePosition(shape.position)
     : '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>';
@@ -850,8 +837,12 @@ function serializeShapeContent(content: ShapeContent): string {
 
   return [
     "<w:drawing>",
-    `<wp:anchor${wrapDistances} simplePos="0" relativeHeight="251658240" behindDoc="${behindDoc}" locked="0" layoutInCell="1" allowOverlap="1">`,
-    '<wp:simplePos x="0" y="0"/>',
+    `<wp:anchor${serializeAnchorAttributes({
+      anchor: shape.anchor,
+      wrap: shape.wrap,
+      behindDoc: shape.wrap.type === "behind",
+    })}>`,
+    serializeSimplePos(shape.anchor),
     position,
     `<wp:extent cx="${intAttr(cx)}" cy="${intAttr(cy)}"/>`,
     '<wp:effectExtent l="0" t="0" r="0" b="0"/>',

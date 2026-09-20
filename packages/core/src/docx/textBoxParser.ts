@@ -39,11 +39,13 @@ import type {
   MediaFile,
 } from "../types/document";
 import { emuToPixels } from "../utils/units";
+import { parseDrawingAnchor, WORDPROCESSING_DRAWING_NAMESPACE_URIS } from "./drawingAnchor";
 import {
   parseFill,
   parseOutline,
   parseAnchorPosition,
   parseAnchorWrap,
+  parseInlineWrap,
   resolveColorValueToHex,
 } from "./drawingUtils";
 import { parseNonVisualDrawingNames } from "./nonVisualDrawingProps";
@@ -278,12 +280,20 @@ export function parseTextBoxContent(
 // ============================================================================
 
 /**
+ * The `wp:inline` or `wp:anchor` a drawing hangs off, resolved by namespace:
+ * the `wp` prefix is the producer's choice and a package free to bind the
+ * namespace elsewhere writes the same text box.
+ */
+const findDrawingContainer = (drawingEl: XmlElement): XmlElement | null =>
+  findChildByNamespaceUri(drawingEl, WORDPROCESSING_DRAWING_NAMESPACE_URIS, "inline") ??
+  findChildByNamespaceUri(drawingEl, WORDPROCESSING_DRAWING_NAMESPACE_URIS, "anchor");
+
+/**
  * Check if a drawing element contains a text box
  * Text boxes are shapes with wps:txbx content
  */
 export function isTextBoxDrawing(drawingEl: XmlElement): boolean {
-  const children = getChildElements(drawingEl);
-  const container = children.find((el) => el.name === "wp:inline" || el.name === "wp:anchor");
+  const container = findDrawingContainer(drawingEl);
 
   if (!container) {
     return false;
@@ -334,16 +344,13 @@ export function isShapeTextBox(wsp: XmlElement): boolean {
  * @returns TextBox object with placeholder content, or null if not a text box
  */
 export function parseTextBox(drawingEl: XmlElement): TextBox | null {
-  const children = getChildElements(drawingEl);
-
-  // Find wp:inline or wp:anchor
-  const container = children.find((el) => el.name === "wp:inline" || el.name === "wp:anchor");
+  const container = findDrawingContainer(drawingEl);
 
   if (!container) {
     return null;
   }
 
-  const isAnchor = container.name === "wp:anchor";
+  const isAnchor = getLocalName(container.name) === "anchor";
 
   // Navigate to graphic data
   const graphic = findByFullName(container, "a:graphic");
@@ -441,8 +448,13 @@ export function parseTextBox(drawingEl: XmlElement): TextBox | null {
     if (wrap) {
       textBox.wrap = wrap;
     }
+
+    const anchor = parseDrawingAnchor(container);
+    if (anchor) {
+      textBox.anchor = anchor;
+    }
   } else {
-    textBox.wrap = { type: "inline" };
+    textBox.wrap = parseInlineWrap(container);
   }
 
   return textBox;

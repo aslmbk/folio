@@ -31,7 +31,6 @@ import type {
   ImageCrop,
   ImageDocPrLink,
   ImageSize,
-  ImageWrap,
   ImagePosition,
   ImageTransform,
   ImagePadding,
@@ -46,9 +45,11 @@ import {
   parseAnchorBehindDoc,
   parsePositionH,
   parsePositionV,
-  WRAP_ELEMENT_NAMES as WRAP_ELEMENTS,
+  findWrapElement,
+  parseInlineWrap,
   parseWrapElement,
 } from "./drawingUtils";
+import { parseDrawingAnchor, WORDPROCESSING_DRAWING_NAMESPACE_URIS } from "./drawingAnchor";
 import { parseGraphicFrameLocks } from "./graphicFrameLocks";
 import { parseNonVisualDrawingNames } from "./nonVisualDrawingProps";
 import { RELATIONSHIP_TYPES, resolveRelationshipIdOfType } from "./relsParser";
@@ -101,17 +102,14 @@ function rotToDegrees(rot: string | null | undefined): number | undefined {
 // ============================================================================
 
 /**
- * Find any of the specified elements
+ * A child of `wp:inline` or `wp:anchor`, resolved by namespace.
+ *
+ * The `wp` prefix is the producer's choice, not the document's meaning: a
+ * package that binds the WordprocessingDrawing namespace to another prefix
+ * carries the same `wp:extent` and a prefix-matched read finds none of it.
  */
-function findAnyOf(parent: XmlElement, names: string[]): XmlElement | null {
-  const children = getChildElements(parent);
-  for (const child of children) {
-    if (names.includes(child.name || "")) {
-      return child;
-    }
-  }
-  return null;
-}
+const findDrawingChild = (parent: XmlElement | null, localName: string): XmlElement | null =>
+  findChildByNamespaceUri(parent, WORDPROCESSING_DRAWING_NAMESPACE_URIS, localName);
 
 // ============================================================================
 // SIZE PARSING
@@ -392,22 +390,25 @@ function parseTransform(xfrm: XmlElement | null): ImageTransform | undefined {
  * `a:srcRect` crop element, so callers that need either share this walk.
  */
 function findBlipFillElement(container: XmlElement): XmlElement | null {
-  const graphic = findByFullName(container, "a:graphic");
-  if (!graphic) {
-    return null;
-  }
+  return findByFullName(findPictureElement(container), "pic:blipFill");
+}
 
-  const graphicData = findByFullName(graphic, "a:graphicData");
-  if (!graphicData) {
-    return null;
-  }
+/** `a:graphic > a:graphicData > pic:pic`, the one walk every picture read shares. */
+function findPictureElement(container: XmlElement): XmlElement | null {
+  const graphicData = findByFullName(findByFullName(container, "a:graphic"), "a:graphicData");
+  return findByFullName(graphicData, "pic:pic");
+}
 
-  const pic = findByFullName(graphicData, "pic:pic");
-  if (!pic) {
-    return null;
-  }
-
-  return findByFullName(pic, "pic:blipFill");
+/**
+ * `pic:cNvPr` — the picture's own name, alt text and title.
+ *
+ * Not `wp:docPr`'s. They are two `CT_NonVisualDrawingProps` elements on the
+ * same drawing and a reader names the object from whichever one it is looking
+ * at, so folding them together loses whichever the source did not repeat.
+ */
+function findPictureNonVisualProps(container: XmlElement): XmlElement | null {
+  const pic = findPictureElement(container);
+  return pic ? findByFullName(findByFullName(pic, "pic:nvPicPr"), "pic:cNvPr") : null;
 }
 
 /**
@@ -453,17 +454,6 @@ function parseImageCrop(blipFill: XmlElement | null): ImageCrop | undefined {
     crop.bottom = bottom;
   }
   return crop;
-}
-
-/**
- * Parse an OOXML `ST_OnOff` attribute on an element. Accepts the full
- * set of literals the spec allows (`"1"`/`"true"`/`"on"` and
- * `"0"`/`"false"`/`"off"`); anything else (including an absent
- * attribute) folds back to `undefined` so callers can apply the
- * spec-defined default.
- */
-function parseOnOffAttr(element: XmlElement, name: string): boolean | undefined {
-  return parseOnOffValue(getAttribute(element, null, name));
 }
 
 /**
@@ -566,28 +556,8 @@ function extractBlipRId(blip: XmlElement | null): string | undefined {
  * Path: a:graphic > a:graphicData > pic:pic > pic:spPr > a:xfrm
  */
 function findPictureTransform(container: XmlElement): XmlElement | null {
-  const graphic = findByFullName(container, "a:graphic");
-  if (!graphic) {
-    return null;
-  }
-
-  const graphicData = findByFullName(graphic, "a:graphicData");
-  if (!graphicData) {
-    return null;
-  }
-
-  const pic = findByFullName(graphicData, "pic:pic");
-  if (!pic) {
-    return null;
-  }
-
-  const spPr = findByFullName(pic, "pic:spPr");
-  if (!spPr) {
-    return null;
-  }
-
-  const xfrm = findByFullName(spPr, "a:xfrm");
-  return xfrm;
+  const spPr = findByFullName(findPictureElement(container), "pic:spPr");
+  return findByFullName(spPr, "a:xfrm");
 }
 
 // ============================================================================
@@ -744,18 +714,22 @@ function parseInline(
   media: Map<string, MediaFile> | undefined,
 ): Image {
   // Parse extent (size)
-  const extent = findByFullName(inlineEl, "wp:extent");
+  const extent = findDrawingChild(inlineEl, "extent");
   const size = parseExtent(extent);
 
   // Parse effect extent
-  const effectExtent = findByFullName(inlineEl, "wp:effectExtent");
+  const effectExtent = findDrawingChild(inlineEl, "effectExtent");
   const padding = parseEffectExtent(effectExtent);
 
   // Parse document properties
-  const docPr = findByFullName(inlineEl, "wp:docPr");
+  const docPr = findDrawingChild(inlineEl, "docPr");
   const props = parseDocProps(docPr);
 
   const frameLocks = parseGraphicFrameLocks(inlineEl);
+
+  // `pic:cNvPr`'s own set, kept apart from `wp:docPr`'s above: the rebuild
+  // wrote the media filename here, renaming every picture the author had named.
+  const pictureNames = parseNonVisualDrawingNames(findPictureNonVisualProps(inlineEl));
 
   // Find blip and extract rId
   const blipFill = findBlipFillElement(inlineEl);
@@ -772,25 +746,7 @@ function parseInline(
   const xfrm = findPictureTransform(inlineEl);
   const transform = parseTransform(xfrm);
 
-  // Read distance attributes from wp:inline (OOXML spec: distT, distB, distL, distR)
-  const distT = parseNumericAttribute(inlineEl, null, "distT") ?? undefined;
-  const distB = parseNumericAttribute(inlineEl, null, "distB") ?? undefined;
-  const distL = parseNumericAttribute(inlineEl, null, "distL") ?? undefined;
-  const distR = parseNumericAttribute(inlineEl, null, "distR") ?? undefined;
-
-  const wrap: ImageWrap = { type: "inline" };
-  if (distT !== undefined) {
-    wrap.distT = distT;
-  }
-  if (distB !== undefined) {
-    wrap.distB = distB;
-  }
-  if (distL !== undefined) {
-    wrap.distL = distL;
-  }
-  if (distR !== undefined) {
-    wrap.distR = distR;
-  }
+  const wrap = parseInlineWrap(inlineEl);
 
   const image: Image = {
     type: "image",
@@ -811,6 +767,9 @@ function parseInline(
   }
   if (props.title !== undefined) {
     image.title = props.title;
+  }
+  if (Object.keys(pictureNames).length > 0) {
+    image.pictureNames = pictureNames;
   }
   if (props.decorative !== undefined) {
     image.decorative = props.decorative;
@@ -872,44 +831,29 @@ function parseAnchor(
   media: Map<string, MediaFile> | undefined,
 ): Image {
   // Parse extent (size)
-  const extent = findByFullName(anchorEl, "wp:extent");
+  const extent = findDrawingChild(anchorEl, "extent");
   const size = parseExtent(extent);
 
   // Parse effect extent
-  const effectExtent = findByFullName(anchorEl, "wp:effectExtent");
+  const effectExtent = findDrawingChild(anchorEl, "effectExtent");
   const padding = parseEffectExtent(effectExtent);
 
   // Parse document properties
-  const docPr = findByFullName(anchorEl, "wp:docPr");
+  const docPr = findDrawingChild(anchorEl, "docPr");
   const props = parseDocProps(docPr);
 
   const frameLocks = parseGraphicFrameLocks(anchorEl);
 
+  // `pic:cNvPr`'s own set, kept apart from `wp:docPr`'s above: the rebuild
+  // wrote the media filename here, renaming every picture the author had named.
+  const pictureNames = parseNonVisualDrawingNames(findPictureNonVisualProps(anchorEl));
+
   const behindDoc = parseAnchorBehindDoc(anchorEl);
 
-  // OOXML defaults `layoutInCell` and `allowOverlap` to "1" (true) when the
-  // attributes are absent. We only record the value when the document
-  // deviates from the default so the round-trip preserves author intent
-  // without bloating the serialized XML. Mirrors eigenpal #424.
-  //
-  // `ST_OnOff` accepts "1"/"true"/"on" and "0"/"false"/"off"; anything
-  // unrecognized folds back to `undefined` (default).
-  const layoutInCell = parseOnOffAttr(anchorEl, "layoutInCell");
-  const allowOverlap = parseOnOffAttr(anchorEl, "allowOverlap");
-
-  // The rest of `CT_Anchor`'s own attributes, on the same terms: absent states
-  // nothing, and the serializer used to write a constant for each — `simplePos
-  // ="0" relativeHeight="251658240" locked="0"` on every anchor — so a document
-  // that stacked two pictures deliberately came back with them on one layer.
-  const locked = parseOnOffAttr(anchorEl, "locked");
-  const anchorHidden = parseOnOffAttr(anchorEl, "hidden");
-  const useSimplePosition = parseOnOffAttr(anchorEl, "simplePos");
-  const relativeHeight = parseNumericAttribute(anchorEl, null, "relativeHeight") ?? undefined;
-  const simplePosEl = findByFullName(anchorEl, "wp:simplePos");
-  const simplePosX = parseNumericAttribute(simplePosEl, null, "x");
-  const simplePosY = parseNumericAttribute(simplePosEl, null, "y");
-  const simplePosition =
-    simplePosX == null || simplePosY == null ? undefined : { x: simplePosX, y: simplePosY };
+  // `CT_Anchor`'s own attributes and its `wp:simplePos`, from the one owner an
+  // image, a shape and a text box share: absent states nothing, and a rebuild
+  // writes OOXML's default rather than a constant folio chose.
+  const anchor = parseDrawingAnchor(anchorEl);
 
   // Read distance attributes from the wp:anchor element itself (fallback values)
   const anchorDistT = parseNumericAttribute(anchorEl, null, "distT");
@@ -924,12 +868,12 @@ function parseAnchor(
   };
 
   // Parse wrap element (wrap child values take priority over anchor-level values)
-  const wrapEl = findAnyOf(anchorEl, WRAP_ELEMENTS);
+  const wrapEl = findWrapElement(anchorEl);
   const wrap = parseWrapElement(wrapEl, behindDoc, anchorDistances);
 
   // Parse position
-  const posH = findByFullName(anchorEl, "wp:positionH");
-  const posV = findByFullName(anchorEl, "wp:positionV");
+  const posH = findDrawingChild(anchorEl, "positionH");
+  const posV = findDrawingChild(anchorEl, "positionV");
   const horizontal = parsePositionH(posH);
   const vertical = parsePositionV(posV);
 
@@ -976,6 +920,9 @@ function parseAnchor(
   if (props.title !== undefined) {
     image.title = props.title;
   }
+  if (Object.keys(pictureNames).length > 0) {
+    image.pictureNames = pictureNames;
+  }
   if (props.decorative !== undefined) {
     image.decorative = props.decorative;
   }
@@ -1016,26 +963,8 @@ function parseAnchor(
   if (frameLocks) {
     image.frameLocks = frameLocks;
   }
-  if (layoutInCell !== undefined) {
-    image.layoutInCell = layoutInCell;
-  }
-  if (allowOverlap !== undefined) {
-    image.allowOverlap = allowOverlap;
-  }
-  if (locked !== undefined) {
-    image.locked = locked;
-  }
-  if (anchorHidden !== undefined) {
-    image.anchorHidden = anchorHidden;
-  }
-  if (useSimplePosition !== undefined) {
-    image.useSimplePosition = useSimplePosition;
-  }
-  if (relativeHeight !== undefined) {
-    image.relativeHeight = relativeHeight;
-  }
-  if (simplePosition !== undefined) {
-    image.simplePosition = simplePosition;
+  if (anchor !== undefined) {
+    image.anchor = anchor;
   }
 
   // The `wp:docPr` links, target-checked. Mirrors hyperlinkParser.ts: an
@@ -1066,19 +995,16 @@ export function parseDrawing(
     return null;
   }
 
-  const children = getChildElements(drawingEl);
-
-  for (const child of children) {
-    const name = child.name || "";
-
-    if (name === "wp:inline" || name === "wp:anchor") {
-      return name === "wp:inline"
-        ? parseInline(child, rels, media)
-        : parseAnchor(child, rels, media);
-    }
+  // Which of the two a drawing carries is its anchoring, and the namespace is
+  // what says so. A producer binding WordprocessingDrawing to a prefix other
+  // than `wp` writes the same document, and matching the spelling read it as
+  // no drawing at all.
+  const inline = findDrawingChild(drawingEl, "inline");
+  if (inline) {
+    return parseInline(inline, rels, media);
   }
-
-  return null;
+  const anchor = findDrawingChild(drawingEl, "anchor");
+  return anchor ? parseAnchor(anchor, rels, media) : null;
 }
 
 /**
