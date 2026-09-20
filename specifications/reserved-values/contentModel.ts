@@ -668,6 +668,9 @@ export const TABLE_ROW_RESERVED = {
   propertyChanges: NO_RESERVED_VALUE,
   structuralChange: NO_RESERVED_VALUE,
   cells: NO_RESERVED_VALUE,
+  // Captured bytes, replayed as written. A reserved value is a spelling the
+  // model interprets; this slot interprets nothing.
+  preserved: NO_RESERVED_VALUE,
 } satisfies Record<keyof TableRow, ReservedValueDisposition>;
 
 export type ExhaustiveTableRowReserved = ExhaustiveFields<
@@ -681,8 +684,6 @@ export const TABLE_RESERVED = {
   propertyChanges: NO_RESERVED_VALUE,
   columnWidths: NO_RESERVED_VALUE,
   rows: NO_RESERVED_VALUE,
-  rawMarkersAfter: NO_RESERVED_VALUE,
-  rawMarkersBefore: NO_RESERVED_VALUE,
 } satisfies Record<keyof Table, ReservedValueDisposition>;
 
 export type ExhaustiveTableReserved = ExhaustiveFields<Table, keyof typeof TABLE_RESERVED>;
@@ -696,6 +697,9 @@ export const COMMENT_RESERVED = {
   annotationReferenceFormatting: NO_RESERVED_VALUE,
   parentId: NO_RESERVED_VALUE,
   done: NO_RESERVED_VALUE,
+  // Captured bytes, replayed as written. A reserved value is a spelling the
+  // model interprets; this slot interprets nothing.
+  preserved: NO_RESERVED_VALUE,
 } satisfies Record<keyof Comment, ReservedValueDisposition>;
 
 export type ExhaustiveCommentReserved = ExhaustiveFields<Comment, keyof typeof COMMENT_RESERVED>;
@@ -1030,8 +1034,6 @@ export const BLOCK_SDT_RESERVED = {
   type: NO_RESERVED_VALUE,
   properties: NO_RESERVED_VALUE,
   content: NO_RESERVED_VALUE,
-  rawMarkersAfter: NO_RESERVED_VALUE,
-  rawMarkersBefore: NO_RESERVED_VALUE,
 } satisfies Record<keyof BlockSdt, ReservedValueDisposition>;
 
 export type ExhaustiveBlockSdtReserved = ExhaustiveFields<
@@ -1061,8 +1063,6 @@ export const PARAGRAPH_RESERVED = {
   listRendering: NO_RESERVED_VALUE,
   renderedPageBreakBefore: NO_RESERVED_VALUE,
   sectionProperties: NO_RESERVED_VALUE,
-  rawMarkersAfter: NO_RESERVED_VALUE,
-  rawMarkersBefore: NO_RESERVED_VALUE,
 } satisfies Record<keyof Paragraph, ReservedValueDisposition>;
 
 export type ExhaustiveParagraphReserved = ExhaustiveFields<

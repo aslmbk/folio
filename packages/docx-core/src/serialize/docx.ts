@@ -121,6 +121,27 @@ export type SerializeDocumentOptions = {
   language?: string;
 };
 
+/**
+ * Writes a package from scratch, for a `Document` that was built rather than
+ * parsed: today the legal-source compiler's.
+ *
+ * It writes the subset of OOXML that compiler produces. It has no relationship
+ * table, no media, no verbatim capture and no namespace scope, so a **parsed**
+ * `Document` handed to it comes back without its drawings, its fields, its
+ * tracked changes or its preserved markup — `serializeRunContent` returns `""`
+ * for most of `RunContent`. A round trip belongs in `@stll/folio-core`'s
+ * `repackDocx`, which rebuilds a package against the one it read.
+ *
+ * Making that a compile error wants a branded `ConstructedDocument` that only
+ * a from-scratch builder can mint. It is not clean today: the two suites that
+ * exercise this writer (`serialize/docx.test.ts` and `core`'s
+ * `xmlValuePreservation.property.test.ts`) build their `Document` as a literal,
+ * so the brand needs a public mint, and a public mint a parsed document can be
+ * passed through is decoration rather than a guard. The prerequisite is a
+ * from-scratch document builder those suites can call; the brand follows it,
+ * not the other way round.
+ */
+
 export const serializeDocumentToDocx = async (
   document: Document,
   options: SerializeDocumentOptions = {},
@@ -174,6 +195,10 @@ const serializeBlock = (block: BlockContent): string => {
       return serializeTable(block);
     case "blockSdt":
       return "";
+    // Self-contained, the way `captureVerbatimXml` wrote it: the same replay
+    // the run-level capture gets one level down.
+    case "preservedBlock":
+      return block.xml;
     default:
       block satisfies never;
       return "";
@@ -278,6 +303,7 @@ const serializeParagraphContent = (content: ParagraphContent): string => {
     case "moveToRangeEnd":
     case "bidiWrapper":
     case "mathEquation":
+    case "preservedInline":
       return "";
     default:
       content satisfies never;
@@ -375,6 +401,11 @@ const serializeRunContent = (content: RunContent): string => {
       return `<w:footnoteReference w:id="${content.id}"/>`;
     case "endnoteRef":
       return `<w:endnoteReference w:id="${content.id}"/>`;
+    // Captured markup is self-contained: `captureVerbatimXml` materialises the
+    // namespace bindings its prefixes need, so it replays under this writer's
+    // root as well as under a rebuilt one.
+    case "preservedXml":
+      return content.xml;
     case "fieldChar":
     case "instrText":
     case "softHyphen":

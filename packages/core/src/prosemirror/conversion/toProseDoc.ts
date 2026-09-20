@@ -26,8 +26,11 @@ import type {
   Document,
   Paragraph,
   ParagraphFormatting,
+  PreservedBlock,
+  PreservedInline,
   Run,
   RunPropertyChange,
+  TableCellBlock,
   TextFormatting,
   RunContent,
   Hyperlink,
@@ -100,6 +103,7 @@ import {
 import { schema } from "../schema";
 import { RUN_FORMATTING_PROPERTY_SPECS } from "../schema/marks";
 import { cascadeStyleTextFormatting } from "../styles/styleToggleCascade";
+import { PRESERVED_XML_LEVELS } from "../schema/nodes";
 import type {
   ImagePositionAttrs,
   ParagraphAttrs,
@@ -235,6 +239,9 @@ const collectPairedBookmarkIds = (blocks: readonly BlockContent[]): ReadonlySet<
         case "run":
           visitRun(child);
           break;
+        // Opaque markup: it anchors no bookmark and holds no run.
+        case "preservedInline":
+          break;
         default: {
           const unsupported: never = child;
           panic(`Unsupported hyperlink child: ${JSON.stringify(unsupported)}`);
@@ -261,7 +268,7 @@ const collectPairedBookmarkIds = (blocks: readonly BlockContent[]): ReadonlySet<
         for (const child of content.content) {
           if (child.type === "hyperlink") {
             visitHyperlink(child);
-          } else {
+          } else if (child.type === "run") {
             visitRun(child);
           }
         }
@@ -293,6 +300,7 @@ const collectPairedBookmarkIds = (blocks: readonly BlockContent[]): ReadonlySet<
       case "moveToRangeStart":
       case "moveToRangeEnd":
       case "mathEquation":
+      case "preservedInline":
         return;
       default: {
         const unsupported: never = content;
@@ -318,6 +326,9 @@ const collectPairedBookmarkIds = (blocks: readonly BlockContent[]): ReadonlySet<
           break;
         case "blockSdt":
           visitBlocks(block.content);
+          break;
+        // Opaque markup: nothing inside it for a visitor to reach.
+        case "preservedBlock":
           break;
         default: {
           const unsupported: never = block;
@@ -390,6 +401,9 @@ export function toProseDoc(document: Document, options?: ToProseDocOptions): PMN
         case "blockSdt":
           out.push(convertBlockSdt(block, convertBodyBlocks));
           break;
+        case "preservedBlock":
+          out.push(convertPreservedBlock(block));
+          break;
         default: {
           const unsupported: never = block;
           panic(`Unsupported block content: ${JSON.stringify(unsupported)}`);
@@ -433,6 +447,32 @@ export function toProseDoc(document: Document, options?: ToProseDocOptions): PMN
     "Document conversion produced an invalid ProseMirror document",
   );
   return pmDoc;
+}
+
+/**
+ * Carry a block folio does not model into the editor as a zero-width node.
+ *
+ * The node's place in the document is the whole of its position, so it needs
+ * no index and nothing has to keep one honest as the blocks around it change.
+ */
+function convertPreservedBlock(block: PreservedBlock): PMNode {
+  return schema.node("preservedBlock", { xml: block.xml });
+}
+
+/**
+ * Carry an inline child folio does not model into the editor as an opaque atom.
+ *
+ * The same atom the run level uses, tagged with the level it came from: the
+ * markup is a paragraph child and the save path must not put it back inside a
+ * `w:r`. It carries whatever marks surround it, so a capture inside a
+ * `w:ins` keeps the insertion and is accepted or rejected with it.
+ */
+function preservedInlineNode(content: PreservedInline): PMNode {
+  return schema.node("preservedXml", {
+    xml: content.xml,
+    text: content.text,
+    level: PRESERVED_XML_LEVELS.inline,
+  });
 }
 
 /**
@@ -780,6 +820,9 @@ function convertParagraph(
       case "moveToRangeStart":
       case "moveToRangeEnd":
         break;
+      case "preservedInline":
+        emitInlineNode(preservedInlineNode(content));
+        break;
       default: {
         const unsupported: never = content;
         panic(`Unsupported paragraph content: ${JSON.stringify(unsupported)}`);
@@ -939,6 +982,8 @@ function convertTrackedChange(
           displacedByCustomXml: item.displacedByCustomXml,
         }),
       );
+    } else if (item.type === "preservedInline") {
+      nodes.push(preservedInlineNode(item));
     } else {
       const unsupported: never = item;
       panic(`Unsupported tracked-run content: ${JSON.stringify(unsupported)}`);
@@ -1695,7 +1740,11 @@ function tableCellHasMeaningfulContent(cell: TableCell): boolean {
   return cell.content.some(blockHasMeaningfulContent);
 }
 
-function blockHasMeaningfulContent(block: Paragraph | Table): boolean {
+function blockHasMeaningfulContent(block: TableCellBlock): boolean {
+  // Markup the cell carries is content, even though folio cannot read it.
+  if (block.type === "preservedBlock") {
+    return true;
+  }
   if (block.type === "table") {
     return block.rows.some((row) => row.cells.some((cell) => tableCellHasMeaningfulContent(cell)));
   }
@@ -2412,22 +2461,31 @@ function convertTableCell({
   // Convert cell content (paragraphs and nested tables)
   const contentNodes: PMNode[] = [];
   for (const content of cell.content) {
-    if (content.type === "paragraph") {
-      contentNodes.push(
-        ...convertParagraphWithTextBoxes(content, styleResolver, {
-          textBoxGroupId: context.nextTextBoxGroupId(),
-          context,
-          ...(conditionalStyle?.rPr !== undefined
-            ? { extraRunFormatting: conditionalStyle.rPr }
-            : {}),
-          ...(conditionalStyle?.pPr !== undefined
-            ? { tableParagraphOverlay: conditionalStyle.pPr }
-            : {}),
-        }),
-      );
-    } else {
-      // Nested tables - recursively convert
-      contentNodes.push(convertTable(content, styleResolver, context));
+    switch (content.type) {
+      case "paragraph":
+        contentNodes.push(
+          ...convertParagraphWithTextBoxes(content, styleResolver, {
+            textBoxGroupId: context.nextTextBoxGroupId(),
+            context,
+            ...(conditionalStyle?.rPr !== undefined
+              ? { extraRunFormatting: conditionalStyle.rPr }
+              : {}),
+            ...(conditionalStyle?.pPr !== undefined
+              ? { tableParagraphOverlay: conditionalStyle.pPr }
+              : {}),
+          }),
+        );
+        break;
+      case "table":
+        contentNodes.push(convertTable(content, styleResolver, context));
+        break;
+      case "preservedBlock":
+        contentNodes.push(convertPreservedBlock(content));
+        break;
+      default: {
+        const unsupported: never = content;
+        panic(`Unsupported table cell content: ${JSON.stringify(unsupported)}`);
+      }
     }
   }
 
@@ -2509,9 +2567,14 @@ function convertField(
   let fieldPropertyChanges: readonly RunPropertyChange[] | undefined;
   const inlineNodes: PMNode[] = [];
   const hasPageBreakContent = fieldResultHasPageBreakContent(field);
+  // A capture has no other carrier: a field collapsed to its display text
+  // would drop the markup, so a field holding one keeps its children.
   const hasStructuredSourceContent =
     hasPageBreakContent ||
-    (field.type === "simpleField" && field.content.some((content) => content.type === "hyperlink"));
+    (field.type === "simpleField" &&
+      field.content.some(
+        (content) => content.type === "hyperlink" || content.type === "preservedInline",
+      ));
   const appendRun = (run: Run): void => {
     for (const content of run.content) {
       if (content.type === "text") {
@@ -2538,6 +2601,10 @@ function convertField(
     for (const content of field.content) {
       if (content.type === "run") {
         appendRun(content);
+        continue;
+      }
+      if (content.type === "preservedInline") {
+        inlineNodes.push(preservedInlineNode(content));
         continue;
       }
       for (const child of content.children) {
@@ -2592,8 +2659,13 @@ function convertField(
   const hasConvertedPageBreakContent = inlineNodes.some(
     (node) => node.type.name === "pageBreakRun",
   );
+  const hasConvertedPreservedContent = inlineNodes.some(
+    (node) => node.type.name === "preservedXml",
+  );
   const createStructuredField =
-    hasConvertedPageBreakContent || (hasStructuredSourceContent && hasConvertedHyperlinkContent);
+    hasConvertedPageBreakContent ||
+    hasConvertedPreservedContent ||
+    (hasStructuredSourceContent && hasConvertedHyperlinkContent);
   if (!createStructuredField && fieldPropertyChanges && fieldPropertyChanges.length > 0) {
     marks.push(schema.mark("runPropertyChange", { changes: [...fieldPropertyChanges] }));
   }
@@ -2739,6 +2811,9 @@ function convertInlineSdt(
         }
         break;
       }
+      case "preservedInline":
+        inlineNodes.push(preservedInlineNode(content));
+        break;
       default: {
         const unsupported: never = content;
         panic(`Unsupported inline SDT content: ${JSON.stringify(unsupported)}`);
@@ -2806,11 +2881,22 @@ const runHasPageBreakContent = (run: Run): boolean =>
  */
 const fieldResultHasPageBreakContent = (field: SimpleField | ComplexField): boolean =>
   field.type === "simpleField"
-    ? field.content.some((content) =>
-        content.type === "run"
-          ? runHasPageBreakContent(content)
-          : content.children.some((child) => child.type === "run" && runHasPageBreakContent(child)),
-      )
+    ? field.content.some((content) => {
+        switch (content.type) {
+          case "run":
+            return runHasPageBreakContent(content);
+          case "hyperlink":
+            return content.children.some(
+              (child) => child.type === "run" && runHasPageBreakContent(child),
+            );
+          case "preservedInline":
+            return false;
+          default: {
+            const unsupported: never = content;
+            panic(`Unsupported simple-field content: ${JSON.stringify(unsupported)}`);
+          }
+        }
+      })
     : field.fieldResult.some(runHasPageBreakContent);
 
 function reportPageBreakSourceRunContent(run: Run, warn: PageBreakProjectionWarn): void {
@@ -2929,6 +3015,7 @@ const scanLeadingPageBreakContent = (
       return;
     case "commentReference":
     case "mathEquation":
+    case "preservedInline":
       if (scan.pageBreaks === 0) scan.contentBeforeBreak = true;
       return;
     default: {
@@ -3023,6 +3110,9 @@ function reportParagraphPageBreakRunContent(
         reportRunContentBesidePageBreak(content, "field-result", warn);
         continue;
       }
+      if (content.type !== "hyperlink") {
+        continue;
+      }
       for (const child of content.children) {
         if (child.type === "run") {
           reportRunContentBesidePageBreak(child, "field-result", warn);
@@ -3091,6 +3181,10 @@ function reportRunContentBesidePageBreak(
       case "drawing":
       case "endnoteRef":
       case "footnoteRef":
+      // An opaque atom rebuilds from its own attributes, exactly as a symbol
+      // does, so the page-break owner can re-cut the run around it. Refusing
+      // would cost the whole document the editor, which is the worse loss.
+      case "preservedXml":
       case "renderedPageBreak":
       case "symbol":
       case "tab":
@@ -3620,6 +3714,19 @@ function convertRunContent(
       // level via `convertField`, not as standalone inline content.
       return [];
 
+    // Opaque: the editor cannot edit markup it has no model for, and only has
+    // to carry it. The visible text rides along so a `w:ruby` base still reads.
+    case "preservedXml":
+      return [
+        schema
+          .node("preservedXml", {
+            xml: content.xml,
+            text: content.text,
+            level: PRESERVED_XML_LEVELS.run,
+          })
+          .mark(marks),
+      ];
+
     case "noBreakHyphen":
       return [schema.text("‑", marks)];
 
@@ -3984,6 +4091,13 @@ function convertHyperlink(
           [linkMark],
         ),
       );
+      continue;
+    }
+    if (child.type === "preservedInline") {
+      // The same opaque atom the paragraph level uses, carrying the link
+      // mark: markup authored inside a `w:hyperlink` is accepted, rejected
+      // and moved with the link rather than beside it.
+      nodes.push(preservedInlineNode(child).mark([linkMark]));
       continue;
     }
     if (child.type === "run") {
@@ -4784,6 +4898,9 @@ export function headerFooterToProseDoc(
           break;
         case "blockSdt":
           out.push(convertBlockSdt(block, convertBlocks));
+          break;
+        case "preservedBlock":
+          out.push(convertPreservedBlock(block));
           break;
         default: {
           const unsupported: never = block;

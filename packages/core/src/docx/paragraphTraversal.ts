@@ -67,6 +67,7 @@ export const visitParagraphRuns = (paragraph: Paragraph, visit: (run: Run) => vo
       case "moveToRangeStart":
       case "moveToRangeEnd":
       case "mathEquation":
+      case "preservedInline":
         return;
       default: {
         const unsupported: never = content;
@@ -136,6 +137,7 @@ export const visitInlineContentSlots = (
         case "moveToRangeStart":
         case "moveToRangeEnd":
         case "mathEquation":
+        case "preservedInline":
           break;
         default: {
           const unsupported: never = item;
@@ -224,6 +226,9 @@ export const visitDocxParagraphs = (
     }
     if (block.type === "table") {
       visitTable(block);
+      return;
+    }
+    if (block.type === "preservedBlock") {
       return;
     }
     visitBlocks(block.content);

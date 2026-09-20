@@ -86,6 +86,7 @@ export const buildPageBreakRunSourceDescendantIndex = (
         case "footnoteRef":
         case "instrText":
         case "noBreakHyphen":
+        case "preservedXml":
         case "renderedPageBreak":
         case "softHyphen":
         case "symbol":
@@ -161,6 +162,7 @@ export const buildPageBreakRunSourceDescendantIndex = (
         case "moveToRangeStart":
         case "moveToRangeEnd":
         case "mathEquation":
+        case "preservedInline":
           return 0;
         default: {
           const unsupported: never = content;
@@ -187,6 +189,9 @@ export const buildPageBreakRunSourceDescendantIndex = (
           return inspectMany(block.rows, inspectTableRow);
         case "blockSdt":
           return inspectBlocks(block.content);
+        // Opaque markup holds no run folio can index a page break against.
+        case "preservedBlock":
+          return 0;
         default: {
           const unsupported: never = block;
           return unsupported;

@@ -144,6 +144,277 @@ such as a tracked-change snapshot, wrong for anything a user edits. `dropped`
 names a reason class from `DROP_REASONS`, each of which states the mechanism and
 the kind of fix.
 
+## Where a capture lives
+
+The sink records a capture's position as `index`, a count of the modelled
+siblings that preceded it, and `serializeWithPreservedChildren` puts it back
+between the same two. That is the right shape for a container whose model is a
+list of something else — `Comment.content` is a paragraph list, so a table in a
+comment body has nowhere to be except beside an index.
+
+A **block** container is different, and its captures are not in the sink at
+all. `BlockContent` gained a `preservedBlock` member, so the capture is a block
+in its own right: it sits between the same two siblings in the model, in the
+ProseMirror document and in the saved part, and no index has to be kept honest
+as the blocks around it are inserted, split, merged or deleted. The editor leg
+falls out of that — `preservedBlock` is a zero-width, non-selectable atom whose
+position ProseMirror's own mapping maintains — and it is why the block
+containers carry no `lost-in-the-editor-projection` losses. The run level is
+built the same way: `RunContent.preservedXml` is a member of the run's content
+union, not a sink beside it.
+
+The inline level between them is `ParagraphContent`'s `preservedInline`, and
+there position is not merely convenient but load-bearing. A paragraph, a
+run-level tracked-change wrapper, a bidirectional wrapper and an inline content
+control share one walk, and `w:permStart`, `w:proofErr`, `w:customXml` and the
+eight custom-XML revision ranges are declared in all of them. Markup lifted out
+of a `w:ins` and written beside it survives the save and still breaks the
+document: accepting the insertion leaves the markup behind and rejecting it
+keeps markup belonging to a change nobody kept. So the capture is a member of
+the wrapper's own content union, it rides the insertion mark through the
+editor as the same opaque atom the run level uses, and the atom records which
+level it came from — `w:ruby` goes back inside a `w:r` and `w:permStart` may
+not, because the schema admits no such child of a run.
+
+A link and a simple field are the same level again. `CT_Hyperlink` and
+`CT_SimpleField` are both `EG_PContent`, so either may hold a permission
+range, a proofing error or a custom-XML revision range between its runs, and
+`Hyperlink["children"]` and `SimpleField["content"]` carry `PreservedInline`
+for the same reason `ParagraphContent` does. Two things about the link are
+worth writing down, because both are easy to get wrong:
+
+- **One map, two callers.** `parseHyperlink` reads a link, and the paragraph
+  parser's revision-segmenting walk reads one that holds `w:ins` or `w:del` —
+  OOXML nests the revision inside the link and the model nests the link inside
+  the revision, so the second cannot simply call the first. The handler map is
+  exported and the segmenting caller overrides exactly the four
+  `CT_RunTrackChange` names, so the other twenty-nine decisions are made once.
+- **The walk is flat and the segmenting happens after it.** A capture the
+  dispatcher's sink holds carries an index, and an index counted against
+  whichever segment happened to be open when the child was read would place
+  the markup in the wrong link. The walk records the hoisted revisions in
+  source order as items of the same list, the sink's captures are placed into
+  that one list, and only then is it cut into links and revisions.
+
+So the sink's `index` is for a container that models one kind of child, and a
+union member is for a container that models a sequence. Prefer the union member
+when there is one: an index that has to be maintained is a mirror, and a mirror
+drifts.
+
+Either way the pair is `captured-verbatim`, not `modelled`. The law answers the
+question by execution — it clears every capture and asks what still survives —
+so `CAPTURE_MEMBER_TYPES` and `CAPTURE_SINK_KEYS` in `laws.ts` have to name the
+sink's shapes alongside the `rawSomethingXml` fields. A capture that lives in
+the model's own union is still bytes, and a contract that called it `modelled`
+would promise an editor a thing it cannot edit.
+
+### A row: the sink, and where it stops
+
+`CT_Row` declares a permission range, a proofing error, the row-level comment
+and move ranges and the eight custom-XML revision ranges beside its cells.
+None of them is a cell, and a row models one kind of child, so this is the
+sink case rather than the union case: `TableRow.preserved` holds the capture
+with `index` counting the cells that preceded it, and the serializer puts it
+back between the same two. `w:trPr` and `w:tblPrEx` are `OWNED_ELSEWHERE` —
+the row's property parsers read them off the element, and capturing them as
+well would write each twice.
+
+**The editor leg stops here, and the reason is structural.** The block level
+carries its captures as a zero-width `preservedBlock` node, so ProseMirror's
+own mapping keeps the position honest. The table schema has no row-level node
+to do that with: a row's children are cells, and a zero-width atom between two
+of them is not a cell. Giving the row one means either a cell-shaped node that
+renders nothing — which every command that walks a row would have to learn to
+skip — or an attribute on the row node, which is an index and drifts the
+moment a column is inserted or deleted.
+
+So a row's captures survive a save and are lost by the editor projection, and
+the contract records exactly that: the 24 child pairs move from
+`dropped (neverParsed)` to `dropped (editorProjection)`. That is not a lateral
+move. `neverParsed` says folio never read the markup and a document that is
+merely opened and saved loses it; `editorProjection` says the markup is in the
+model and in the saved part, and only a round trip through the editor drops
+it. The fix for what remains is one decision about the table schema, not a
+parser.
+
+Both are transparent: their children are ordinary inline or block content and
+the wrapper adds a name, a URI and some properties. folio splices a
+`w:smartTag`'s children into the paragraph and keeps no wrapper, which costs
+`w:smartTag` its own 29 pairs and the two attributes that identify it.
+`w:customXml` is now captured whole instead, which keeps its 35 pairs at the
+price of its content being opaque in the editor — the right trade only because
+that content was previously dropped outright.
+
+Neither is the end state. The end state is a **`preservedWrapper`**: a range
+over the container's child indices, recorded beside the children rather than
+instead of them.
+
+- The record is `{ xml: string; from: number; to: number }` where `xml` is the
+  wrapper's start tag plus its `w:customXmlPr` / `w:smartTagPr` and its
+  attributes, and the two indices bracket the modelled children it held. On
+  save the serializer re-opens the wrapper before the child at `from` and
+  closes it after the child at `to`, so the children stay modelled and
+  editable and the wrapper comes back in the authored position.
+- Nesting falls out of ranges: two wrappers over overlapping-but-nested spans
+  re-open in index order, outermost first, which is the order they were read
+  in. Overlapping-but-not-nested ranges cannot occur, because the source was
+  a tree.
+- This is the one place the contract's "prefer a union member, an index
+  drifts" rule does not apply, and it has to be said why: the wrapper is not
+  _between_ two children, it is _around_ several, and a union member cannot
+  express that without making every child a child of the capture — which is
+  what capturing the wrapper whole already does, and is what costs the editor
+  the content.
+- The index does drift, and that is the honest cost. An edit that inserts a
+  paragraph inside the range grows the range in a way the author did not
+  write, and an edit that deletes every child in it leaves an empty wrapper.
+  Both are recoverable (the range clamps, an empty wrapper is still valid
+  markup); neither is losing content, which the alternatives are.
+- **Editor leg.** The cheap version is the bidi one: `w:bdo`/`w:dir` already
+  reach the editor as a mark spanning the inline content they wrap, and a
+  smart tag or custom-XML wrapper is the same shape — a non-exclusive mark
+  carrying the opaque start-tag markup, applied to every inline node in the
+  range. Marks split and merge with the text they are on, so the range is
+  maintained by ProseMirror rather than by an index. It stops being cheap at
+  the block level: a `w:customXml` around two paragraphs is not a mark, and
+  needs the index range after all. So the editor leg should ship for the
+  inline wrappers with the mark, and the block ones should stop at the save
+  law and say so in the contract.
+
+### What `lost-in-the-editor-projection` is and is not
+
+138 pairs carry this mechanism, and reading them as one defect gets the fix
+wrong. The law compares the fixture's markup against the part the editor round
+trip writes, and it asks only whether the markup is _somewhere_ in that part.
+Two things follow, and they point in opposite directions.
+
+**The census over-reports.** 108 of the 138 are the fixture rather than folio.
+A fixture puts the subject in the cheapest container that will hold it, which
+for these means an empty one: an empty `<w:ins/>` inside another, a comment
+range whose comment the fixture never writes, a move range with nothing moved,
+and the `w:author` / `w:date` / `w:id` of a wrapper holding no run. The editor
+spells a run-level revision as a _mark on inline content_ and a comment as a
+range over it; markup with no content under it has nothing to carry it, and
+dropping it is the projection working. `TrackedRunContent` already admits a
+nested `TrackedRunChange`, so a non-empty one survives. These are `dropped`
+with reason `editorProjection`, and the reason is the fixture's emptiness, not
+a missing projection.
+
+The honest remainder is 30:
+
+- **18 + 2** — `w:bdo` and `w:dir` in each of the nine containers that declare
+  them, plus their `w:val`. The editor has no bidirectional mark, so
+  `withoutBidiWrappers` keeps the content and loses the direction.
+- **3** — `w:hyperlink`'s `w:docLocation`, `w:history` and `w:tgtFrame`. The
+  editor's link mark carries `href`, `tooltip` and `rId` and nothing else.
+- **5** — `w:bookmarkStart`'s `w:colFirst`, `w:colLast` and
+  `w:displacedByCustomXml`, and `w:bookmarkEnd`'s `w:displacedByCustomXml` and
+  `w:id`. The editor's bookmark boundary normalises the pair's position and
+  keeps neither the table-column scope nor the displacement.
+- **2** — `w:softHyphen` and `w:noBreakHyphen` in a run. These are not lost:
+  the editor carries them as U+00AD and U+2011 inside the text, and the save
+  writes the character rather than the element. `present-with-a-different-value`
+  is the truer mechanism; the law does not reach it because it looks for the
+  element.
+
+**The census also under-reports, and that is the more serious half.**
+`pushTrackedChangeSegments` lifts out of the wrapper everything
+`TrackedRunContent` does not admit, and writes it beside. For a _marker_ —
+a comment range, a move range — that is invisible and harmless: document order
+is unchanged and the wrapper simply splits into two with the same attributes,
+which the revision-id pass then re-mints. For a _content-carrying wrapper_ it
+changes the document:
+
+```xml
+<w:ins …><w:bdo w:val="rtl"><w:r><w:t>x</w:t></w:r></w:bdo></w:ins>
+<!-- becomes -->
+<w:ins …/><w:bdo w:val="rtl"><w:r><w:t>x</w:t></w:r></w:bdo>
+```
+
+`x` is no longer inserted. Rejecting the revision now keeps it. `w:dir` and an
+inline `w:sdt` do the same thing. The law cannot see it, because the markup is
+still in the part; only a position-sensitive test can, which is why
+`trackedWrapperChildSurvival.test.ts` asserts about what is _inside_ the
+wrapper rather than what is in the paragraph.
+
+The fix is to widen `TrackedRunContent` (and `InlineSdt["content"]`) through
+the single total map in `inlineWrapperContent.ts`, and it is blocked on one
+decision rather than on effort: the editor has no carrier for either wrapper.
+A bidirectional wrapper wants the same non-exclusive mark the
+`preservedWrapper` section proposes for a smart tag, and an inline content
+control is an `inline*` node rather than an atom, so a revision mark applied to
+it lands on its children instead of on the control. Widening the model without
+those two is a save-leg fix with an editor leg that undoes it on the first open.
+
+### The attribute remainder, and what it would take
+
+`PreservedMarkup` once carried an ordered `attributes` list beside its
+`children`, with a `modelsAttribute` predicate on the dispatcher and a
+`serializePreservedAttributes` writer. Nothing in the product ever passed the
+predicate, so nothing was ever kept: it was a flag with no effect, which
+`AGENTS.md` bans, and it has been removed rather than left to look like
+coverage. Its design is written here because the next pass should put it back
+wired:
+
+- The census charges 30-odd `@rsid*` pairs to `w:p`, `w:r`, `w:tr`, `w:tc`,
+  `w:tbl`, `w:sectPr`, `w:pPr` and `w:rPr` as `never-parsed`. Word writes a
+  revision-session id on nearly every one of those elements and folio rebuilds
+  them without it, so a save rewrites the whole document's revision history.
+- The predicate has to be a predicate, not a name set. folio resolves an
+  attribute by namespace URI plus local name, and a remainder built by matching
+  `"w:id"` textually keeps a second copy of a `w:id` a source spelled
+  `altw:id`. Namespace declarations are not content: `captureVerbatimXml`
+  rebinds what a captured fragment needs, and replaying a container's own
+  bindings onto a rebuilt root fights the root's.
+- The carrier is a field on the element's own model record
+  (`Paragraph.preservedAttributes` and its siblings), not the child sink: an
+  attribute has no position among children to keep.
+- The editor leg is the boundary worth stating and testing. Attributes ride on
+  the block's or run's preserved record and survive an ordinary round trip; an
+  edit that rebuilds the element from scratch — splitting a paragraph, merging
+  two runs — produces an element that never had those attributes, and it must
+  not inherit a revision id from either neighbour. The rule is: the remainder
+  follows the record, and a record the editor creates has none.
+- `CAPTURE_SLOT_NAMES` in `laws.ts` has to name the field, or the survival law
+  will clear nothing and the contract will call the pair `modelled`.
+
+### Giving `styles.xml` and its neighbours a rebuild law
+
+`w:latentStyles` and `w:lsdException` are not in the census space at all, and
+neither is most of `w:style`. `schemaSpace.ts` walks from the roots of the
+parts folio rebuilds, and the synthesised fixture is a `w:document`: nothing
+reaches `styles.xml`, `numbering.xml`, `settings.xml`, `fontTable.xml` or
+`webSettings.xml`. A concurrent branch extends the census to root fixtures at
+those five parts and finds that a repack **copies** them byte for byte, so
+every pair under them passes without exercising anything. That is not survival,
+it is absence of measurement, and the two have to be told apart in the report:
+the right word for those pairs is **unmeasured**, not `modelled`.
+
+Making them measurable needs the same forcing the body already has, one level
+up. L2 works because `forcedSavePart` strips the verbatim captures the replay
+would hand back, so the _element_ serializers run. For these parts the replay
+is not a capture inside the model, it is the part itself: `rezip.ts` carries
+the original entry across unless something asked for it to be rewritten. So
+the law has to force the **part** serializer.
+
+- The part serializers that exist today are `stylesSerializer.ts`,
+  `numberingSerializer.ts`, `settingsSerializer.ts`, `fontTableSerializer.ts`
+  and `webSettingsSerializer.ts`. Each already takes a parsed model and returns
+  a part; none of them is on the save path for an untouched document.
+- The census needs a fixture builder rooted at each part (its own content-type
+  override and relationship, which the body builder does not synthesise), and a
+  `forcedSavePart` variant that calls the part serializer directly instead of
+  repacking. The four laws then read the same way they do for the body.
+- Expect the result to be large. `w:latentStyles` carries up to 375
+  `w:lsdException` children and folio models none of them; `w:style` has a
+  wide `w:pPr`/`w:rPr` surface that the style model flattens.
+- Latent-style capture then goes where the paragraph's did: on the model
+  record for `w:styles`, as a sink of the container's unmodelled children with
+  their position among the modelled ones. `w:latentStyles` is a single child of
+  `w:styles` with a fixed place in the content model, so one capture holds the
+  whole element including its exceptions; splitting it per `w:lsdException`
+  would buy nothing, because folio has no model for a single exception either.
+
 ### Why totality is a check and not a type
 
 `specifications/reserved-values` proves its totality with `as const satisfies

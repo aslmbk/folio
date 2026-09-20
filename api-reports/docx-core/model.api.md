@@ -32,20 +32,14 @@ export type BidiWrapper = {
 };
 
 // @public
-export type BlockContent = Paragraph | Table | BlockSdt;
-
-// @public
-export type BlockRangeMarkerCapture = {
-    rawMarkersBefore?: string;
-    rawMarkersAfter?: string;
-};
+export type BlockContent = Paragraph | Table | BlockSdt | PreservedBlock;
 
 // @public
 export type BlockSdt = {
     type: "blockSdt";
     properties: SdtProperties;
     content: BlockContent[];
-} & BlockRangeMarkerCapture;
+};
 
 // @public
 export type BookmarkEnd = {
@@ -119,6 +113,7 @@ type Comment_2 = {
     annotationReferenceFormatting?: TextFormatting;
     parentId?: number;
     done?: boolean;
+    preserved?: PreservedMarkup;
 };
 export { Comment_2 as Comment }
 
@@ -306,7 +301,7 @@ export type Endnote = {
     type: "endnote";
     id: number;
     noteType?: "normal" | "separator" | "continuationSeparator" | "continuationNotice";
-    content: (Paragraph | Table | BlockSdt)[];
+    content: BlockContent[];
 };
 
 // @public
@@ -390,7 +385,7 @@ export type Footnote = {
     type: "footnote";
     id: number;
     noteType?: "normal" | "separator" | "continuationSeparator" | "continuationNotice";
-    content: (Paragraph | Table | BlockSdt)[];
+    content: BlockContent[];
 };
 
 // @public
@@ -435,7 +430,7 @@ export type Hyperlink = {
     target?: string;
     history?: boolean;
     docLocation?: string;
-    children: (Run | BookmarkStart | BookmarkEnd)[];
+    children: (Run | BookmarkStart | BookmarkEnd | PreservedInline)[];
 };
 
 // @public
@@ -541,7 +536,7 @@ export type ImageWrap = {
 export type InlineSdt = {
     type: "inlineSdt";
     properties: SdtProperties;
-    content: (Run | Hyperlink | SimpleField | ComplexField | InlineSdt | Insertion | Deletion | MoveFrom | MoveTo | MathEquation)[];
+    content: (Run | Hyperlink | SimpleField | ComplexField | InlineSdt | Insertion | Deletion | MoveFrom | MoveTo | MathEquation | PreservedInline)[];
 };
 
 // @public
@@ -739,7 +734,7 @@ export type Paragraph = {
     listRendering?: ListRendering;
     renderedPageBreakBefore?: boolean;
     sectionProperties?: SectionProperties;
-} & BlockRangeMarkerCapture;
+};
 
 // @public
 export const PARAGRAPH_MARK_CHANGE_KINDS: readonly ["moveFrom", "moveTo", "ins", "del"];
@@ -748,7 +743,7 @@ export const PARAGRAPH_MARK_CHANGE_KINDS: readonly ["moveFrom", "moveTo", "ins",
 export type ParagraphAlignment = "left" | "center" | "right" | "both" | "distribute" | "mediumKashida" | "highKashida" | "lowKashida" | "thaiDistribute";
 
 // @public
-export type ParagraphContent = Run | Hyperlink | BookmarkStart | BookmarkEnd | SimpleField | ComplexField | InlineSdt | CommentRangeStart | CommentRangeEnd | CommentReference | Insertion | Deletion | MoveFrom | MoveTo | MoveFromRangeStart | MoveFromRangeEnd | MoveToRangeStart | MoveToRangeEnd | BidiWrapper | MathEquation;
+export type ParagraphContent = Run | Hyperlink | BookmarkStart | BookmarkEnd | SimpleField | ComplexField | InlineSdt | CommentRangeStart | CommentRangeEnd | CommentReference | Insertion | Deletion | MoveFrom | MoveTo | MoveFromRangeStart | MoveFromRangeEnd | MoveToRangeStart | MoveToRangeEnd | BidiWrapper | MathEquation | PreservedInline;
 
 // @public (undocumented)
 export type ParagraphFormatting = {
@@ -896,6 +891,37 @@ export type PositionalTab = {
 };
 
 // @public
+export type PreservedBlock = {
+    type: "preservedBlock";
+    xml: string;
+};
+
+// @public
+export type PreservedChild = {
+    index: number;
+    xml: string;
+};
+
+// @public
+export type PreservedInline = {
+    type: "preservedInline";
+    xml: string;
+    text: string;
+};
+
+// @public
+export type PreservedMarkup = {
+    children?: PreservedChild[];
+};
+
+// @public
+export type PreservedXmlContent = {
+    type: "preservedXml";
+    xml: string;
+    text: string;
+};
+
+// @public
 export type PropertyChangeInfo = {
     rsid?: string;
 } & TrackedChangeInfo;
@@ -931,7 +957,7 @@ export type Run = {
 };
 
 // @public
-export type RunContent = TextContent | TabContent | BreakContent | SymbolContent | NoteReferenceContent | FieldCharContent | InstrTextContent | SoftHyphenContent | NoBreakHyphenContent | RenderedPageBreakContent | DrawingContent | ShapeContent;
+export type RunContent = TextContent | TabContent | BreakContent | SymbolContent | NoteReferenceContent | FieldCharContent | InstrTextContent | SoftHyphenContent | NoBreakHyphenContent | RenderedPageBreakContent | PreservedXmlContent | DrawingContent | ShapeContent;
 
 // @public
 export type RunPropertyChange = {
@@ -1162,7 +1188,7 @@ export type SimpleField = {
     type: "simpleField";
     instruction: string;
     fieldType: FieldType;
-    content: (Run | Hyperlink)[];
+    content: (Run | Hyperlink | PreservedInline)[];
     fldLock?: boolean;
     dirty?: boolean;
 };
@@ -1245,7 +1271,7 @@ export type Table = {
     propertyChanges?: TablePropertyChange[];
     columnWidths?: number[];
     rows: TableRow[];
-} & BlockRangeMarkerCapture;
+};
 
 // @public
 export type TabLeader = "none" | "dot" | "hyphen" | "underscore" | "heavy" | "middleDot";
@@ -1266,8 +1292,11 @@ export type TableCell = {
     formatting?: TableCellFormatting;
     propertyChanges?: TableCellPropertyChange[];
     structuralChange?: TableStructuralChangeInfo;
-    content: (Paragraph | Table)[];
+    content: TableCellBlock[];
 };
+
+// @public
+export type TableCellBlock = Exclude<BlockContent, BlockSdt>;
 
 // @public
 export type TableCellBorders = TableBorders & {
@@ -1352,6 +1381,7 @@ export type TableRow = {
     propertyChanges?: TableRowPropertyChange[];
     structuralChange?: TableStructuralChangeInfo;
     cells: TableCell[];
+    preserved?: PreservedMarkup;
 };
 
 // @public
@@ -1559,7 +1589,7 @@ export type TrackedChangeInfo = {
 export type TrackedRunChange = Insertion | Deletion | MoveFrom | MoveTo;
 
 // @public
-export type TrackedRunContent = Run | Hyperlink | BookmarkStart | BookmarkEnd | SimpleField | ComplexField | MathEquation | TrackedRunChange;
+export type TrackedRunContent = Run | Hyperlink | BookmarkStart | BookmarkEnd | SimpleField | ComplexField | MathEquation | PreservedInline | TrackedRunChange;
 
 // @public
 export type UnderlineStyle = "none" | "single" | "words" | "double" | "thick" | "dotted" | "dottedHeavy" | "dash" | "dashedHeavy" | "dashLong" | "dashLongHeavy" | "dotDash" | "dashDotHeavy" | "dotDotDash" | "dashDotDotHeavy" | "wave" | "wavyHeavy" | "wavyDouble";

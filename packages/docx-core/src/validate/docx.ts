@@ -16,6 +16,7 @@ import {
   type Run,
   type RunContent,
   type SectionProperties,
+  type SimpleField,
   type Shape,
   type Table,
   type TableCell,
@@ -410,6 +411,12 @@ const validateBlock = (block: BlockContent, path: string, ctx: ValidationContext
     return;
   }
 
+  // Opaque markup: folio has no model to validate it against, and the schema
+  // check on the saved part is what covers it.
+  if (block.type === "preservedBlock") {
+    return;
+  }
+
   if (block.content.length === 0) {
     addWarning(ctx, `${path}.content`, "Block content control is empty.");
     return;
@@ -544,14 +551,32 @@ const validateParagraphContent = (
     return;
   }
 
+  // Opaque markup: there is no model to check, only bytes to replay, and an
+  // empty capture is a node that writes nothing back.
+  if (content.type === "preservedInline") {
+    if (content.xml.trim() === "") {
+      addError(ctx, `${path}.xml`, "Preserved inline markup must not be empty.");
+    }
+    return;
+  }
+
   if (content.ommlXml.trim() === "") {
     addError(ctx, `${path}.ommlXml`, "Math equation must preserve OMML XML.");
   }
 };
 
-const validateFieldChild = (child: Run | Hyperlink, path: string, ctx: ValidationContext): void => {
+const validateFieldChild = (
+  child: SimpleField["content"][number],
+  path: string,
+  ctx: ValidationContext,
+): void => {
   if (child.type === "run") {
     validateRun(child, path, ctx);
+    return;
+  }
+
+  // A capture is opaque markup, so there is nothing about it to validate.
+  if (child.type === "preservedInline") {
     return;
   }
 
@@ -638,6 +663,12 @@ const validateHyperlinkChild = (
 
   if (child.type === "bookmarkStart") {
     increment(ctx.bookmarkStarts, child.id);
+    return;
+  }
+
+  // A capture is opaque markup: it pairs no bookmark and carries no id the
+  // validator could count.
+  if (child.type === "preservedInline") {
     return;
   }
 

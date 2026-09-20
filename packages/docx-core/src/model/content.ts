@@ -18,6 +18,7 @@ import type {
   TableCellFormatting,
 } from "./formatting";
 import type { NumberFormat, ListRendering } from "./lists";
+import type { PreservedMarkup } from "./preservedMarkup";
 
 // ============================================================================
 // RUN CONTENT TYPES
@@ -133,6 +134,28 @@ export type RenderedPageBreakContent = {
   type: "renderedPageBreak";
 };
 
+/**
+ * A run child folio does not model, kept byte-for-byte at its source position.
+ *
+ * Dropping one is worse than a loss. The parser's keep rule asks the source
+ * element whether a run carried a payload while the serializer writes the
+ * model, so an unmodelled child makes the two disagree for exactly one save:
+ * save 1 writes a run with nothing in it, the next parse drops that run, and
+ * save 2 differs from save 1. Holding the markup in the model is what makes
+ * parse∘serialize a fixed point for the whole class at once.
+ */
+export type PreservedXmlContent = {
+  type: "preservedXml";
+  /** Replayable markup for one run child, as `captureVerbatimXml` wrote it. */
+  xml: string;
+  /**
+   * The visible text the markup contributes, empty when it shows nothing.
+   * `w:ruby` is the case that matters: its `w:rubyBase` is the text a reader
+   * sees, so text extraction, markdown and layout would otherwise lose a word.
+   */
+  text: string;
+};
+
 /** Raw XML handling modes for drawings that Folio cannot model completely. */
 export const DRAWING_RAW_XML_MODES = {
   PRESERVE_ONLY: "preserveOnly",
@@ -198,6 +221,7 @@ export type RunContent =
   | SoftHyphenContent
   | NoBreakHyphenContent
   | RenderedPageBreakContent
+  | PreservedXmlContent
   | DrawingContent
   | ShapeContent;
 
@@ -241,8 +265,17 @@ export type Hyperlink = {
   history?: boolean;
   /** Document location */
   docLocation?: string;
-  /** Child runs */
-  children: (Run | BookmarkStart | BookmarkEnd)[];
+  /**
+   * The link's content: runs, bookmark boundaries, and markup folio does not
+   * model kept where the source put it.
+   *
+   * `CT_Hyperlink` is `EG_PContent`, so a link may hold a permission range, a
+   * proofing error, a smart tag or a custom-XML revision range between its
+   * runs. The capture is a member of this union rather than a sink beside it
+   * for the reason `PreservedInline` gives: position inside the link is what
+   * decides whether the markup goes with the link when the link moves.
+   */
+  children: (Run | BookmarkStart | BookmarkEnd | PreservedInline)[];
 };
 
 /**
@@ -367,8 +400,12 @@ export type SimpleField = {
   instruction: string;
   /** Parsed field type */
   fieldType: FieldType;
-  /** Current display value */
-  content: (Run | Hyperlink)[];
+  /**
+   * The field's cached display, and any markup folio does not model between
+   * the runs that carry it. `CT_SimpleField` is `EG_PContent` plus
+   * `w:fldData`, so everything `EG_PContent` admits can sit here.
+   */
+  content: (Run | Hyperlink | PreservedInline)[];
   /** `@w:fldLock`: absent states nothing, `false` is an explicit unlock. */
   fldLock?: boolean;
   /** `@w:dirty`: absent states nothing, `false` explicitly forbids a recompute. */
@@ -995,8 +1032,16 @@ export type TableCell = {
   propertyChanges?: TableCellPropertyChange[];
   /** Tracked structural changes (cell insert/delete/merge) */
   structuralChange?: TableStructuralChangeInfo;
-  /** Cell content (paragraphs, tables, etc.) */
-  content: (Paragraph | Table)[];
+  /**
+   * Cell content.
+   *
+   * Derived from {@link BlockContent} rather than listed, so a new block kind
+   * cannot land without a decision here; `BlockSdt` is excluded because folio
+   * unwraps a `w:sdt` inside a cell into its `sdtContent` children rather
+   * than modelling the wrapper, and keeping the branch out of the cell keeps
+   * the model's recursion out of every table.
+   */
+  content: TableCellBlock[];
 };
 
 /**
@@ -1012,6 +1057,17 @@ export type TableRow = {
   structuralChange?: TableStructuralChangeInfo;
   /** Cells in this row */
   cells: TableCell[];
+  /**
+   * Row markup `cells` cannot hold, with its position among them.
+   *
+   * `CT_Row` declares a permission range, a proofing error, a custom-XML
+   * revision range and the row-level move and comment ranges beside its
+   * cells, and none of them is a cell. This is the sink case rather than the
+   * union case the inline levels use: the row models one kind of child, so
+   * there is no member to be, and `index` counts the cells that preceded the
+   * capture.
+   */
+  preserved?: PreservedMarkup;
 };
 
 /**
@@ -1027,7 +1083,7 @@ export type Table = {
   columnWidths?: number[];
   /** Table rows */
   rows: TableRow[];
-} & BlockRangeMarkerCapture;
+};
 
 // ============================================================================
 // COMMENTS
@@ -1053,6 +1109,14 @@ export type Comment = {
   parentId?: number;
   /** Whether the comment is resolved/done */
   done?: boolean;
+  /**
+   * Body markup `content` cannot hold: a table, an equation, a content
+   * control, a bookmark or range marker, a tracked-change wrapper. The
+   * schema lets a comment body hold everything a document body can, and a
+   * reviewer's words disappearing on save is not an acceptable simplification
+   * of that.
+   */
+  preserved?: PreservedMarkup;
 };
 
 /**
@@ -1167,6 +1231,7 @@ export type TrackedRunContent =
   | ComplexField
   // CT_RunTrackChange permits both m:oMath and m:oMathPara.
   | MathEquation
+  | PreservedInline
   | TrackedRunChange;
 
 /**
@@ -1488,6 +1553,7 @@ export type InlineSdt = {
     | MoveFrom
     | MoveTo
     | MathEquation
+    | PreservedInline
   )[];
 };
 
@@ -1504,11 +1570,39 @@ export type BlockSdt = {
   properties: SdtProperties;
   /** Block content inside the control. */
   content: BlockContent[];
-} & BlockRangeMarkerCapture;
+};
 
 // ============================================================================
 // PARAGRAPH
 // ============================================================================
+
+/**
+ * Paragraph content types
+ */
+/**
+ * Inline-level markup folio does not model, kept at its source position.
+ *
+ * The run-level twin is `PreservedXmlContent` and the block-level one is
+ * `PreservedBlock`; this is the level between them. A paragraph, a run-level
+ * tracked-change wrapper, a bidirectional wrapper and an inline content
+ * control all admit `w:permStart`, `w:proofErr`, `w:customXml` and the eight
+ * custom-XML revision ranges, none of which is a run and none of which folio
+ * models. Inside a tracked-change wrapper the position is the point: markup
+ * lifted out of a `w:ins` is markup the reviewer no longer accepts or rejects
+ * along with the change, so the capture is a member of the wrapper's own
+ * content union rather than a sibling beside it.
+ *
+ * Opaque, so it holds no fields and no comment anchors; `text` is what the
+ * markup puts on the line, which is empty for everything except a transparent
+ * wrapper such as `w:customXml`.
+ */
+export type PreservedInline = {
+  type: "preservedInline";
+  /** Replayable markup for one child, as `captureVerbatimXml` wrote it. */
+  xml: string;
+  /** The visible text the markup contributes, empty when it shows nothing. */
+  text: string;
+};
 
 /**
  * Paragraph content types
@@ -1533,7 +1627,8 @@ export type ParagraphContent =
   | MoveToRangeStart
   | MoveToRangeEnd
   | BidiWrapper
-  | MathEquation;
+  | MathEquation
+  | PreservedInline;
 
 /**
  * The kinds a paragraph-mark tracked change can be (ECMA-376 §17.13.5).
@@ -1596,7 +1691,7 @@ export type Paragraph = {
   renderedPageBreakBefore?: boolean;
   /** Section properties (if this paragraph ends a section) */
   sectionProperties?: SectionProperties;
-} & BlockRangeMarkerCapture;
+};
 
 // ============================================================================
 // HEADERS & FOOTERS
@@ -1791,7 +1886,7 @@ export type Footnote = {
    * work in notes the same as they do in the main body. Mirrors the
    * shape upstream eigenpal/docx-editor#678 fixed for the same case.
    */
-  content: (Paragraph | Table | BlockSdt)[];
+  content: BlockContent[];
 };
 
 /**
@@ -1807,7 +1902,7 @@ export type Endnote = {
    * Content. Like `Footnote.content`, may carry block-level `<w:sdt>`
    * preserved as `BlockSdt` so SDT round-trip works inside endnotes.
    */
-  content: (Paragraph | Table | BlockSdt)[];
+  content: BlockContent[];
 };
 
 // ============================================================================
@@ -2001,26 +2096,34 @@ export type SectionProperties = {
 // ============================================================================
 
 /**
- * Range markers captured verbatim from between two blocks.
+ * A block-level child folio does not model, kept where it stood.
  *
- * `w:permStart`, `w:customXml*Range*`, and a comment or move range that opens
- * or closes between blocks are all legal children of `w:body`, `w:tc` and a
- * header. folio has no model for most of them, and their position is the whole
- * of their meaning: a protected range that spans three paragraphs is defined
- * by where its `w:permStart` sits. So they ride on the block they precede or
- * follow and are replayed there.
+ * `w:body`, `w:tc`, `w:hdr`, `w:ftr`, an SDT's content and a footnote all
+ * admit more than paragraphs, tables and content controls: `w:permStart` is
+ * the whole of a document-protection range, `w:altChunk` is an entire imported
+ * document, `m:oMathPara` is a display equation, and a comment or move range
+ * may open between two blocks. Position is their meaning, so the capture is a
+ * block in its own right rather than a field riding on a neighbour: it sits
+ * between the same two siblings in the model, in the editor and in the saved
+ * part, and nothing has to keep an index honest as the blocks around it move.
+ *
+ * Being opaque, it holds no text, no fields and no comment anchors; a walker
+ * looking for any of those may skip it, and every walker that rebuilds block
+ * content must write it back.
  */
-export type BlockRangeMarkerCapture = {
-  /** Markup that stood immediately before this block. */
-  rawMarkersBefore?: string;
-  /** Markup that stood after this block, which only the last block can carry. */
-  rawMarkersAfter?: string;
+export type PreservedBlock = {
+  type: "preservedBlock";
+  /** Replayable markup for one child, as `captureVerbatimXml` wrote it. */
+  xml: string;
 };
 
 /**
  * Block-level content types
  */
-export type BlockContent = Paragraph | Table | BlockSdt;
+export type BlockContent = Paragraph | Table | BlockSdt | PreservedBlock;
+
+/** {@link BlockContent} minus the branch folio does not model inside a cell. */
+export type TableCellBlock = Exclude<BlockContent, BlockSdt>;
 
 /**
  * Section (implicit or explicit based on sectPr)

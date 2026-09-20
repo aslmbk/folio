@@ -41,7 +41,7 @@ import { canonicalJson } from "../../utils/canonicalJson";
 import { normalizeHorizontalScalePercent } from "../../utils/horizontalScale";
 import { DRAWING_RAW_XML_MODES, isOoxmlSymbolCharacter } from "@stll/docx-core/model";
 import { isParagraphDirection } from "../paragraphDirection";
-import { TEXT_BOX_TEXT_BODY_CONTENT_STATE_TYPES } from "../schema/nodes";
+import { PRESERVED_XML_LEVELS, TEXT_BOX_TEXT_BODY_CONTENT_STATE_TYPES } from "../schema/nodes";
 import type {
   BlockSdtAttrs,
   CharacterSpacingAttrs,
@@ -60,6 +60,8 @@ import type {
   PageBreakRunOwnerMarkAttrs,
   TabAttrs,
   SymbolAttrs,
+  PreservedXmlAttrs,
+  PreservedBlockAttrs,
   ImageAttrs,
   MathAttrs,
   ParagraphAttrs,
@@ -93,6 +95,10 @@ export type ProseMirrorAttrIssue = {
 export type ReadProseMirrorAttrsResult<T> =
   | { ok: true; value: T }
   | { ok: false; issues: ProseMirrorAttrIssue[] };
+
+const PRESERVED_XML_LEVEL_VALUES: ReadonlySet<unknown> = new Set(
+  Object.values(PRESERVED_XML_LEVELS),
+);
 
 const SECTION_BREAK_TYPES = [
   "nextPage",
@@ -273,6 +279,8 @@ const hardBreakAttrsCache = new WeakMap<PMNode, HardBreakAttrs>();
 const pageBreakRunAttrsCache = new WeakMap<PMNode, PageBreakRunAttrs>();
 const tabAttrsCache = new WeakMap<PMNode, TabAttrs>();
 const symbolAttrsCache = new WeakMap<PMNode, SymbolAttrs>();
+const preservedXmlAttrsCache = new WeakMap<PMNode, PreservedXmlAttrs>();
+const preservedBlockAttrsCache = new WeakMap<PMNode, PreservedBlockAttrs>();
 const tableAttrsCache = new WeakMap<PMNode, TableAttrs>();
 const tableRowAttrsCache = new WeakMap<PMNode, TableRowAttrs>();
 const tableCellAttrsCache = new WeakMap<PMNode, TableCellAttrs>();
@@ -569,6 +577,51 @@ export const readSymbolAttrs = (node: PMNode): ReadProseMirrorAttrsResult<Symbol
 
 export const expectSymbolAttrs = (node: PMNode): SymbolAttrs =>
   expectCachedNodeAttrs(node, symbolAttrsCache, readSymbolAttrs, "symbol attrs");
+
+export const readPreservedXmlAttrs = (
+  node: PMNode,
+): ReadProseMirrorAttrsResult<PreservedXmlAttrs> => {
+  const attrs = attrsRecord(node.attrs);
+  const issues: ProseMirrorAttrIssue[] = [];
+  expectNodeType(node, "preservedXml", issues);
+
+  requiredString(attrs, "xml", "preservedXml.attrs.xml", issues);
+  requiredString(attrs, "text", "preservedXml.attrs.text", issues);
+  // The level decides whether the save path writes the markup inside a `w:r`.
+  // A value the schema does not name is not a default to fall back on: it
+  // would put a paragraph child in a run, which Word reports as unreadable.
+  if (!PRESERVED_XML_LEVEL_VALUES.has(attrs["level"])) {
+    issues.push({
+      path: "preservedXml.attrs.level",
+      message: `Expected one of ${[...PRESERVED_XML_LEVEL_VALUES].join(", ")}.`,
+    });
+  }
+
+  return attrsResult(attrs, issues);
+};
+
+export const expectPreservedXmlAttrs = (node: PMNode): PreservedXmlAttrs =>
+  expectCachedNodeAttrs(node, preservedXmlAttrsCache, readPreservedXmlAttrs, "preservedXml attrs");
+
+export const readPreservedBlockAttrs = (
+  node: PMNode,
+): ReadProseMirrorAttrsResult<PreservedBlockAttrs> => {
+  const attrs = attrsRecord(node.attrs);
+  const issues: ProseMirrorAttrIssue[] = [];
+  expectNodeType(node, "preservedBlock", issues);
+
+  requiredString(attrs, "xml", "preservedBlock.attrs.xml", issues);
+
+  return attrsResult(attrs, issues);
+};
+
+export const expectPreservedBlockAttrs = (node: PMNode): PreservedBlockAttrs =>
+  expectCachedNodeAttrs(
+    node,
+    preservedBlockAttrsCache,
+    readPreservedBlockAttrs,
+    "preservedBlock attrs",
+  );
 
 export const readTableAttrs = (node: PMNode): ReadProseMirrorAttrsResult<TableAttrs> => {
   const attrs = attrsRecord(node.attrs);

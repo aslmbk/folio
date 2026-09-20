@@ -613,9 +613,13 @@ function serializeHyperlinkChild(
   if (child.type === "run") {
     return serializeChildRun(child);
   }
-  return child.type === "bookmarkStart"
-    ? serializeBookmarkStart(child)
-    : serializeBookmarkEnd(child);
+  if (child.type === "bookmarkStart") {
+    return serializeBookmarkStart(child);
+  }
+  // Opaque markup, replayed between the same two children it was read
+  // between, so a permission range or a proofing error does not leave the
+  // link it was authored inside.
+  return child.type === "bookmarkEnd" ? serializeBookmarkEnd(child) : child.xml;
 }
 
 /**
@@ -650,7 +654,12 @@ function serializeSimpleField(field: SimpleField): string {
   ];
 
   const contentXml = field.content
-    .map((item) => (item.type === "run" ? serializeRun(item) : serializeHyperlink(item)))
+    .map((item) => {
+      if (item.type === "run") {
+        return serializeRun(item);
+      }
+      return item.type === "hyperlink" ? serializeHyperlink(item) : item.xml;
+    })
     .join("");
 
   return `<w:fldSimple ${attrs.join(" ")}>${contentXml}</w:fldSimple>`;
@@ -843,6 +852,8 @@ function serializeInlineSdt(sdt: InlineSdt): string {
         case "mathEquation":
           // Round-trip the raw OMML XML directly
           return item.ommlXml || "";
+        case "preservedInline":
+          return item.xml;
         default: {
           // Exhaustiveness check: if a new type is added to
           // InlineSdt['content'] (see docx-core/src/model/content.ts)
@@ -975,6 +986,12 @@ function serializeTrackedChange(
     if (item.type === "mathEquation") {
       return item.ommlXml;
     }
+    // Inside the wrapper, where the source put it: markup lifted out of a
+    // `w:ins` is markup the reviewer no longer accepts or rejects with the
+    // change.
+    if (item.type === "preservedInline") {
+      return item.xml;
+    }
     if (
       item.type === "insertion" ||
       item.type === "deletion" ||
@@ -1096,6 +1113,9 @@ function serializeParagraphContent(content: ParagraphContent): string {
     case "mathEquation":
       // Round-trip the raw OMML XML directly
       return content.ommlXml || "";
+    // Opaque markup, replayed where the source put it.
+    case "preservedInline":
+      return content.xml;
     default:
       return "";
   }

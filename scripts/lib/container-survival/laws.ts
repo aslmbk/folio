@@ -263,13 +263,37 @@ const CAPTURE_SLOT_NAMES = new Set([
   "verbatimXml",
 ]);
 
+/**
+ * Union members that are a capture rather than a field holding one.
+ *
+ * The verbatim sink puts a container's unmodelled children in the model's own
+ * shape — `RunContent`'s `preservedXml`, `ParagraphContent`'s
+ * `preservedInline`, `BlockContent`'s `preservedBlock` —
+ * so a pair kept by one is carried by bytes even though nothing on it is
+ * spelled `rawSomethingXml`. Without this the carrier question answers
+ * "model" for every one of them and the contract records `modelled` for
+ * markup the editor cannot touch.
+ */
+const CAPTURE_MEMBER_TYPES = new Set(["preservedBlock", "preservedInline", "preservedXml"]);
+
+/** The sink itself, on a container whose model holds one kind of child. */
+const CAPTURE_SINK_KEYS = new Set(["preserved"]);
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const isCaptureMember = (value: unknown): value is Record<string, unknown> =>
+  isRecord(value) && typeof value["type"] === "string" && CAPTURE_MEMBER_TYPES.has(value["type"]);
+
 const clearCapturesInPlace = (value: unknown, seen: WeakSet<object>): void => {
   if (Array.isArray(value)) {
-    for (const item of value) {
-      clearCapturesInPlace(item, seen);
+    // Backwards, because a capture member is removed rather than emptied.
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      if (isCaptureMember(value[index])) {
+        value.splice(index, 1);
+        continue;
+      }
+      clearCapturesInPlace(value[index], seen);
     }
     return;
   }
@@ -284,7 +308,7 @@ const clearCapturesInPlace = (value: unknown, seen: WeakSet<object>): void => {
   }
   seen.add(value);
   for (const key of Object.keys(value)) {
-    if (CAPTURE_SLOT_NAMES.has(key)) {
+    if (CAPTURE_SLOT_NAMES.has(key) || CAPTURE_SINK_KEYS.has(key)) {
       value[key] = undefined;
       continue;
     }
@@ -317,6 +341,10 @@ const captureText = (value: unknown, seen: WeakSet<object>, into: string[]): voi
     return;
   }
   seen.add(value);
+  if (isCaptureMember(value) && typeof value["xml"] === "string") {
+    into.push(value["xml"]);
+    return;
+  }
   for (const [key, item] of Object.entries(value)) {
     if (CAPTURE_SLOT_NAMES.has(key) && typeof item === "string") {
       into.push(item);
@@ -537,6 +565,20 @@ const save = (document: Document): Promise<ArrayBuffer> =>
 export const forcedSavePart = async (fixture: BuiltFixture): Promise<string> => {
   const parsed = await parseDocx(await packageFor(fixture), { preloadFonts: false });
   return partOf(await save(withoutSerializerCaptures(parsed)), fixture.part.path);
+};
+
+/**
+ * The same, through the editor.
+ *
+ * `lost-in-the-editor-projection` is the one mechanism the forced save cannot
+ * show: the markup is in L2's output and gone from L3's, so `explain` has to
+ * print both or the reader is left comparing the input against a part that
+ * still has what it is looking for.
+ */
+export const editorSavePart = async (fixture: BuiltFixture): Promise<string> => {
+  const parsed = await parseDocx(await packageFor(fixture), { preloadFonts: false });
+  const projected = fromProseDoc(toProseDoc(parsed), parsed);
+  return partOf(await save(withoutSerializerCaptures(projected)), fixture.part.path);
 };
 
 /**

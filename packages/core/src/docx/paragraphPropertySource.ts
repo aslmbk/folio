@@ -498,11 +498,12 @@ type TableCellParagraphSourceGraphContext = {
   values: number;
 };
 
-type TableCellBlockTraversal = "blockSdt" | "paragraph" | "table";
+type TableCellBlockTraversal = "blockSdt" | "leaf" | "paragraph" | "table";
 
 const tableCellBlockTraversalByType = {
   blockSdt: "blockSdt",
   paragraph: "paragraph",
+  preservedBlock: "leaf",
   table: "table",
 } as const satisfies Record<BlockContent["type"], TableCellBlockTraversal>;
 
@@ -527,6 +528,7 @@ const tableCellParagraphContentTraversalByType = {
   moveTo: "content",
   moveToRangeEnd: "leaf",
   moveToRangeStart: "leaf",
+  preservedInline: "leaf",
   run: "run",
   simpleField: "content",
 } as const satisfies Record<ParagraphContent["type"], TableCellParagraphContentTraversal>;
@@ -541,6 +543,7 @@ const tableCellRunContentTraversalByType = {
   footnoteRef: "leaf",
   instrText: "leaf",
   noBreakHyphen: "leaf",
+  preservedXml: "leaf",
   renderedPageBreak: "leaf",
   shape: "shape",
   softHyphen: "leaf",
@@ -870,6 +873,8 @@ function visitDecodedTableCellBlock(
       }
       return;
     }
+    case "leaf":
+      return;
     default: {
       const exhaustiveTraversal: never = traversal;
       return exhaustiveTraversal;

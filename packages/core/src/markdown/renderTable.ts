@@ -218,7 +218,7 @@ function renderHtmlCell(ctx: RenderContext, pkg: DocxPackage | undefined, cell: 
       if (inner) {
         parts.push(inner);
       }
-    } else {
+    } else if (item.type === "table") {
       // Nested tables inside an HTML cell stay HTML: GFM is not parsed inside
       // HTML blocks, so a pipe-table here would render as literal text.
       const nested = renderHtmlTable(ctx, pkg, item.rows, true);
@@ -343,6 +343,9 @@ function renderHtmlRun(
         break;
       case "noBreakHyphen":
         text += "&#8209;";
+        break;
+      case "preservedXml":
+        text += escapeHtml(item.text);
         break;
       case "softHyphen":
         break;

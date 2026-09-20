@@ -28,6 +28,8 @@ import {
   readSdtAttrs,
   readShapeAttrs,
   readStrikeMarkAttrs,
+  readPreservedBlockAttrs,
+  readPreservedXmlAttrs,
   readSymbolAttrs,
   readTabAttrs,
   readTableAttrs,
@@ -316,6 +318,14 @@ const validateNodeAttrs = (
       appendAttrIssues(path, readSymbolAttrs(node), issues);
       return;
 
+    case "preservedXml":
+      appendAttrIssues(path, readPreservedXmlAttrs(node), issues);
+      return;
+
+    case "preservedBlock":
+      appendAttrIssues(path, readPreservedBlockAttrs(node), issues);
+      return;
+
     case "hardBreak":
       appendAttrIssues(path, readHardBreakAttrs(node), issues);
       return;
@@ -366,6 +376,12 @@ const validateNodeAttrs = (
           const hasPageBreakCarrier = node.content.content.some(
             (child) => child.type.name === "pageBreakRun",
           );
+          // A capture is the third reason a simple field keeps its children:
+          // the markup has no other carrier, so collapsing the field to its
+          // display text would drop it.
+          const hasPreservedCapture = node.content.content.some(
+            (child) => child.type.name === "preservedXml",
+          );
           if (fieldAttrs.value.fieldKind === "complex" && !hasPageBreakCarrier) {
             issues.push({
               path: `${path}.content`,
@@ -376,7 +392,7 @@ const validateNodeAttrs = (
               path: `${path}.content`,
               message: "Complex field results cannot contain hyperlink content.",
             });
-          } else if (!hasStructuredHyperlink && !hasPageBreakCarrier) {
+          } else if (!hasStructuredHyperlink && !hasPageBreakCarrier && !hasPreservedCapture) {
             issues.push({
               path: `${path}.content`,
               message: "Structured simple fields require hyperlink content.",

@@ -327,6 +327,21 @@ export type ParagraphPropertyChangeAttrs = Omit<import__stll_docx_core_model.Par
     currentFormatting?: import__stll_docx_core_model.ParagraphFormatting;
 };
 
+// @public
+export type PreservedBlockAttrs = {
+    xml: string;
+};
+
+// @public
+export type PreservedXmlAttrs = {
+    xml: string;
+    text: string;
+    level: PreservedXmlLevel;
+};
+
+// @public (undocumented)
+export type PreservedXmlLevel = (typeof PRESERVED_XML_LEVELS)[keyof typeof PRESERVED_XML_LEVELS];
+
 // @public (undocumented)
 export type RunFormattingOverrideAttrs = {
     allCaps?: boolean;

@@ -58,6 +58,8 @@ import {
   findChildByNamespaceUri,
   findChildrenByNamespaceUri,
   findChildrenByLocalName,
+  findDeep,
+  getLocalName,
   parseOnOffAttribute,
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
@@ -644,6 +646,10 @@ const getTextBoxBlockText = (block: BlockContent): string => {
       .join("\n");
   }
 
+  if (block.type === "preservedBlock") {
+    return "";
+  }
+
   return block.content.map(getTextBoxBlockText).join("\n");
 };
 
@@ -676,3 +682,97 @@ export function getTextBoxOutlineWidthPx(textBox: TextBox): number {
   }
   return emuToPixels(textBox.outline.width);
 }
+
+export type TextBoxRunScan = {
+  textBoxDrawings: XmlElement[];
+  vmlTextBoxes: XmlElement[];
+  hasNonTextBoxContent: boolean;
+};
+
+/**
+ * What a run's markup holds for the text-box pass, by kind.
+ *
+ * Two readers need this answer and they must not drift: the enrichment pass
+ * claims these elements, and `parseParagraphContents` has to keep the run they
+ * sit in even though the run parses to nothing until the pass fills it. It
+ * lives here, with `isTextBoxDrawing` and `parseTextBox`, so there is one.
+ */
+export type ScanRunForTextBoxDrawingsOptions = {
+  xmlRun: XmlElement;
+  /**
+   * `isVmlPictParsedByRunParser`, passed rather than imported: the run parser
+   * reaches this module through the image parsers, so reading it from here
+   * would close a cycle.
+   */
+  claimedByRunParser: (pictElement: XmlElement) => boolean;
+};
+
+export const scanRunForTextBoxDrawings = ({
+  xmlRun,
+  claimedByRunParser,
+}: ScanRunForTextBoxDrawingsOptions): TextBoxRunScan => {
+  const textBoxDrawings: XmlElement[] = [];
+  const vmlTextBoxes: XmlElement[] = [];
+  let hasNonTextBoxContent = false;
+
+  const visitDrawing = (drawingEl: XmlElement): void => {
+    if (isTextBoxDrawing(drawingEl)) {
+      textBoxDrawings.push(drawingEl);
+      return;
+    }
+    hasNonTextBoxContent = true;
+  };
+
+  for (const el of getChildElements(xmlRun)) {
+    const name = getLocalName(el.name ?? "");
+    if (name === "rPr") {
+      continue;
+    }
+    if (name === "drawing") {
+      visitDrawing(el);
+      continue;
+    }
+    if (name === "pict") {
+      // A pict the run parser claimed is preserved as one raw drawing that
+      // holds the whole element. Adding an editable text-box shape here would
+      // serialize a second representation beside that raw replay on every
+      // save, so the pict's text would be written twice. The run parser's own
+      // predicate answers, rather than a second reading of the markup.
+      if (findDeep(el, "v", "textbox") && !claimedByRunParser(el)) {
+        vmlTextBoxes.push(el);
+      } else {
+        hasNonTextBoxContent = true;
+      }
+      continue;
+    }
+    if (name === "AlternateContent") {
+      const branches = getChildElements(el);
+      const choice = branches.find((branch) => getLocalName(branch.name ?? "") === "Choice");
+      const fallback = branches.find((branch) => getLocalName(branch.name ?? "") === "Fallback");
+      const tryBranch = (branch: XmlElement | undefined): boolean => {
+        if (!branch) {
+          return false;
+        }
+        let found = false;
+        for (const innerEl of getChildElements(branch)) {
+          if (getLocalName(innerEl.name ?? "") === "drawing") {
+            visitDrawing(innerEl);
+            found = true;
+          }
+        }
+        return found;
+      };
+      let foundInBranch = tryBranch(choice);
+      if (!foundInBranch) {
+        foundInBranch = tryBranch(fallback);
+      }
+      if (!foundInBranch) {
+        hasNonTextBoxContent = true;
+      }
+      continue;
+    }
+    hasNonTextBoxContent = true;
+  }
+
+  return { textBoxDrawings, vmlTextBoxes, hasNonTextBoxContent };
+};

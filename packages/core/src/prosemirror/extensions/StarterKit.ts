@@ -82,6 +82,8 @@ import { PageBreakRunExtension } from "./nodes/PageBreakRunExtension";
 import { RenderedPageBreakExtension } from "./nodes/RenderedPageBreakExtension";
 import { SdtExtension } from "./nodes/SdtExtension";
 import { ShapeExtension } from "./nodes/ShapeExtension";
+import { PreservedBlockExtension } from "./nodes/PreservedBlockExtension";
+import { PreservedXmlExtension } from "./nodes/PreservedXmlExtension";
 import { SymbolExtension } from "./nodes/SymbolExtension";
 import { TabExtension } from "./nodes/TabExtension";
 import { createTableExtensions } from "./nodes/TableExtension";
@@ -176,6 +178,7 @@ export function createStarterKit(options: StarterKitOptions = {}): AnyExtension[
   add("hardBreak", HardBreakExtension());
   add("tab", TabExtension());
   add("symbol", SymbolExtension());
+  add("preservedXml", PreservedXmlExtension());
   add("image", ImageExtension());
   add("textBox", TextBoxExtension());
   add("textBoxAnchor", TextBoxAnchorExtension({ getInternalClipboardToken }));
@@ -192,6 +195,7 @@ export function createStarterKit(options: StarterKitOptions = {}): AnyExtension[
   add("field", StructuredFieldExtension({ getInternalClipboardToken }));
   add("sdt", SdtExtension());
   add("blockSdt", BlockSdtExtension());
+  add("preservedBlock", PreservedBlockExtension());
   add("math", MathExtension());
 
   // Table (5 extensions grouped)

@@ -29,6 +29,9 @@ export {
 // registry.
 export type { ExhaustiveFields } from "./exhaustiveFields";
 
+// The ordered verbatim sink every dispatched container carries.
+export type { PreservedChild, PreservedMarkup } from "./preservedMarkup";
+
 // Color & Styling Primitives
 export type {
   ThemeColorSlot,
@@ -98,6 +101,7 @@ export type {
   InstrTextContent,
   SoftHyphenContent,
   NoBreakHyphenContent,
+  PreservedXmlContent,
   DrawingContent,
   DrawingRawXmlMode,
   ReviewCarrier,
@@ -111,7 +115,9 @@ export type {
   MoveBookmarkMarker,
   BookmarkStart,
   BookmarkEnd,
-  BlockRangeMarkerCapture,
+  PreservedBlock,
+  PreservedInline,
+  TableCellBlock,
   FieldType,
   SimpleField,
   ComplexField,

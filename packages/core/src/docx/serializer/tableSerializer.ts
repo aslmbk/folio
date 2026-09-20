@@ -35,6 +35,7 @@ import type {
   ConditionalFormatStyle,
   ShadingProperties,
   Paragraph,
+  TableCellBlock,
 } from "../../types/document";
 import { canonicalJson } from "../../utils/canonicalJson";
 import { isValidHexColor } from "../../utils/colorResolver";
@@ -44,8 +45,8 @@ import {
   parseTableProperties,
   parseTableRowProperties,
 } from "../tableParser";
+import { serializeWithPreservedChildren } from "../containerChildren";
 import { TABLE_LOOK_FLAGS } from "../tableLook";
-import { withBlockRangeMarkers } from "../blockRangeMarkers";
 import { sanitizeCapturedXmlElement } from "../verbatimCapture";
 import { NAMESPACES, OOXML_NAMESPACE_SCOPE, parseXml, type XmlElement } from "../xmlParser";
 import { serializeBorder } from "./borderSerializer";
@@ -890,21 +891,23 @@ const replayableGridChangeXml = (gridChangeXml: string | undefined): string | nu
  * Serialize cell content (paragraphs, nested tables)
  */
 function serializeCellContent(
-  content: (Paragraph | Table)[],
+  content: readonly TableCellBlock[],
   serializeParagraph: ParagraphSerializer,
 ): string {
-  const parts: string[] = [];
-
-  for (const item of content) {
-    parts.push(
-      withBlockRangeMarkers(
-        item,
-        item.type === "paragraph"
-          ? serializeParagraph(item)
-          : serializeTable(item, serializeParagraph),
-      ),
-    );
-  }
+  const parts = content.map((block) => {
+    switch (block.type) {
+      case "paragraph":
+        return serializeParagraph(block);
+      case "table":
+        return serializeTable(block, serializeParagraph);
+      case "preservedBlock":
+        return block.xml;
+      default: {
+        const unreachable: never = block;
+        return unreachable;
+      }
+    }
+  });
 
   // Ensure at least one empty paragraph (Word requires this)
   if (parts.length === 0) {
@@ -963,10 +966,15 @@ export function serializeTableRow(row: TableRow, serializeParagraph: ParagraphSe
     parts.push(trPrXml);
   }
 
-  // Cells
-  for (const cell of row.cells) {
-    parts.push(serializeTableCell(cell, serializeParagraph));
-  }
+  // Cells, with the row markup folio does not model back between the same
+  // two of them. `w:trPr` and `w:tblPrEx` come first in the content model and
+  // are written above, so the sink's index counts cells and nothing else.
+  parts.push(
+    serializeWithPreservedChildren(
+      row.cells.map((cell) => serializeTableCell(cell, serializeParagraph)),
+      row.preserved,
+    ),
+  );
 
   return `<w:tr>${parts.join("")}</w:tr>`;
 }

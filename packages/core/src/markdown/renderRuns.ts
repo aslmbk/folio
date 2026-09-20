@@ -148,6 +148,11 @@ function renderRunContent(
       case "noBreakHyphen":
         out += "‑";
         break;
+      // Opaque markup contributes only what it puts on the line: a `w:ruby`
+      // base is a word in the sentence, the rest shows nothing.
+      case "preservedXml":
+        out += escapeInline(item.text);
+        break;
       case "footnoteRef":
       case "endnoteRef": {
         if (ctx.opts.footnotes === "strip") {
@@ -346,10 +351,13 @@ export function renderParagraphInline(
         // Render the visible result content.
         const runs = item.type === "simpleField" ? item.content : item.fieldResult;
         for (const child of runs) {
-          out +=
-            child.type === "run"
-              ? renderRun(ctx, pkg, child, paraId)
-              : renderHyperlink(ctx, pkg, child, paraId);
+          if (child.type === "run") {
+            out += renderRun(ctx, pkg, child, paraId);
+            continue;
+          }
+          // A capture is opaque markup with no markdown of its own; whatever
+          // text it puts on the line is what it contributes.
+          out += child.type === "hyperlink" ? renderHyperlink(ctx, pkg, child, paraId) : child.text;
         }
         break;
       }
