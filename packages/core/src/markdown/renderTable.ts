@@ -246,7 +246,7 @@ function escapeHtml(text: string): string {
 function renderHtmlInline(
   ctx: RenderContext,
   pkg: DocxPackage | undefined,
-  content: ParagraphContent[],
+  content: readonly ParagraphContent[],
   paraId: string | undefined,
 ): string {
   let out = "";
@@ -276,9 +276,12 @@ function renderHtmlInline(
         out += renderHtmlChildren(ctx, pkg, runs, paraId);
         break;
       }
+      // A content control states what its text is bound to and a bidirectional
+      // wrapper states how it is laid out; an HTML cell carries neither, so
+      // both are read through to the text itself.
       case "inlineSdt":
-        // `InlineSdt.content` is a subset of `ParagraphContent`.
-        out += renderHtmlInline(ctx, pkg, item.content as ParagraphContent[], paraId);
+      case "bidiWrapper":
+        out += renderHtmlInline(ctx, pkg, item.content, paraId);
         break;
       case "mathEquation":
         // Markdown can't carry OMML; emit the plain-text fallback when present.
@@ -301,17 +304,36 @@ function renderHtmlChildren(
   paraId: string | undefined,
 ): string {
   return children
-    .map((child) => {
-      if (child.type === "run") {
-        return renderHtmlRun(ctx, pkg, child, paraId);
+    .map((child): string => {
+      switch (child.type) {
+        case "run":
+          return renderHtmlRun(ctx, pkg, child, paraId);
+        case "hyperlink":
+          return renderHtmlHyperlink(ctx, pkg, child, paraId);
+        case "mathEquation":
+          return child.plainText ? escapeHtml(child.plainText) : "";
+        // A transparent wrapper carries the revision's text; reading through
+        // it is the only way that text reaches the cell.
+        case "bidiWrapper":
+        case "inlineSdt":
+        case "simpleField":
+        case "complexField":
+        case "insertion":
+        case "deletion":
+        case "moveFrom":
+        case "moveTo":
+          return renderHtmlInline(ctx, pkg, [child], paraId);
+        // A bookmark boundary carries no text, and neither does markup folio
+        // kept as bytes: a capture is not read, so it has no words to render.
+        case "bookmarkStart":
+        case "bookmarkEnd":
+        case "preservedInline":
+          return "";
+        default: {
+          const unrendered: never = child;
+          return unrendered;
+        }
       }
-      if (child.type === "hyperlink") {
-        return renderHtmlHyperlink(ctx, pkg, child, paraId);
-      }
-      if (child.type === "mathEquation") {
-        return child.plainText ? escapeHtml(child.plainText) : "";
-      }
-      return "";
     })
     .join("");
 }
