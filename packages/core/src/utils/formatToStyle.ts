@@ -14,14 +14,24 @@
 
 import type { Properties } from "csstype";
 
+import { statesNoBorder } from "@stll/docx-core/model";
+
+import { UNDERLINE_STROKES } from "../display-list/build/strokes";
+import {
+  PLAIN_UNDERLINE_WEIGHT,
+  UNDERLINE_THICKNESS_RATIO,
+} from "../display-list/build/textDecorations";
 import type { ColorValue } from "../types/colors";
+import { UNDERLINE_STYLE_VALUES } from "../types/documentEnumValues";
 import type {
   TextFormatting,
   ParagraphFormatting,
   BorderSpec,
   ShadingProperties,
   Theme,
+  UnderlineStyle,
 } from "../types/document";
+import { cssBorderStyle } from "./borderCss";
 import { resolveColor, resolveHighlightToCss, resolveShadingColor } from "./colorResolver";
 import { resolveFontFamily, resolveThemeFont } from "./fontResolver";
 import { getHorizontalScaleFactor, normalizeHorizontalScalePercent } from "./horizontalScale";
@@ -135,16 +145,17 @@ export function textToStyle(
   const decorations: string[] = [];
   const decorationStyles: CSSProperties["textDecorationStyle"][] = [];
   const decorationColors: string[] = [];
+  let decorationThickness: string | undefined;
 
   // Underline
   if (formatting.underline && formatting.underline.style !== "none") {
     decorations.push("underline");
 
-    // Map OOXML underline styles to CSS
-    const underlineStyle = mapUnderlineStyle(formatting.underline.style);
-    if (underlineStyle !== "solid") {
-      decorationStyles.push(underlineStyle);
+    const underline = underlineDecorationCss(formatting.underline.style);
+    if (underline.decorationStyle !== undefined && underline.decorationStyle !== "solid") {
+      decorationStyles.push(underline.decorationStyle);
     }
+    decorationThickness = underline.decorationThickness;
 
     // Underline color
     if (formatting.underline.color) {
@@ -172,6 +183,10 @@ export function textToStyle(
 
     if (decorationColors.length > 0) {
       style.textDecorationColor = decorationColors[0];
+    }
+
+    if (decorationThickness !== undefined) {
+      style.textDecorationThickness = decorationThickness;
     }
   }
 
@@ -446,7 +461,7 @@ export function borderToStyle(
   side: "Top" | "Bottom" | "Left" | "Right" | "" = "",
   theme?: Theme | null,
 ): CSSProperties {
-  if (!border || border.style === "none" || border.style === "nil") {
+  if (!border || statesNoBorder(border.style)) {
     return {};
   }
 
@@ -459,7 +474,7 @@ export function borderToStyle(
   const color = border.color ? resolveColor(border.color, theme) : "#000000";
 
   // Style
-  const cssStyle = mapBorderStyle(border.style);
+  const cssStyle = cssBorderStyle(border.style);
 
   // Build the property name dynamically
   const widthKey = `border${side}Width`;
@@ -585,35 +600,134 @@ export function resolveShadingFill(
   return "";
 }
 
+/** The CSS `text-decoration-style` keywords folio paints an underline with. */
+export type CssTextDecorationStyle = "solid" | "double" | "dotted" | "dashed" | "wavy";
+
 /**
- * Map OOXML underline style to CSS text-decoration-style
+ * What an authored underline paints as, in CSS.
+ *
+ * `decorationStyle` is absent for the member that paints no line at all; the
+ * caller decides whether that means "omit the decoration" or "inherit".
+ * `decorationThickness` is absent wherever the font's own underline weight is
+ * what Word draws.
  */
-function mapUnderlineStyle(
-  underlineStyle: string,
-): "solid" | "double" | "dotted" | "dashed" | "wavy" {
-  switch (underlineStyle) {
-    case "double":
-      return "double";
-    case "dotted":
-    case "dottedHeavy":
-      return "dotted";
-    case "dash":
-    case "dashedHeavy":
-    case "dashLong":
-    case "dashLongHeavy":
-    case "dotDash":
-    case "dashDotHeavy":
-    case "dotDotDash":
-    case "dashDotDotHeavy":
-      return "dashed";
-    case "wave":
-    case "wavyHeavy":
-    case "wavyDouble":
-      return "wavy";
-    default:
-      return "solid";
+export type UnderlineDecorationCss = {
+  readonly decorationStyle?: CssTextDecorationStyle;
+  readonly decorationThickness?: string;
+};
+
+/**
+ * The underline every DOM backend draws when the author named no member.
+ *
+ * It is also what an underline CSS cannot spell parses back as; see
+ * `underlineStyleFromCssDecoration`.
+ */
+export const PLAIN_UNDERLINE = "single" satisfies UnderlineStyle;
+
+/**
+ * Every `ST_Underline` member's CSS line. The one table: the ProseMirror mark's
+ * `toDOM`, the DOM painter and `textToStyle` all render a run from this, so a
+ * member cannot paint one line in the editor and another on the page.
+ *
+ * `none` cancels an underline inherited from the style chain rather than
+ * naming a line style, and `text-decoration-style: none` is not a CSS keyword,
+ * so that member names no keyword and carries no declarations at all.
+ *
+ * Where CSS has no keyword for what Word draws, the member is approximated and
+ * the approximation is stated here rather than at a call site: `words`
+ * underlines the spaces between words too (`text-decoration-skip-ink` skips
+ * descender ink, not spaces, and `text-decoration-skip: spaces` never
+ * shipped); `wavyDouble` draws two straight lines rather than two wavy ones;
+ * `dashLong`, `dotDash` and `dotDotDash` draw the single dash pattern CSS has.
+ * The `*Heavy` members and `thick` differ from their plain counterparts in
+ * weight only, which the thickness carries, so the line they name is their
+ * plain counterpart's.
+ */
+export const UNDERLINE_DECORATION_STYLES = {
+  none: undefined,
+  single: "solid",
+  words: "solid",
+  double: "double",
+  thick: "solid",
+  dotted: "dotted",
+  dottedHeavy: "dotted",
+  dash: "dashed",
+  dashedHeavy: "dashed",
+  dashLong: "dashed",
+  dashLongHeavy: "dashed",
+  dotDash: "dashed",
+  dashDotHeavy: "dashed",
+  dotDotDash: "dashed",
+  dashDotDotHeavy: "dashed",
+  wave: "wavy",
+  wavyHeavy: "wavy",
+  wavyDouble: "double",
+} as const satisfies Record<UnderlineStyle, CssTextDecorationStyle | undefined>;
+
+/**
+ * The CSS an authored underline paints with.
+ *
+ * CSS has no heavy keyword, so a weight is stated as a length: the plain ratio
+ * the display list strokes with, times the weight the member's own row carries
+ * (`display-list/build/strokes.ts`). Both backends therefore scale the same way
+ * with the font size, and which members are heavy is read off the row rather
+ * than listed again here, so the page and the editor cannot disagree about it.
+ */
+export const underlineDecorationCss = (style: UnderlineStyle): UnderlineDecorationCss => {
+  const decorationStyle = UNDERLINE_DECORATION_STYLES[style];
+  if (decorationStyle === undefined) {
+    return {};
   }
-}
+
+  const { weight } = UNDERLINE_STROKES[style];
+  if (weight === PLAIN_UNDERLINE_WEIGHT) {
+    return { decorationStyle };
+  }
+  return {
+    decorationStyle,
+    decorationThickness: `${(UNDERLINE_THICKNESS_RATIO * weight).toFixed(4)}em`,
+  };
+};
+
+/**
+ * Each CSS keyword's canonical author, derived from the one table: the first
+ * member in enumeration order that paints exactly that keyword at the font's
+ * own weight.
+ */
+const CANONICAL_UNDERLINE_STYLE_BY_CSS: ReadonlyMap<string, UnderlineStyle> = (() => {
+  const canonical = new Map<string, UnderlineStyle>();
+  for (const style of UNDERLINE_STYLE_VALUES) {
+    const { decorationStyle, decorationThickness } = underlineDecorationCss(style);
+    if (decorationStyle === undefined || decorationThickness !== undefined) {
+      continue;
+    }
+    if (!canonical.has(decorationStyle)) {
+      canonical.set(decorationStyle, style);
+    }
+  }
+  return canonical;
+})();
+
+/**
+ * The `ST_Underline` member an authored `text-decoration` or
+ * `text-decoration-style` value parses back as.
+ *
+ * The table is many-to-one, so the inverse cannot be: several members share
+ * every keyword. It resolves each keyword to that keyword's canonical author,
+ * the plain member whose own CSS is exactly the keyword, so a member folio
+ * cannot spell in CSS comes back as the sibling it is drawn as: `dottedHeavy`
+ * as `dotted`, `words` and `thick` as `single`, `wavyDouble` as `double`. A
+ * value naming no keyword folio writes parses as the plain underline.
+ */
+export const underlineStyleFromCssDecoration = (value: string): UnderlineStyle => {
+  for (const token of value.toLowerCase().split(/[\s,]+/u)) {
+    const style = CANONICAL_UNDERLINE_STYLE_BY_CSS.get(token);
+    if (style !== undefined) {
+      return style;
+    }
+  }
+  return PLAIN_UNDERLINE;
+};
 
 /**
  * Map OOXML paragraph alignment to CSS text-align
@@ -631,37 +745,6 @@ function mapAlignment(
       return "justify";
     default:
       return "left";
-  }
-}
-
-/**
- * Map OOXML border style to CSS border-style
- */
-function mapBorderStyle(
-  borderStyle: string,
-): "none" | "solid" | "double" | "dotted" | "dashed" | "groove" | "ridge" | "inset" | "outset" {
-  switch (borderStyle) {
-    case "none":
-    case "nil":
-      return "none";
-    case "double":
-    case "triple":
-      return "double";
-    case "dotted":
-      return "dotted";
-    case "dashed":
-    case "dashSmallGap":
-      return "dashed";
-    case "threeDEmboss":
-      return "ridge";
-    case "threeDEngrave":
-      return "groove";
-    case "outset":
-      return "outset";
-    case "inset":
-      return "inset";
-    default:
-      return "solid";
   }
 }
 

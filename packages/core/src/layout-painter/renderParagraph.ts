@@ -56,6 +56,7 @@ import {
 } from "../layout-engine/measure/complexScriptFormatting";
 import { planCursiveJoiners, withCursiveJoiners } from "./cursiveJoiners";
 import { resolveFontFamily } from "../utils/fontResolver";
+import { underlineDecorationCss } from "../utils/formatToStyle";
 import { DOCX_BOLD_FONT_WEIGHT } from "../utils/fontWeights";
 import { getHorizontalScaleFactor } from "../utils/horizontalScale";
 import { sanitizeImageSrc } from "../utils/sanitizeImageSrc";
@@ -491,17 +492,29 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
   let explicitDecorationStyle = false;
 
   if (run.underline) {
-    if (!isNoteReferenceRun(run)) {
+    // `run.underline.style` is an `ST_Underline` member, not a CSS keyword:
+    // `text-decoration-style: dottedHeavy` is dropped by the browser and the
+    // run paints a plain line. The one table translates it, and the editor's
+    // own `toDOM` reads the same table for the same member.
+    const authored = typeof run.underline === "object" ? run.underline.style : undefined;
+    const underline = authored === undefined ? undefined : underlineDecorationCss(authored);
+    // `w:u w:val="none"` cancels an underline inherited from the style chain
+    // rather than drawing one, so it carries no `text-decoration-style` and
+    // paints no line. The display-list painter reads the same member the same
+    // way; this is the second reader agreeing, not a fallback.
+    const paintsLine = underline === undefined || underline.decorationStyle !== undefined;
+    if (paintsLine && !isNoteReferenceRun(run)) {
       decorations.push("underline");
     }
-    if (typeof run.underline === "object") {
-      if (run.underline.style) {
-        element.style.textDecorationStyle = run.underline.style;
-        explicitDecorationStyle = true;
-      }
-      if (run.underline.color) {
-        element.style.textDecorationColor = run.underline.color;
-      }
+    if (underline?.decorationStyle !== undefined) {
+      element.style.textDecorationStyle = underline.decorationStyle;
+      explicitDecorationStyle = true;
+    }
+    if (underline?.decorationThickness !== undefined) {
+      element.style.textDecorationThickness = underline.decorationThickness;
+    }
+    if (typeof run.underline === "object" && run.underline.color) {
+      element.style.textDecorationColor = run.underline.color;
     }
   }
 
@@ -3011,40 +3024,14 @@ export function renderParagraphFragment(
   // Apply borders
   const borders = block.attrs?.borders;
   if (borders) {
-    const borderStyleToCss = (style?: string): string => {
-      // Map OOXML border styles to CSS. The OOXML border-style enum has
-      // 40+ decorative variants (threeDEmboss, wavyDouble, etc.); the
-      // common ones below cover ~99% of real-world documents, and the
-      // default falls back to a plain solid line — matches how Word
-      // degrades on platforms without the specialised glyphs.
-      switch (style) {
-        case "single":
-          return "solid";
-        case "double":
-          return "double";
-        case "dotted":
-          return "dotted";
-        case "dashed":
-          return "dashed";
-        case "thick":
-          return "solid";
-        case "wave":
-          return "wavy";
-        case "dashSmallGap":
-          return "dashed";
-        case "nil":
-        case "none":
-          return "none";
-        default:
-          return "solid";
-      }
-    };
-
     // Ensure box-sizing is set for proper border calculations
     fragmentEl.style.boxSizing = "border-box";
 
-    const borderToCss = (border: BorderStyle) =>
-      borderStrokeToCss({ ...border, style: borderStyleToCss(border.style) });
+    // `block.attrs.borders` reaches the painter already mapped to CSS by the
+    // layout bridge, so there is nothing left to translate here. A second
+    // OOXML→CSS switch used to live at this spot and had drifted: it rendered
+    // `wave` as `wavy`, which is not a CSS `border-style` at all.
+    const borderToCss = (border: BorderStyle) => borderStrokeToCss(border);
 
     // Word-style border grouping (ECMA-376 §17.3.1.24):
     // Adjacent paragraphs with identical pBdr form a group.

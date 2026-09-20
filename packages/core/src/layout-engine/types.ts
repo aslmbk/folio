@@ -16,11 +16,13 @@ import type {
   SdtType,
   TableCellFormatting,
   TableWidthType,
+  UnderlineStyle,
   VerticalAlign,
 } from "@stll/docx-core/model";
 
 import { isFloatingWrapType, isWrapNone } from "../types/wrap";
 import type { OutlineStyleAttr } from "../types/documentEnumValues";
+import type { CssBorderStyle } from "../utils/borderCss";
 
 /**
  * Unique identifier for a block in the document.
@@ -38,7 +40,12 @@ export type BlockId = string | number;
 export type RunFormatting = {
   bold?: boolean;
   italic?: boolean;
-  underline?: boolean | { style?: string; color?: string };
+  /**
+   * `w:u`: `true` for a plain underline, or the authored `ST_Underline` member
+   * and colour. The style is the model's union, not a CSS
+   * `text-decoration-style`: the painter translates it.
+   */
+  underline?: boolean | { style?: UnderlineStyle; color?: string };
   strike?: boolean;
   color?: string;
   textColorSource?: "direct" | "paragraphDefault";
@@ -311,7 +318,7 @@ export type ImageRun = {
   /** CSS border color. eigenpal #1096. */
   borderColor?: string;
   /** CSS border style. eigenpal #1096. */
-  borderStyle?: string;
+  borderStyle?: CssBorderStyle;
   /** Whether this picture is itself a tracked insertion (`<w:ins>`). eigenpal #641. */
   isInsertion?: boolean;
   /** Whether this picture is itself a tracked deletion (`<w:del>`). eigenpal #641. */
@@ -435,12 +442,12 @@ export type TabStop = {
  * Border specification for paragraphs.
  */
 export type BorderStyle = {
-  // This holds a *CSS* border-style (solid, double, ridge, groove, …),
-  // mapped from OOXML by `OOXML_TO_CSS_BORDER` in the bridge. It is NOT the
-  // OOXML `KnownBorderStyle` union (single/thinThickSmallGap/…), and includes
-  // CSS-only values (ridge/groove) that have no union member. Move the OOXML→CSS
-  // mapping to the painter to make this the `KnownBorderStyle` union.
-  style?: string; // CSS border-style
+  // A *CSS* `border-style`, not the OOXML `ST_Border` member: the bridge maps
+  // `BorderSpec.style` through `cssBorderStyle` before a border reaches the
+  // layout engine, and a border that paints nothing arrives as `undefined`
+  // rather than as `none`/`nil`. Typing it keeps the two vocabularies apart —
+  // a painter cannot ask whether a laid-out border is `"nil"`.
+  style?: CssBorderStyle;
   width?: number; // in pixels
   color?: string; // CSS color
   space?: number; // spacing from text in pixels (from w:space, converted from pt)
@@ -630,10 +637,8 @@ export type ParagraphBlock = {
 export type CellBorderSpec = {
   width?: number; // pixels
   color?: string; // CSS color
-  // CSS border-style mapped from OOXML by the bridge, not the OOXML
-  // `KnownBorderStyle` union (see BorderStyle.style). Includes CSS-only values
-  // (ridge/groove) with no union member.
-  style?: string; // CSS border-style (solid, dashed, dotted, double)
+  // CSS `border-style`, mapped from OOXML by the bridge; see BorderStyle.style.
+  style?: CssBorderStyle;
 };
 
 /**
@@ -814,7 +819,7 @@ export type ImageBlock = {
   /** CSS border color. eigenpal #1096. */
   borderColor?: string;
   /** CSS border style. eigenpal #1096. */
-  borderStyle?: string;
+  borderStyle?: CssBorderStyle;
   pmStart?: number;
   pmEnd?: number;
 };
