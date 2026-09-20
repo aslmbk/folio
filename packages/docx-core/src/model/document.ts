@@ -62,6 +62,15 @@ export {
   type UnrecognisedThemeColor,
 } from "./themeColor";
 
+// The model enumerations generated from an OOXML simple type, so a token the
+// format declares cannot go unspelled.
+export {
+  NUMBER_FORMATS,
+  PARAGRAPH_ALIGNMENTS,
+  TABLE_CELL_TEXT_DIRECTIONS,
+  TAB_STOP_ALIGNMENTS,
+} from "./ooxmlEnumerations.gen";
+
 // `ST_Border`, derived from the committed schema graph, and the one reader of
 // its two reserved members.
 export { BORDER_STYLES, type BorderStyle } from "./borderStyle.gen";
@@ -100,6 +109,7 @@ export type {
   ParagraphAlignment,
   ParagraphFormatting,
   SpacingExplicit,
+  TableCellTextDirection,
   TableWidthType,
   TableMeasurement,
   TableBorders,
@@ -115,7 +125,9 @@ export type {
 } from "./formatting";
 
 // Lists & Numbering
+export { COUNTER_FORMATS } from "./lists";
 export type {
+  CounterFormat,
   NumberFormat,
   LevelSuffix,
   ListLevel,

@@ -1,7 +1,12 @@
 import {
+  COUNTER_FORMATS,
+  NUMBER_FORMATS,
+  PARAGRAPH_ALIGNMENTS,
   PRESET_LINE_DASH_VALS,
   type PresetLineDashVal,
   type PresetLineDashValue,
+  TABLE_CELL_TEXT_DIRECTIONS,
+  TAB_STOP_ALIGNMENTS,
 } from "@stll/docx-core/model";
 
 import type {
@@ -12,8 +17,6 @@ import type {
   ImageWrap,
   LevelSuffix,
   LineSpacingRule,
-  NumberFormat,
-  ParagraphAlignment,
   ParagraphFormatting,
   PositionalTab,
   SdtProperties,
@@ -28,7 +31,6 @@ import type {
   TableRowFormatting,
   TableWidthType,
   TabLeader,
-  TabStopAlignment,
   TextEffect,
   TextFormatting,
   UnderlineStyle,
@@ -133,17 +135,12 @@ export const FONT_HINT_VALUES = [
   "cs",
 ] as const satisfies readonly FontHint[];
 
-export const PARAGRAPH_ALIGNMENT_VALUES = [
-  "left",
-  "center",
-  "right",
-  "both",
-  "distribute",
-  "mediumKashida",
-  "highKashida",
-  "lowKashida",
-  "thaiDistribute",
-] as const satisfies readonly ParagraphAlignment[];
+/**
+ * `ST_Jc`, from the schema rather than spelled here: the hand-written list
+ * omitted `start`, `end` and `numTab`, and every one of them was dropped at
+ * parse time.
+ */
+export const PARAGRAPH_ALIGNMENT_VALUES = PARAGRAPH_ALIGNMENTS;
 
 export const LINE_SPACING_RULE_VALUES = [
   "auto",
@@ -151,15 +148,11 @@ export const LINE_SPACING_RULE_VALUES = [
   "atLeast",
 ] as const satisfies readonly LineSpacingRule[];
 
-export const TAB_STOP_ALIGNMENT_VALUES = [
-  "left",
-  "center",
-  "right",
-  "decimal",
-  "bar",
-  "clear",
-  "num",
-] as const satisfies readonly TabStopAlignment[];
+/**
+ * `ST_TabJc`, from the schema: the hand-written list omitted `start` and
+ * `end`, and a tab stop declared with either lost its alignment on save.
+ */
+export const TAB_STOP_ALIGNMENT_VALUES = TAB_STOP_ALIGNMENTS;
 
 export const TAB_LEADER_VALUES = [
   "none",
@@ -341,17 +334,12 @@ export const TABLE_CELL_VERTICAL_ALIGNMENT_VALUES = [
   "bottom",
 ] as const satisfies readonly NonNullable<TableCellFormatting["verticalAlign"]>[];
 
-export const TABLE_CELL_TEXT_DIRECTION_VALUES = [
-  "lr",
-  "lrV",
-  "rl",
-  "rlV",
-  "tb",
-  "tbV",
-  "tbRl",
-  "tbRlV",
-  "btLr",
-] as const satisfies readonly NonNullable<TableCellFormatting["textDirection"]>[];
+/**
+ * `ST_TextDirection`, from the schema: the hand-written list omitted `lrTb`,
+ * `lrTbV` and `tbLrV`, so a cell written with one read as the table's flow and
+ * saved without a `w:textDirection`.
+ */
+export const TABLE_CELL_TEXT_DIRECTION_VALUES = TABLE_CELL_TEXT_DIRECTIONS;
 
 export const SHADING_PATTERN_VALUES = [
   "clear",
@@ -745,74 +733,15 @@ export const outlineAttrForDash = (
   return typeof dash === "string" ? dash : "solid";
 };
 
-export const NUMBER_FORMAT_VALUES = [
-  "decimal",
-  "upperRoman",
-  "lowerRoman",
-  "upperLetter",
-  "lowerLetter",
-  "ordinal",
-  "cardinalText",
-  "ordinalText",
-  "hex",
-  "chicago",
-  "ideographDigital",
-  "japaneseCounting",
-  "aiueo",
-  "iroha",
-  "decimalFullWidth",
-  "decimalHalfWidth",
-  "japaneseLegal",
-  "japaneseDigitalTenThousand",
-  "decimalEnclosedCircle",
-  "decimalFullWidth2",
-  "aiueoFullWidth",
-  "irohaFullWidth",
-  "decimalZero",
-  // Synthetic zero-padded decimal formats (Word `w:numFmt w:val="custom"`).
-  // Included here so the marker pipeline's `isNumberFormat` guard accepts
-  // `listLevelNumFmts` carrying them; they are never serialized back out.
-  "decimalZero3",
-  "decimalZero4",
-  "decimalZero5",
-  "bullet",
-  "ganada",
-  "chosung",
-  "decimalEnclosedFullstop",
-  "decimalEnclosedParen",
-  "decimalEnclosedCircleChinese",
-  "ideographEnclosedCircle",
-  "ideographTraditional",
-  "ideographZodiac",
-  "ideographZodiacTraditional",
-  "taiwaneseCounting",
-  "ideographLegalTraditional",
-  "taiwaneseCountingThousand",
-  "taiwaneseDigital",
-  "chineseCounting",
-  "chineseLegalSimplified",
-  "chineseCountingThousand",
-  "koreanDigital",
-  "koreanCounting",
-  "koreanLegal",
-  "koreanDigital2",
-  "vietnameseCounting",
-  "russianLower",
-  "russianUpper",
-  "none",
-  "numberInDash",
-  "hebrew1",
-  "hebrew2",
-  "arabicAlpha",
-  "arabicAbjad",
-  "hindiVowels",
-  "hindiConsonants",
-  "hindiNumbers",
-  "hindiCounting",
-  "thaiLetters",
-  "thaiNumbers",
-  "thaiCounting",
-] as const satisfies readonly NumberFormat[];
+/**
+ * `ST_NumberFormat`, from the schema: the hand-written list omitted
+ * `bahtText`, `dollarText` and `custom`, and carried three `decimalZeroN`
+ * members the format does not declare at all.
+ */
+export const NUMBER_FORMAT_VALUES = NUMBER_FORMATS;
+
+/** What a marker may count in, which is wider than what a `w:numFmt` may say. */
+export const COUNTER_FORMAT_VALUES = COUNTER_FORMATS;
 
 export const LEVEL_SUFFIX_VALUES = [
   "tab",

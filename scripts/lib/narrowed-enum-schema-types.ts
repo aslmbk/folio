@@ -59,6 +59,24 @@ export type NarrowedEnumBinding =
     }
   | {
       /**
+       * The picklist accepts every member the enumeration declares, and some it
+       * does not — on purpose. The specification's prose allows them and
+       * producers write them, so narrowing one away would drop an attribute a
+       * real document carries.
+       *
+       * Unlike `diverges` this is a decision, not a defect, so it is not
+       * expected to shrink. It still may not grow: a member added here without
+       * a citation fails the test.
+       */
+      readonly kind: "wider-than-schema";
+      readonly simpleType: SchemaSimpleType;
+      /** Picklist members the enumeration does not declare. */
+      readonly extra: readonly string[];
+      /** Where the specification allows them, and what a save does with one. */
+      readonly citation: string;
+    }
+  | {
+      /**
        * The picklist names what folio paints; the reader keeps a member outside
        * it verbatim, so nothing is lost by narrowing. The picklist must still be
        * a subset of the enumeration: an invented member would be a real defect.
@@ -119,12 +137,11 @@ export const NARROWED_ENUM_SCHEMA_TYPES = {
   FloatingTableXSpecSchema: matches("s:ST_XAlign"),
   FloatingTableYSpecSchema: matches("s:ST_YAlign"),
   FontHintSchema: {
-    kind: "diverges",
+    kind: "wider-than-schema",
     simpleType: "w:ST_Hint",
-    missing: [],
     extra: ["cs"],
-    reason:
-      "ECMA-376 §17.18.42 lists `cs` and the Transitional XSD does not. Word writes it, so folio accepts it: the divergence widens what parses rather than narrowing it, and removing `cs` would drop the attribute on a real document.",
+    citation:
+      "ECMA-376 Part 1 §17.18.42 lists `cs` among `ST_Hint`'s values; the Transitional XSD declares only `default` and `eastAsia`. Word writes `w:rFonts/@w:hint=\"cs\"`, so folio reads it and writes it back — `textFormattingSerializer` emits the parsed token verbatim, which means a rebuilt Transitional part carries `cs` where a schema-only validator refuses it. That is the source's own value, never one folio invents: no writer produces `cs` for a part that did not already carry it, so the alternative is dropping a complex-script hint a real document depends on.",
   },
   FontThemeSchema: matches("w:ST_Theme"),
   FrameWrapSchema: matches("w:ST_Wrap"),
@@ -138,22 +155,8 @@ export const NARROWED_ENUM_SCHEMA_TYPES = {
   ImageWrapTextSchema: matches("wp:ST_WrapText"),
   LevelSuffixSchema: matches("w:ST_LevelSuffix"),
   LineSpacingRuleSchema: matches("w:ST_LineSpacingRule"),
-  NumberFormatSchema: {
-    kind: "diverges",
-    simpleType: "w:ST_NumberFormat",
-    missing: ["bahtText", "custom", "dollarText"],
-    extra: ["decimalZero3", "decimalZero4", "decimalZero5"],
-    reason:
-      "`narrowEnum` drops the attribute for a member the union omits, so a `w:numFmt` of `bahtText` or `dollarText` loses its format on save; `custom` defers to `@w:format`, which folio does not read either. The three `decimalZeroN` members are not in the enumeration at all. Both halves are a survival loss waiting to be measured, not a decision.",
-  },
-  ParagraphAlignmentSchema: {
-    kind: "diverges",
-    simpleType: "w:ST_Jc",
-    missing: ["end", "numTab", "start"],
-    extra: [],
-    reason:
-      '`start` and `end` are the Strict logical-direction spellings of `left` and `right`; a `<w:jc w:val="start"/>` fails to narrow and, with no `w:pPr` child dispatcher, takes the whole property set with it. Closed by the paragraph-property dispatcher, which keeps a refused value in the set\'s sink.',
-  },
+  NumberFormatSchema: matches("w:ST_NumberFormat"),
+  ParagraphAlignmentSchema: matches("w:ST_Jc"),
   PositionalTabAlignmentSchema: matches("w:ST_PTabAlignment"),
   PositionalTabLeaderSchema: matches("w:ST_PTabLeader"),
   PositionalTabRelativeToSchema: matches("w:ST_PTabRelativeTo"),
@@ -169,22 +172,8 @@ export const NARROWED_ENUM_SCHEMA_TYPES = {
   },
   StyleTypeSchema: matches("w:ST_StyleType"),
   TabLeaderSchema: matches("w:ST_TabTlc"),
-  TabStopAlignmentSchema: {
-    kind: "diverges",
-    simpleType: "w:ST_TabJc",
-    missing: ["end", "start"],
-    extra: [],
-    reason:
-      'The same Strict logical-direction spellings as `w:jc`. A `<w:tab w:val="start"/>` loses its alignment; the survival census records both as value-level replay-only losses.',
-  },
-  TableCellTextDirectionSchema: {
-    kind: "diverges",
-    simpleType: "w:ST_TextDirection",
-    missing: ["lrTb", "lrTbV", "tbLrV"],
-    extra: [],
-    reason:
-      "`lrTb` is the default flow and the other two are vertical variants Word writes for East Asian layout. `narrowEnum` drops the attribute, so a cell written with one reads as the container's direction and saves without it.",
-  },
+  TabStopAlignmentSchema: matches("w:ST_TabJc"),
+  TableCellTextDirectionSchema: matches("w:ST_TextDirection"),
   TableRowHeightRuleSchema: matches("w:ST_HeightRule"),
   TableWidthTypeSchema: matches("w:ST_TblWidth"),
   TextEffectSchema: matches("w:ST_TextEffect"),

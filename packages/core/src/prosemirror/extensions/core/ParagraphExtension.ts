@@ -18,7 +18,7 @@ import type {
   LineSpacingRule,
   ParagraphFormatting,
   TextFormatting,
-  NumberFormat,
+  CounterFormat,
   TabStop,
   TabStopAlignment,
   TabLeader,
@@ -93,8 +93,8 @@ function paragraphAttrsToDOMStyle(attrs: ParagraphAttrs): string {
     .join("; ");
 }
 
-function numFmtToClass(numFmt: NumberFormat | undefined): string {
-  // NumberFormat has 70+ values defined by OOXML; this switch
+function numFmtToClass(numFmt: CounterFormat | undefined): string {
+  // A counter format has 60-odd values; this switch
   // intentionally classifies only the four whose CSS rendering differs.
   // Every other format (decimal, Asian numerals, etc.) falls through to
   // the decimal CSS class, which matches Word's display when the
@@ -116,7 +116,7 @@ function numFmtToClass(numFmt: NumberFormat | undefined): string {
 function getListClass(
   numPr?: ParagraphAttrs["numPr"],
   listIsBullet?: boolean,
-  listNumFmt?: NumberFormat,
+  listNumFmt?: CounterFormat,
 ): string {
   if (!numPr?.numId) {
     return "";
@@ -184,13 +184,17 @@ function cssLengthToTwips(value: string): number | undefined {
 function cssTextAlignToAlignment(value: string): ParagraphAlignment | undefined {
   switch (value.trim().toLowerCase()) {
     case "left":
-    case "start":
       return "left";
+    // CSS resolves `start` and `end` against the element's direction, and so
+    // does `ST_Jc`: they are the same alignment, not a spelling of left/right.
+    case "start":
+      return "start";
     case "center":
       return "center";
     case "right":
-    case "end":
       return "right";
+    case "end":
+      return "end";
     case "justify":
       return "both";
     default:

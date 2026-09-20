@@ -7,13 +7,22 @@ import { getTextBoxGroupId } from "../../layout-engine/textBoxGroup";
 import { insertPageBreak } from "../../prosemirror/commands/pageBreak";
 import { toProseDoc } from "../../prosemirror/conversion/toProseDoc";
 import { schema } from "../../prosemirror/schema";
-import type { Document, ParagraphAlignment } from "../../types/document";
-import { PARAGRAPH_ALIGNMENT_VALUES } from "../../types/documentEnumValues";
+import type { Document, ParagraphAlignment, TabStopAlignment } from "../../types/document";
+import {
+  PARAGRAPH_ALIGNMENT_VALUES,
+  TAB_STOP_ALIGNMENT_VALUES,
+} from "../../types/documentEnumValues";
 import { AUTO_PARAGRAPH_SPACING_PX } from "../../utils/units";
 import { toFlowBlocks } from "./toFlowBlocks";
 
 describe("toFlowBlocks paragraph formatting", () => {
+  type FlowAlignment = "left" | "center" | "right" | "justify";
+
+  /** What each `ST_Jc` member paints as in a left-to-right paragraph. */
   const expectedFlowAlignment = {
+    start: "left",
+    end: "right",
+    numTab: "left",
     left: "left",
     center: "center",
     right: "right",
@@ -23,16 +32,36 @@ describe("toFlowBlocks paragraph formatting", () => {
     highKashida: "justify",
     lowKashida: "justify",
     thaiDistribute: "justify",
-  } as const satisfies Record<ParagraphAlignment, "left" | "center" | "right" | "justify">;
+  } as const satisfies Record<ParagraphAlignment, FlowAlignment>;
+
+  /**
+   * And in a right-to-left one. Only the direction-aware members move: this is
+   * what makes `start` a member rather than a spelling of `left`.
+   */
+  const expectedRightToLeftFlowAlignment = {
+    ...expectedFlowAlignment,
+    start: "right",
+    end: "left",
+    numTab: "right",
+  } as const satisfies Record<ParagraphAlignment, FlowAlignment>;
+
+  const RIGHT_TO_LEFT = { source: "manual", value: "rtl" } as const;
+
+  const alignedParagraph = (alignment: ParagraphAlignment, rightToLeft = false) =>
+    toFlowBlocks(
+      schema.node("doc", null, [
+        schema.node(
+          "paragraph",
+          { alignment, ...(rightToLeft ? { direction: RIGHT_TO_LEFT } : {}) },
+          [schema.text("Aligned paragraph")],
+        ),
+      ]),
+    ).at(0);
 
   test.each(PARAGRAPH_ALIGNMENT_VALUES)(
     "projects %s alignment to the layout engine",
     (alignment) => {
-      const paragraph = toFlowBlocks(
-        schema.node("doc", null, [
-          schema.node("paragraph", { alignment }, [schema.text("Aligned paragraph")]),
-        ]),
-      ).at(0);
+      const paragraph = alignedParagraph(alignment);
 
       expect(paragraph?.kind).toBe("paragraph");
       if (paragraph?.kind !== "paragraph") {
@@ -41,6 +70,76 @@ describe("toFlowBlocks paragraph formatting", () => {
       expect(paragraph.attrs?.alignment).toBe(expectedFlowAlignment[alignment]);
     },
   );
+
+  test.each(PARAGRAPH_ALIGNMENT_VALUES)(
+    "projects %s alignment in a right-to-left paragraph",
+    (alignment) => {
+      const paragraph = alignedParagraph(alignment, true);
+
+      expect(paragraph?.kind).toBe("paragraph");
+      if (paragraph?.kind !== "paragraph") {
+        return;
+      }
+      expect(paragraph.attrs?.alignment).toBe(expectedRightToLeftFlowAlignment[alignment]);
+    },
+  );
+
+  /** `ST_TabJc` to the layout engine's tab alignment, left-to-right. */
+  const expectedTabAlignment = {
+    start: "start",
+    end: "end",
+    num: "start",
+    left: "start",
+    right: "end",
+    center: "center",
+    decimal: "decimal",
+    bar: "bar",
+    clear: "clear",
+  } as const satisfies Record<TabStopAlignment, string>;
+
+  const tabbedParagraph = (alignment: TabStopAlignment, rightToLeft = false) =>
+    toFlowBlocks(
+      schema.node("doc", null, [
+        schema.node(
+          "paragraph",
+          {
+            tabs: [{ position: 720, alignment }],
+            ...(rightToLeft ? { direction: RIGHT_TO_LEFT } : {}),
+          },
+          [schema.text("Tabbed paragraph")],
+        ),
+      ]),
+    ).at(0);
+
+  test.each(TAB_STOP_ALIGNMENT_VALUES)(
+    "projects a %s tab stop to the layout engine",
+    (alignment) => {
+      const paragraph = tabbedParagraph(alignment);
+
+      expect(paragraph?.kind).toBe("paragraph");
+      if (paragraph?.kind !== "paragraph") {
+        return;
+      }
+      expect(paragraph.attrs?.tabs?.at(0)?.val).toBe(expectedTabAlignment[alignment]);
+    },
+  );
+
+  // The engine's `start`/`end` name the line's left and right edges, so only
+  // `ST_TabJc`'s own direction-aware members move with the paragraph.
+  test("a right-to-left paragraph flips a logical tab stop and nothing else", () => {
+    expect(tabbedParagraph("start", true)).toMatchObject({
+      attrs: { tabs: [{ val: "end" }] },
+    });
+    expect(tabbedParagraph("end", true)).toMatchObject({
+      attrs: { tabs: [{ val: "start" }] },
+    });
+    expect(tabbedParagraph("left", true)).toMatchObject({
+      attrs: { tabs: [{ val: "start" }] },
+    });
+    expect(tabbedParagraph("right", true)).toMatchObject({
+      attrs: { tabs: [{ val: "end" }] },
+    });
+  });
 
   test("keeps deleted runs on their original formatting hierarchy", () => {
     const deletion = schema.mark("deletion", {
