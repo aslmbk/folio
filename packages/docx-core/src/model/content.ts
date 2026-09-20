@@ -18,7 +18,7 @@ import type {
   TableCellFormatting,
 } from "./formatting";
 import type { NumberFormat, ListRendering } from "./lists";
-import type { PreservedMarkup } from "./preservedMarkup";
+import type { PreservedAttribute, PreservedMarkup } from "./preservedMarkup";
 
 // ============================================================================
 // RUN CONTENT TYPES
@@ -240,6 +240,15 @@ export type Run = {
   propertyChanges?: RunPropertyChange[];
   /** Run content (text, tabs, breaks, etc.) */
   content: RunContent[];
+  /**
+   * Attributes `w:r` carried that this record has no field for.
+   *
+   * `CT_R` declares `w:rsidR`, `w:rsidDel` and `w:rsidRPr`, and folio rebuilt
+   * every run without them. The remainder survives a save; the editor has no
+   * run record to carry it on, which the container contract states and the
+   * census records as `editorProjection`.
+   */
+  preservedAttributes?: PreservedAttribute[];
 };
 
 // ============================================================================
@@ -1068,6 +1077,14 @@ export type TableRow = {
    * capture.
    */
   preserved?: PreservedMarkup;
+  /**
+   * Attributes `w:tr` carried that this record has no field for.
+   *
+   * `CT_Row` declares `w:rsidR`, `w:rsidDel`, `w:rsidTr` and `w:rsidRPr`. The
+   * remainder follows the record the same way a paragraph's does: a row the
+   * editor creates has none, and a row split off another does not inherit one.
+   */
+  preservedAttributes?: PreservedAttribute[];
 };
 
 /**
@@ -1083,6 +1100,19 @@ export type Table = {
   columnWidths?: number[];
   /** Table rows */
   rows: TableRow[];
+  /**
+   * Table markup `rows` cannot hold, with its position among them.
+   *
+   * `CT_Tbl` declares a permission range, a proofing error, the table-level
+   * comment and move ranges and the eight custom-XML revision ranges beside
+   * `w:tr`, and none of them is a row. The row sink one level down has the
+   * same shape for the same reason: the table models one kind of child, so
+   * there is no union member to be, and `index` counts the rows that preceded
+   * the capture. `w:tblPr` and `w:tblGrid` precede every row in the content
+   * model and are read and written elsewhere, so they are not in the sink and
+   * the index counts rows only.
+   */
+  preserved?: PreservedMarkup;
 };
 
 // ============================================================================
@@ -1691,6 +1721,18 @@ export type Paragraph = {
   renderedPageBreakBefore?: boolean;
   /** Section properties (if this paragraph ends a section) */
   sectionProperties?: SectionProperties;
+  /**
+   * Attributes `w:p` carried that this record has no field for.
+   *
+   * Word writes a revision-session id (`w:rsidR` and its family) on nearly
+   * every paragraph, and a rebuild that dropped it rewrote the document's
+   * revision history. The remainder follows the record: a paragraph the
+   * editor creates from scratch has none, and when an edit splits one in two
+   * the half that keeps the authored identity keeps the remainder, because a
+   * revision id inherited from a neighbour is a claim about history nobody
+   * made.
+   */
+  preservedAttributes?: PreservedAttribute[];
 };
 
 // ============================================================================
@@ -2089,6 +2131,14 @@ export type SectionProperties = {
 
   /** Section-level tracked property changes (w:sectPrChange) */
   propertyChanges?: SectionPropertyChange[];
+  /**
+   * Attributes `w:sectPr` carried that this record has no field for.
+   *
+   * `AG_SectPrAttributes` declares `w:rsidR`, `w:rsidDel`, `w:rsidRPr` and
+   * `w:rsidSect`, on the body's section properties and on a paragraph's alike.
+   * The record travels through the editor whole, so the remainder does too.
+   */
+  preservedAttributes?: PreservedAttribute[];
 };
 
 // ============================================================================

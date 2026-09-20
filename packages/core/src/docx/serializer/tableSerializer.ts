@@ -45,6 +45,7 @@ import {
   parseTableProperties,
   parseTableRowProperties,
 } from "../tableParser";
+import { serializePreservedAttributes } from "../attributeRemainder";
 import { serializeWithPreservedChildren } from "../containerChildren";
 import { TABLE_LOOK_FLAGS } from "../tableLook";
 import { sanitizeCapturedXmlElement } from "../verbatimCapture";
@@ -976,7 +977,10 @@ export function serializeTableRow(row: TableRow, serializeParagraph: ParagraphSe
     ),
   );
 
-  return `<w:tr>${parts.join("")}</w:tr>`;
+  // The row models no attribute of its own, so every one it writes comes from
+  // the remainder the parser kept.
+  const attrs = serializePreservedAttributes([], row.preservedAttributes);
+  return `<w:tr${attrs.length > 0 ? ` ${attrs.join(" ")}` : ""}>${parts.join("")}</w:tr>`;
 }
 
 // ============================================================================
@@ -997,11 +1001,17 @@ export function serializeTable(table: Table, serializeParagraph: ParagraphSerial
   // place for. Empty elements are the valid way to say "nothing here".
   const tblPrXml =
     serializeTableFormatting(table.formatting, table.propertyChanges) || "<w:tblPr/>";
-  const parts: string[] = [tblPrXml, serializeTableGrid(table)];
-
-  for (const row of table.rows) {
-    parts.push(serializeTableRow(row, serializeParagraph));
-  }
+  // Rows, with the table markup folio does not model back between the same
+  // two of them. `w:tblPr` and `w:tblGrid` come first in the content model and
+  // are written above, so the sink's index counts rows and nothing else.
+  const parts: string[] = [
+    tblPrXml,
+    serializeTableGrid(table),
+    serializeWithPreservedChildren(
+      table.rows.map((row) => serializeTableRow(row, serializeParagraph)),
+      table.preserved,
+    ),
+  ];
 
   return `<w:tbl>${parts.join("")}</w:tbl>`;
 }
