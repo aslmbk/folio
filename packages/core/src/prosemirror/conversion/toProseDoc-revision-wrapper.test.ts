@@ -1,11 +1,12 @@
 /**
- * Flattening the wrapper must not flatten the revision with it.
+ * Lifting the wrapper must not lift the revision with it.
  *
- * The editor has no carrier for a `w:bdo`/`w:dir` direction yet, so the
- * projection drops the wrapper and keeps its content. What it may not drop is
- * the revision the wrapper sat inside: text authored as
+ * The projection turns a `w:bdo`/`w:dir` tree into one inline sequence and
+ * records the wrapper on the leaves it held. What it may not drop is the
+ * revision the wrapper sat inside: text authored as
  * `<w:ins><w:bdo>x</w:bdo></w:ins>` is inserted text, and it has to reach the
- * editor carrying the insertion mark that says so.
+ * editor carrying the insertion mark that says so. The stack the same leaf
+ * carries is asserted in `toProseDoc-inline-wrapper.property.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -38,6 +39,16 @@ const markNamesOverText = (content: Paragraph["content"], text: string): string[
   return names;
 };
 
+const wrapperStackOverText = (content: Paragraph["content"], text: string): unknown => {
+  let stack: unknown;
+  toProseDoc(documentWith(content)).descendants((node) => {
+    if (node.isText && node.text === text) {
+      stack = node.marks.find((mark) => mark.type.name === "inlineWrapper")?.attrs["stack"];
+    }
+  });
+  return stack;
+};
+
 const INFO = { id: 1, author: "Reviewer", date: "2026-01-01T00:00:00Z" };
 const RUN = { type: "run", content: [{ type: "text", text: "x" }] } as const;
 
@@ -50,7 +61,13 @@ describe("a revision that holds a bidirectional wrapper", () => {
             type: "insertion",
             info: INFO,
             content: [
-              { type: "bidiWrapper", control: "override", direction: "rtl", content: [RUN] },
+              {
+                type: "inlineWrapper",
+                kind: "bidi",
+                control: "override",
+                direction: "rtl",
+                content: [RUN],
+              },
             ],
           },
         ],
@@ -67,7 +84,13 @@ describe("a revision that holds a bidirectional wrapper", () => {
             type: "deletion",
             info: INFO,
             content: [
-              { type: "bidiWrapper", control: "embedding", direction: "ltr", content: [RUN] },
+              {
+                type: "inlineWrapper",
+                kind: "bidi",
+                control: "embedding",
+                direction: "ltr",
+                content: [RUN],
+              },
             ],
           },
         ],
@@ -81,7 +104,8 @@ describe("a revision that holds a bidirectional wrapper", () => {
       markNamesOverText(
         [
           {
-            type: "bidiWrapper",
+            type: "inlineWrapper",
+            kind: "bidi",
             control: "override",
             direction: "rtl",
             content: [{ type: "insertion", info: INFO, content: [RUN] }],
@@ -90,6 +114,103 @@ describe("a revision that holds a bidirectional wrapper", () => {
         "x",
       ),
     ).toContain("insertion");
+  });
+
+  test("a wrapper on each side of the revision reaches the leaf, outermost first", () => {
+    expect(
+      wrapperStackOverText(
+        [
+          {
+            type: "inlineWrapper",
+            kind: "bidi",
+            control: "embedding",
+            direction: "rtl",
+            content: [
+              {
+                type: "insertion",
+                info: INFO,
+                content: [
+                  {
+                    type: "inlineWrapper",
+                    kind: "bidi",
+                    control: "override",
+                    direction: "ltr",
+                    content: [RUN],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        "x",
+      ),
+    ).toEqual([
+      { kind: "bidi", control: "embedding", direction: "rtl" },
+      { kind: "bidi", control: "override", direction: "ltr" },
+    ]);
+  });
+
+  test("a wrapper on each side of a content control reaches the leaf, outermost first", () => {
+    expect(
+      wrapperStackOverText(
+        [
+          {
+            type: "inlineWrapper",
+            kind: "bidi",
+            control: "embedding",
+            direction: "rtl",
+            content: [
+              {
+                type: "inlineSdt",
+                properties: { sdtType: "richText", tag: "bound" },
+                content: [
+                  {
+                    type: "inlineWrapper",
+                    kind: "bidi",
+                    control: "override",
+                    direction: "ltr",
+                    content: [RUN],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        "x",
+      ),
+    ).toEqual([
+      { kind: "bidi", control: "embedding", direction: "rtl" },
+      { kind: "bidi", control: "override", direction: "ltr" },
+    ]);
+  });
+
+  test("a control inside a revision inside a wrapper still carries the wrapper", () => {
+    expect(
+      wrapperStackOverText(
+        [
+          {
+            type: "inlineWrapper",
+            kind: "bidi",
+            control: "override",
+            direction: "rtl",
+            content: [
+              {
+                type: "insertion",
+                info: INFO,
+                content: [
+                  {
+                    type: "inlineSdt",
+                    properties: { sdtType: "richText", tag: "bound" },
+                    content: [RUN],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        "x",
+      ),
+    ).toEqual([{ kind: "bidi", control: "override", direction: "rtl" }]);
   });
 
   test("a content control inside a revision keeps its node", () => {

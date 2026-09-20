@@ -322,6 +322,19 @@ function applyHorizontalScaleTransform(
 }
 
 /**
+ * How CSS spells each bidirectional wrapper: an override switches the
+ * bidirectional algorithm off for its content, an embedding opens a level and
+ * leaves it on.
+ *
+ * Both painters write the keyword from here, so the DOM painter and the
+ * display list cannot spell the pair differently.
+ */
+export const UNICODE_BIDI_BY_WRAPPER_CONTROL = {
+  override: "bidi-override",
+  embedding: "embed",
+} as const satisfies Record<NonNullable<TextRun["bidiWrapper"]>["control"], string>;
+
+/**
  * Apply text run styles to an element
  */
 function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
@@ -402,6 +415,19 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
     element.dir = RIGHT_TO_LEFT_DIRECTION;
   } else if (run.rtl === false) {
     element.dir = LEFT_TO_RIGHT_DIRECTION;
+  }
+
+  // A bidirectional wrapper the author wrote around the run (`w:bdo`/`w:dir`).
+  // CSS spells the pair exactly: an override switches the bidirectional
+  // algorithm off for the content, an embedding opens a level and leaves it
+  // on. The painter flattens the wrapper onto the run's own span, so the
+  // wrapper's direction is written only when the run states none of its own.
+  if (run.bidiWrapper) {
+    element.style.unicodeBidi = UNICODE_BIDI_BY_WRAPPER_CONTROL[run.bidiWrapper.control];
+    if (run.bidiWrapper.direction !== undefined && run.rtl === undefined) {
+      element.dir =
+        run.bidiWrapper.direction === "rtl" ? RIGHT_TO_LEFT_DIRECTION : LEFT_TO_RIGHT_DIRECTION;
+    }
   }
 
   // Text effect animation (w:effect). Host CSS opts in to the actual

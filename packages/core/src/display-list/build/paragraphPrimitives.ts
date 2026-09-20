@@ -63,6 +63,7 @@ import {
   splitCollapsibleLineEdgeSpaces,
   splitTextRunsByEastAsia,
   startsAfterSoftWrap,
+  UNICODE_BIDI_BY_WRAPPER_CONTROL,
 } from "../../layout-painter/renderParagraph";
 import { isFloatingImageRun } from "../../layout-painter/renderUtils";
 import { getHorizontalScaleFactor } from "../../utils/horizontalScale";
@@ -546,6 +547,29 @@ type EmitGlyphRunOptions = {
 };
 
 /**
+ * The base direction one run's glyphs are laid out in.
+ *
+ * A bidirectional wrapper the author wrote around the run states it, and is
+ * nearer than the paragraph's own base direction: an override (`w:bdo`) lays
+ * every character out that way, and an embedding (`w:dir`) opens a level in
+ * that direction. A wrapper with no `w:val` states nothing, and the paragraph
+ * decides as before.
+ */
+const runGlyphDirection = (run: TextRun, paragraphIsRtl: boolean): "ltr" | "rtl" =>
+  run.bidiWrapper?.direction ?? (paragraphIsRtl ? "rtl" : "ltr");
+
+/**
+ * The wrapper's control, for the backend that resolves the order itself.
+ *
+ * The direction alone does not separate the two: an override forces the
+ * order, an embedding leaves the algorithm to resolve within it.
+ */
+const runUnicodeBidi = (run: TextRun): DisplayGlyphRun["unicodeBidi"] =>
+  run.bidiWrapper === undefined
+    ? undefined
+    : UNICODE_BIDI_BY_WRAPPER_CONTROL[run.bidiWrapper.control];
+
+/**
  * One `glyphRun` plus everything painted around it: the run's background rect
  * first, then the glyphs, then the decorations whose geometry CSS would have
  * derived from the font.
@@ -645,6 +669,8 @@ const emitGlyphRun = ({
     ? { color, thicknessPx: 1, pattern: "solid" }
     : undefined;
 
+  const unicodeBidi = runUnicodeBidi(run);
+
   sink.glyphs.push({
     kind: "glyphRun",
     font,
@@ -653,7 +679,8 @@ const emitGlyphRun = ({
     xPx: paintXPx,
     baselineYPx: runBaselineYPx,
     ...glyphRunText(glyphs),
-    direction: isRtl ? "rtl" : "ltr",
+    direction: runGlyphDirection(run, isRtl),
+    ...(unicodeBidi === undefined ? {} : { unicodeBidi }),
     ...(stroke === undefined ? {} : { stroke }),
     ...(pmRange === undefined ? {} : { pmRange }),
     ...(collapsedEdge === undefined ? {} : { collapsedEdge }),
