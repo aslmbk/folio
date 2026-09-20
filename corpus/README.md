@@ -221,6 +221,25 @@ A failure's signature is the invariant, the failure message with every per-file
 particular erased (paths, identifiers, counts), and the innermost folio stack
 frame. Two files with the same signature are the same defect.
 
+A compared value reaches a message only as a token the format itself defines;
+everything else is reported by shape (`"<path>"`, `"<id>"`, `"<string>"`, with
+the sides labelled `A` and `B` when both reduce to the same shape). The token
+vocabulary is derived, not written down: every enumeration member of
+`specifications/generated/docx-transitional-schema.gen.json`, plus every string
+value of the `as const` records `@stll/docx-core/model` exports. That is what
+keeps a corpus document's text, its authors and its file names out of a
+committed baseline, and what keeps a row from moving when a fixture's wording
+does.
+
+The three invariants that compare packages report **every** distinct difference
+a file exhibits, not the first. Reporting only the first made the ratchet punish
+fixes: removing one loss revealed the next, which the baseline had never seen
+and the gate failed as a new defect. A file reports at most 64 distinct
+differences per invariant and then says how many it dropped, so one pathological
+package cannot become the census. Since a file can now report several signatures
+per invariant, `corpus:minimize` takes `--signature <text>` to choose which one
+to shrink towards.
+
 `corpus/baseline.json` records how many files each known signature affects, and
 may only shrink. The gate fails on a new signature, on a signature that gained
 files, on a signature that lost files without the baseline being rewritten, and
@@ -231,6 +250,23 @@ refresh:
 ```sh
 bun scripts/corpus-gate.ts write-baseline census.json
 ```
+
+The ratchet needs the corpus, so it runs nightly and no pull request compares
+the numbers. Pull-request CI runs the cheap question instead, over committed
+files alone:
+
+```sh
+bun run check:corpus-baselines
+```
+
+It fails on a row whose `signature` disagrees with its own fields, a duplicate
+or unsorted row, a row recording no files, a row whose family does not own the
+file it sits in, a family row and the aggregate disagreeing about a count, a
+signature that is both a defect and an expected refusal, a baseline measured
+over a lock or a report-only list the repository no longer carries, and a
+report-only exemption naming a file the lock dropped or repinned. It downloads
+nothing and answers in milliseconds, so a corpus-only change is no longer a
+change nothing reads.
 
 ## Expected refusals
 
@@ -263,6 +299,11 @@ third-party content and cannot be committed, so the workflow is:
    bun run corpus:minimize apache-poi/test-data/document/55733.docx \
      --invariant style-set-rebuild
    ```
+
+   A file that fails one invariant in several ways needs `--signature <text>`
+   as well; without it the search shrinks towards the first failure, which is a
+   choice nobody made. Any text the wanted signature contains will do, and an
+   ambiguous selector is refused with the candidates named.
 
    Output goes to the cache (`minimized.docx`, `document.xml`, `summary.json`),
    never the repository.

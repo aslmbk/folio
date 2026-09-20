@@ -22,9 +22,23 @@
  *
  * A difference is reported as a path with every index erased, so two files that
  * lose the same field under different paragraphs share one signature.
+ *
+ * The walk reports EVERY distinct difference a file exhibits, not the first.
+ * Reporting only the first made the ratchet punish fixes: a file with three
+ * losses contributed one signature, so removing that loss revealed the next
+ * one, which the baseline had never seen and the gate failed as a new defect.
+ * With the whole set reported, fixing a loss can only make a count go down.
  */
 
 import type { Document } from "@stll/folio-core/types/document";
+
+import {
+  type CorpusFailure,
+  type CorpusInvariant,
+  failureFromAssertion,
+  normalizeFailureMessage,
+} from "../corpus-signature";
+import { isVocabularyToken } from "./value-vocabulary";
 
 /** Refreshed by every save, or the input bytes themselves: never document content. */
 const VOLATILE_KEYS: ReadonlySet<string> = new Set([
@@ -96,13 +110,70 @@ export const normalizeDocumentPackage = (document: Document): unknown =>
   normalizeValue(document.package);
 
 /**
- * Values small enough to name in a signature.
+ * The shapes a string is reported as when it is not a token of the format.
  *
- * A boolean or a short token is the defect (`"start"` became `"left"`); a
- * paragraph's text is the file. Anything longer than this is reported by type
- * alone.
+ * Quoted, because the slot holds a string and the shape is all that is said
+ * about it. The spellings are the ones `normalizeFailureMessage` already erases
+ * a message down to, so a reader meets one vocabulary rather than two.
  */
-const MAX_QUOTED_VALUE_LENGTH = 24;
+const STRING_SHAPES = {
+  url: '"<url>"',
+  path: '"<path>"',
+  guid: '"<guid>"',
+  hex: '"<hex>"',
+  id: '"<id>"',
+  opaque: '"<string>"',
+} as const;
+
+type StringShape = (typeof STRING_SHAPES)[keyof typeof STRING_SHAPES];
+
+/**
+ * A token is quoted verbatim; a string longer than the longest token either
+ * vocabulary source declares is not one, so the bound caps every residual
+ * literal a signature can carry.
+ */
+const MAX_QUOTED_VALUE_LENGTH = 32;
+
+const URL_RE = /^[a-z][a-z0-9+.-]*:(?:\/\/|[^/])/iu;
+const BRACED_GUID_RE = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/iu;
+/**
+ * Bounded above as well as below: a `w14:paraId` is eight hex digits and a
+ * checksum is not much longer, while a paragraph written entirely in the
+ * letters `a` to `f` is text, not an identifier.
+ */
+const HEX_RUN_RE = /^(?:0x)?[0-9a-f]{8,64}$/iu;
+const RELATIONSHIP_ID_RE = /^rId\d+$/u;
+
+/**
+ * What a string is, when it is not a token the format defines.
+ *
+ * Shape, never content. A signature is committed to a public repository, and a
+ * corpus document's text, its authors and its file names have no business in
+ * one; a shape is also a row that a fixture's wording cannot move.
+ */
+const shapeOfString = (value: string): StringShape => {
+  if (URL_RE.test(value)) {
+    return STRING_SHAPES.url;
+  }
+  if (value.includes("/") || value.includes("\\")) {
+    return STRING_SHAPES.path;
+  }
+  if (BRACED_GUID_RE.test(value)) {
+    return STRING_SHAPES.guid;
+  }
+  if (HEX_RUN_RE.test(value)) {
+    return STRING_SHAPES.hex;
+  }
+  if (RELATIONSHIP_ID_RE.test(value)) {
+    return STRING_SHAPES.id;
+  }
+  return STRING_SHAPES.opaque;
+};
+
+const describeString = (value: string): string =>
+  isVocabularyToken(value) && value.length <= MAX_QUOTED_VALUE_LENGTH
+    ? JSON.stringify(value)
+    : shapeOfString(value);
 
 const describeValue = (value: unknown): string => {
   if (value === undefined) {
@@ -112,7 +183,7 @@ const describeValue = (value: unknown): string => {
     return "null";
   }
   if (typeof value === "string") {
-    return value.length <= MAX_QUOTED_VALUE_LENGTH ? JSON.stringify(value) : "string";
+    return describeString(value);
   }
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
@@ -120,53 +191,156 @@ const describeValue = (value: unknown): string => {
   return Array.isArray(value) ? "array" : "object";
 };
 
+/** The side a shape token belongs to, when both sides reduce to the same shape. */
+const sided = (shape: string, side: "A" | "B"): string => shape.replace(/>"$/u, ` ${side}>"`);
+
+/**
+ * How one value became another.
+ *
+ * Pair-aware on purpose: two different strings that both reduce to
+ * `"<string>"` would otherwise read as a value that did not change. Labelling
+ * the sides says the slot holds two different strings without saying what
+ * either of them is.
+ */
+export const describeChange = (left: unknown, right: unknown): string => {
+  const before = describeValue(left);
+  const after = describeValue(right);
+  if (before !== after || typeof left !== "string" || typeof right !== "string") {
+    return `${before} became ${after}`;
+  }
+  return `${sided(before, "A")} became ${sided(after, "B")}`;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * The first difference between two normalised packages, or null.
+ * How many distinct differences one file may report for one invariant.
+ *
+ * A pathological package can differ in thousands of places, and a census that
+ * carried them all would be a transcript of that one file rather than a list of
+ * defects. Past the bound the file reports {@link omittedDifferencesMessage}
+ * instead, which is a signature of its own: a file that exceeds the cap is a
+ * fact worth ratcheting, and it cannot be mistaken for a defect.
+ */
+export const MAX_REPORTED_DIFFERENCES = 64;
+
+export const omittedDifferencesMessage = (omitted: number): string =>
+  `…and ${omitted} more differences past the reporting cap`;
+
+/**
+ * Differences are deduplicated by the signature they will become, not by the
+ * text they are now: `paraId: "<hex>" became "<hex>"` under two hundred
+ * comments is one defect, and counting it two hundred times towards the cap
+ * would spend the whole budget on one row.
+ */
+type DifferenceCollector = {
+  readonly seen: Set<string>;
+  readonly messages: string[];
+  omitted: number;
+};
+
+const record = (collector: DifferenceCollector, message: string): void => {
+  const key = normalizeFailureMessage(message);
+  if (collector.seen.has(key)) {
+    return;
+  }
+  collector.seen.add(key);
+  if (collector.messages.length < MAX_REPORTED_DIFFERENCES) {
+    collector.messages.push(message);
+    return;
+  }
+  collector.omitted += 1;
+};
+
+/**
+ * Every difference between two normalised packages.
  *
  * Array positions collapse to `[]`: a field lost under the twelfth paragraph
  * and the same field lost under the third are one defect, and the file that
  * shows it is in the census example.
+ *
+ * An array whose length changed is reported and not descended into. Comparing
+ * two arrays of different lengths index by index reports the shift rather than
+ * the loss, and inventing that noise is a worse answer than the one row. Which
+ * index diverged is a separate gap, owned by the array comparison itself.
  */
-const findDifference = (left: unknown, right: unknown, path: string): string | null => {
+const collectDifferences = (
+  left: unknown,
+  right: unknown,
+  path: string,
+  collector: DifferenceCollector,
+): void => {
   if (Array.isArray(left) || Array.isArray(right)) {
     if (!Array.isArray(left) || !Array.isArray(right)) {
-      return `${path}: ${describeValue(left)} became ${describeValue(right)}`;
+      record(collector, `${path}: ${describeChange(left, right)}`);
+      return;
     }
     if (left.length !== right.length) {
-      return `${path}[]: length changed`;
+      record(collector, `${path}[]: length changed`);
+      return;
     }
     for (const [index, item] of left.entries()) {
-      const difference = findDifference(item, right[index], `${path}[]`);
-      if (difference !== null) {
-        return difference;
-      }
+      collectDifferences(item, right[index], `${path}[]`, collector);
     }
-    return null;
+    return;
   }
 
   if (isRecord(left) && isRecord(right)) {
     const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort();
     for (const key of keys) {
-      const difference = findDifference(left[key], right[key], `${path}.${key}`);
-      if (difference !== null) {
-        return difference;
-      }
+      collectDifferences(left[key], right[key], `${path}.${key}`, collector);
     }
-    return null;
+    return;
   }
 
   if (left === right) {
-    return null;
+    return;
   }
-  return `${path}: ${describeValue(left)} became ${describeValue(right)}`;
+  record(collector, `${path}: ${describeChange(left, right)}`);
+};
+
+export type PackageDifferences = {
+  /** Distinct difference messages, in walk order, at most {@link MAX_REPORTED_DIFFERENCES}. */
+  messages: readonly string[];
+  /** Distinct differences the walk found past the cap and did not report. */
+  omitted: number;
 };
 
 /**
- * What changed between two parsed packages, as a message with no per-file
- * particulars, or null when they agree.
+ * What changed between two parsed packages, as messages with no per-file
+ * particulars. Empty when they agree.
  */
-export const describePackageDifference = (before: Document, after: Document): string | null =>
-  findDifference(normalizeDocumentPackage(before), normalizeDocumentPackage(after), "package");
+export const describePackageDifferences = (
+  before: Document,
+  after: Document,
+): PackageDifferences => {
+  const collector: DifferenceCollector = { seen: new Set(), messages: [], omitted: 0 };
+  collectDifferences(
+    normalizeDocumentPackage(before),
+    normalizeDocumentPackage(after),
+    "package",
+    collector,
+  );
+  return { messages: collector.messages, omitted: collector.omitted };
+};
+
+/**
+ * One comparison's failures, the overflow marker included.
+ *
+ * The three invariants that compare packages phrase a difference differently —
+ * `reserialize` even phrases two differences of one file differently — so the
+ * wording is the caller's. Whether a capped file says so is not: one place
+ * decides that, or the three would drift about it.
+ */
+export const differenceFailures = (
+  invariant: CorpusInvariant,
+  { messages, omitted }: PackageDifferences,
+  describe: (message: string) => string,
+): CorpusFailure[] => {
+  const failures = messages.map((message) => failureFromAssertion(invariant, describe(message)));
+  if (omitted > 0) {
+    failures.push(failureFromAssertion(invariant, omittedDifferencesMessage(omitted)));
+  }
+  return failures;
+};
