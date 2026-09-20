@@ -562,6 +562,12 @@ export type ImageFrameLocks = {
 };
 
 /**
+ * A `wp:docPr` link as authored. `rId` is the target it named, so comparing it
+ * with the model's tells a retargeted link from an untouched one.
+ */
+export type ImageDocPrLink = { xml: string; rId?: string };
+
+/**
  * Embedded image (w:drawing)
  */
 export type Image = {
@@ -625,6 +631,19 @@ export type Image = {
    */
   allowOverlap?: boolean;
   /**
+   * `wp:anchor relativeHeight` — z-order. The serializer wrote one constant,
+   * flattening a stack a document meant.
+   */
+  relativeHeight?: number;
+  /** `wp:anchor locked` — the anchor may not be moved. Absent states nothing. */
+  locked?: boolean;
+  /** `wp:anchor hidden` — not `hidden`, which is `wp:docPr @hidden`. */
+  anchorHidden?: boolean;
+  /** `wp:anchor simplePos` — position from `wp:simplePos`, not `positionH/V`. */
+  useSimplePosition?: boolean;
+  /** `wp:simplePos` itself, in EMUs; absent when the author wrote none. */
+  simplePosition?: { x: number; y: number };
+  /**
    * The image carries no information a reader needs, so assistive technology
    * skips it. Word writes this as an extension on `wp:docPr`
    * (`{C183D7F6-B498-43B3-948B-1728B52AA6E4}` holding
@@ -648,6 +667,14 @@ export type Image = {
   hlinkHref?: string;
   /** Relationship ID for the clickable image hyperlink */
   hlinkRId?: string;
+  /**
+   * `a:hlinkClick` as authored. `hlinkRId` names the click target the editor
+   * edits; the rest of `CT_Hyperlink` has no model, so the element replays
+   * while `rId` says the two agree.
+   */
+  hlinkClickSource?: ImageDocPrLink;
+  /** `a:hlinkHover` as authored; the model holds nothing of it. */
+  hlinkHoverXml?: string;
   /** Image outline/border */
   outline?: ShapeOutline;
   /** Image effects */
