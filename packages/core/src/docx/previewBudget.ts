@@ -14,69 +14,144 @@
  * would have stopped the other charging for it without anything failing. The
  * table below is that agreement written once, and a producer builds its image
  * out of the entry the budget matches against.
+ *
+ * An entry says what backs the preview, because that decides what there is to
+ * agree on. A source-backed preview is image data in `src`, recognized by the
+ * strings its producer stamps on it and charged by the character. A
+ * descriptor-backed preview is no picture at all, so it carries none of those
+ * strings: a table that offered them would be offering a cap over nothing and
+ * a prefix nothing can start with.
  */
 
-/** What identifies a preview in the model, and how much of it a package may keep. */
-type PreviewKind = {
+/**
+ * A preview the model carries as image data in `src`.
+ *
+ * The three strings are how the budget recognizes what a producer made, and
+ * the cap is how much of that data one package may keep.
+ */
+type SourceBackedPreviewKind = {
+  readonly backing: "source";
   readonly mimeType: string;
   readonly filename: string;
   readonly srcPrefix: string;
   readonly maxPackageCharacters: number;
 };
 
-export const VML_PREVIEW_DATA_URL_PREFIX = "data:image/svg+xml;charset=utf-8,";
+/**
+ * A preview the model carries as a `PreviewDescriptor`, which a backend draws.
+ *
+ * There is no image data for it anywhere in the model, so it has nothing for
+ * the character budget to recognize or to charge, and no entry of its own to
+ * drift out of agreement with its producer. What the entry still says is that
+ * folio attaches this preview and that the budget passes over it deliberately,
+ * which the switch below has to keep answering as kinds are added.
+ */
+type DescriptorBackedPreviewKind = {
+  readonly backing: "descriptor";
+};
+
+/** What backs a preview in the model, and how much of it a package may keep. */
+type PreviewKind = SourceBackedPreviewKind | DescriptorBackedPreviewKind;
+
+type PreviewKindName = "vmlShape" | "wpGroup" | "smartArt";
+
+/** Both SVG producers encode their drawing into the URL rather than base64. */
+const SVG_PREVIEW_DATA_URL_PREFIX = "data:image/svg+xml;charset=utf-8,";
 
 const MEBIBYTE = 1024 * 1024;
+
+/**
+ * Eight times what a producer may spend on one drawing, which is a package
+ * holding a handful of the largest previews folio will build.
+ */
+const SVG_PREVIEW_PACKAGE_CHARACTERS = 8 * MEBIBYTE;
 
 export const PREVIEW_KINDS = {
   /** A VML shape folio renders rather than projects (`v:shape`, `v:rect`, ...). */
   vmlShape: {
+    backing: "source",
     mimeType: "image/svg+xml",
     filename: "vml-shape-preview.svg",
-    srcPrefix: VML_PREVIEW_DATA_URL_PREFIX,
-    maxPackageCharacters: 8 * MEBIBYTE,
+    srcPrefix: SVG_PREVIEW_DATA_URL_PREFIX,
+    maxPackageCharacters: SVG_PREVIEW_PACKAGE_CHARACTERS,
+  },
+  /**
+   * A WordprocessingGroup (`wpg:wgp`) folio renders rather than projects.
+   *
+   * The group's shapes, their text and any picture they carry are drawn into
+   * one SVG, so a package with many groups retains as much generated text as a
+   * package of VML shapes does, from a producer bounded per drawing the same
+   * way. It was missing from this table, which is not a preview with a generous
+   * cap but a preview with none: the matcher below never named it, so no
+   * package was ever charged for one.
+   */
+  wpGroup: {
+    backing: "source",
+    mimeType: "image/svg+xml",
+    filename: "wordprocessing-group.svg",
+    srcPrefix: SVG_PREVIEW_DATA_URL_PREFIX,
+    maxPackageCharacters: SVG_PREVIEW_PACKAGE_CHARACTERS,
   },
   /**
    * A SmartArt diagram: its extent filled with one flat rectangle per shape.
    *
-   * A raster rather than a vector because the display list decodes only base64
-   * PNG and JPEG, so a vector preview would be missing from every display-list
-   * backend (PDF among them) while still showing in the DOM. That is what
-   * makes this preview expensive: one of them is 7.3 MB of data URL whatever
-   * the package weighs, because its cost follows the extent the author chose
-   * rather than anything the drawing contains.
-   *
-   * Across the public corpus, the fifty packages that produce one retain a
-   * median of 7.3 MB and a maximum of 51.3 MB (ten previews, from a package
-   * under a megabyte). The cap is set above that maximum: it refuses no
-   * legitimate file in the corpus while bounding what had no bound at all, and
-   * it is a ceiling rather than a fix. The fix is for the preview to be a
-   * descriptor the renderer rasterizes, which needs the display-list contract
-   * to carry one.
+   * It used to be a raster in `src`, because the display list decoded only
+   * base64 PNG and JPEG and a vector preview would have been missing from
+   * every backend but the DOM. That cost 7.3 MB of data URL per diagram
+   * whatever the package weighed, up to 51.3 MB in one corpus package, because
+   * it followed the extent the author chose rather than anything the drawing
+   * contained. It is a `PreviewDescriptor` now, which both backends draw, and
+   * the bound on it is the shape cap the parse applies to the description.
    */
   smartArt: {
-    mimeType: "image/png",
-    filename: "smartart-preview.png",
-    srcPrefix: "data:image/png;base64,",
-    maxPackageCharacters: 64 * MEBIBYTE,
+    backing: "descriptor",
   },
-} as const satisfies Record<string, PreviewKind>;
+} as const satisfies Record<PreviewKindName, PreviewKind>;
 
-type PreviewKindName = keyof typeof PREVIEW_KINDS;
+/** The kinds a package charges: those whose preview is image data it retains. */
+type SourceBackedKindName = {
+  [Name in PreviewKindName]: (typeof PREVIEW_KINDS)[Name]["backing"] extends "source"
+    ? Name
+    : never;
+}[PreviewKindName];
 
 const KIND_NAMES = Object.keys(PREVIEW_KINDS) as PreviewKindName[];
 
 /**
- * The kind a model image was generated as, or `undefined` for one the package
- * actually carries. A generated preview has no relationship behind it, so
- * `rId` is empty; the filename and data-URL prefix name which producer made it.
+ * Whether a package charges this kind, narrowing the name to a source-backed
+ * one: the predicate reads the same field `SourceBackedKindName` selects on.
  */
-const previewKindOf = (value: object): PreviewKindName | undefined => {
+const isSourceBacked = (name: PreviewKindName): name is SourceBackedKindName => {
+  const kind = PREVIEW_KINDS[name];
+  switch (kind.backing) {
+    case "source":
+      return true;
+    case "descriptor":
+      return false;
+    default:
+      return kind satisfies never;
+  }
+};
+
+const SOURCE_BACKED_KIND_NAMES = KIND_NAMES.filter(isSourceBacked);
+
+/**
+ * The kind a model image was generated as, or `undefined` for one the package
+ * actually carries. A generated preview has no relationship behind it; the
+ * filename and data-URL prefix name which producer made it.
+ *
+ * "No relationship" is read as the one spelling `RelationshipId` leaves: a
+ * field that is absent or `undefined`. The walk takes an unvalidated object,
+ * so the check stays, but it no longer has a second spelling to accept.
+ *
+ * Only a source-backed kind can be named this way. A descriptor-backed preview
+ * has no `src` to match, so no image the model carries can be charged to it.
+ */
+const previewKindOf = (value: object): SourceBackedKindName | undefined => {
   if (
     !("type" in value) ||
     value.type !== "image" ||
-    !("rId" in value) ||
-    value.rId !== "" ||
+    ("rId" in value && value.rId !== undefined) ||
     !("src" in value) ||
     typeof value.src !== "string" ||
     !("mimeType" in value) ||
@@ -85,7 +160,7 @@ const previewKindOf = (value: object): PreviewKindName | undefined => {
     return undefined;
   }
   const { src, mimeType, filename } = value;
-  return KIND_NAMES.find((name) => {
+  return SOURCE_BACKED_KIND_NAMES.find((name) => {
     const kind = PREVIEW_KINDS[name];
     return (
       mimeType === kind.mimeType && filename === kind.filename && src.startsWith(kind.srcPrefix)
@@ -93,8 +168,13 @@ const previewKindOf = (value: object): PreviewKindName | undefined => {
   });
 };
 
-/** Per-kind allowances for one package, defaulting to the table's caps. */
-export type PreviewBudgetOverrides = Partial<Record<PreviewKindName, number>>;
+/**
+ * Per-kind allowances for one package, defaulting to the table's caps.
+ *
+ * Only a source-backed kind has an allowance: there is no number that would
+ * change what the budget does to a descriptor.
+ */
+export type PreviewBudgetOverrides = Partial<Record<SourceBackedKindName, number>>;
 
 /**
  * Charge every generated preview in the model against its kind's allowance and
@@ -106,8 +186,8 @@ export const enforcePackagePreviewBudget = (
   root: unknown,
   overrides: PreviewBudgetOverrides = {},
 ): void => {
-  const remaining = new Map<PreviewKindName, number>(
-    KIND_NAMES.map((name) => [
+  const remaining = new Map<SourceBackedKindName, number>(
+    SOURCE_BACKED_KIND_NAMES.map((name) => [
       name,
       Math.max(0, overrides[name] ?? PREVIEW_KINDS[name].maxPackageCharacters),
     ]),
@@ -137,7 +217,7 @@ export const enforcePackagePreviewBudget = (
     const kind = previewKindOf(value);
     if (kind !== undefined) {
       // SAFETY: `previewKindOf` matched on a string `src`, and `remaining` has
-      // an entry for every kind name it can return.
+      // an entry for every source-backed name it can return.
       const image = value as { src?: string };
       const length = (image.src as string).length;
       const left = remaining.get(kind) as number;

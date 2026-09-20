@@ -32,6 +32,12 @@ export type { ExhaustiveFields } from "./exhaustiveFields";
 // The ordered verbatim sink every dispatched container carries.
 export type { PreservedAttribute, PreservedChild, PreservedMarkup } from "./preservedMarkup";
 
+// How a drawing with no image data says what it looks like.
+export type { PreviewDescriptor, PreviewShape } from "./preview";
+
+// A relationship reference that names something, and the two ways to get one.
+export { mintRelationshipId, relationshipIdOf, type RelationshipId } from "./relationshipId";
+
 // Color & Styling Primitives
 export type {
   ThemeColorSlot,

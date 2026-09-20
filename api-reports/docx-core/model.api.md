@@ -449,8 +449,9 @@ export type Hyperlink = {
 type Image_2 = {
     type: "image";
     id?: string;
-    rId?: string;
+    rId?: RelationshipId;
     src?: string;
+    preview?: PreviewDescriptor;
     mimeType?: string;
     filename?: string;
     docPrName?: string;
@@ -679,6 +680,9 @@ export type MediaFile = {
     base64?: string;
     dataUrl?: string;
 };
+
+// @public
+export const mintRelationshipId: (ordinal: number) => RelationshipId;
 
 // @public
 export type MoveBookmarkMarker = BookmarkRangeMarker & {
@@ -982,6 +986,25 @@ export type PreservedXmlContent = {
 };
 
 // @public
+export type PreviewDescriptor = {
+    readonly kind: "diagram";
+    readonly extent: {
+        readonly width: number;
+        readonly height: number;
+    };
+    readonly shapes: readonly PreviewShape[];
+};
+
+// @public
+export type PreviewShape = {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly color: string;
+};
+
+// @public
 export type PropertyChangeInfo = {
     rsid?: string;
 } & TrackedChangeInfo;
@@ -993,6 +1016,14 @@ export type Relationship = {
     target: string;
     targetMode?: "External" | "Internal";
 };
+
+// @public
+export type RelationshipId = string & {
+    readonly __brand: "folio.relationshipId";
+};
+
+// @public
+export const relationshipIdOf: (value: string | null | undefined) => RelationshipId | undefined;
 
 // @public
 export type RelationshipMap = Map<string, Relationship>;

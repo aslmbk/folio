@@ -19,6 +19,8 @@ import type {
 } from "./formatting";
 import type { NumberFormat, ListRendering } from "./lists";
 import type { PreservedAttribute, PreservedMarkup } from "./preservedMarkup";
+import type { PreviewDescriptor } from "./preview";
+import type { RelationshipId } from "./relationshipId";
 
 // ============================================================================
 // RUN CONTENT TYPES
@@ -710,14 +712,27 @@ export type Image = {
   /**
    * Relationship id for the image data, absent when the drawing carries none.
    *
-   * A `w:drawing` whose graphic is not a picture — a chart, a diagram, an OLE
-   * frame — and one with no `a:graphic` at all have no `a:blip`, so there is no
-   * id to record. Absence is spelled `undefined` rather than `""` so it can
-   * never reach a relationship lookup as a key.
+   * A `w:drawing` whose graphic is not a picture (a chart, a diagram, an OLE
+   * frame) and one with no `a:graphic` at all have no `a:blip`, so there is no
+   * id to record. So has no preview folio draws for markup it cannot project.
+   * Absence is spelled `undefined` and only `undefined`, which {@link
+   * RelationshipId} makes true of the type rather than of its producers: the
+   * empty string is not one, so it can never reach a relationship lookup as a
+   * key or be written back as `r:embed=""`.
    */
-  rId?: string;
+  rId?: RelationshipId;
   /** Resolved image data (base64 or blob URL) */
   src?: string;
+  /**
+   * Present when the drawing has no image data and is drawn from a description.
+   *
+   * `src` keeps its meaning — resolved image data — and is not set alongside
+   * this. The two are mutually exclusive in practice; they are not modelled as
+   * a union because `Image` has thirty other fields and a union over the whole
+   * record would churn every consumer. A drawing with neither is the existing
+   * "nothing to paint" case and stays valid.
+   */
+  preview?: PreviewDescriptor;
   /** Image MIME type */
   mimeType?: string;
   /** Original filename */

@@ -22,6 +22,7 @@ import type {
   DisplayRect,
 } from "../types";
 import type { BuildContext } from "./buildContext";
+import { paintPreview } from "./previewPrimitives";
 import { resolveBorderStroke } from "./strokes";
 import { UNSUPPORTED_CONSTRUCT } from "./unsupported";
 
@@ -218,6 +219,7 @@ export class ImageTable {
 type ImageVisualSource = Pick<
   ImageBlock,
   | "src"
+  | "preview"
   | "opacity"
   | "brightness"
   | "contrast"
@@ -250,10 +252,48 @@ export type PaintImageOptions = {
   readonly label: string;
 };
 
+const opacityOf = (source: ImageVisualSource): number =>
+  source.opacity == null ? 1 : Math.min(1, Math.max(0, source.opacity));
+
+const withOpacity = (
+  children: readonly DisplayPrimitive[],
+  opacity: number,
+): readonly DisplayPrimitive[] =>
+  opacity === 1 || children.length === 0 ? children : [{ kind: "opacityGroup", opacity, children }];
+
+/** The bitmap one picture draws, or nothing, with the reason already reported. */
+const paintBitmap = ({
+  source,
+  rect,
+  context,
+  label,
+}: PaintImageOptions): readonly DisplayPrimitive[] => {
+  const ref = context.images.intern(source.src);
+  if (ref === undefined) {
+    const reason = context.images.failureFor(source.src) ?? "image could not be decoded";
+    const construct = reason.includes("not PNG or JPEG")
+      ? UNSUPPORTED_CONSTRUCT.imageFormat
+      : UNSUPPORTED_CONSTRUCT.imageSource;
+    context.unsupported.report(construct, context.pageIndex, `${label}: ${reason}`);
+    return [];
+  }
+  const crop = cropOf(source);
+  const image: DisplayImagePrimitive = {
+    kind: "image",
+    image: ref,
+    rect,
+    ...(crop === undefined ? {} : { crop }),
+    opacity: opacityOf(source),
+    ...(source.brightness == null ? {} : { brightness: source.brightness }),
+    ...(source.contrast == null ? {} : { contrast: source.contrast }),
+  };
+  return [image];
+};
+
 /**
- * The primitives one picture draws: the bitmap (rotated and/or washed as the
- * source asks) followed by its border. Empty when the bytes are unusable, with
- * the reason already reported.
+ * The primitives one picture draws: the bitmap or the drawn preview (rotated
+ * and/or washed as the source asks) followed by its border. Empty when the
+ * bytes are unusable, with the reason already reported.
  */
 export const paintImage = ({
   source,
@@ -262,29 +302,18 @@ export const paintImage = ({
   label,
 }: PaintImageOptions): readonly DisplayPrimitive[] => {
   const primitives: DisplayPrimitive[] = [];
-  const ref = context.images.intern(source.src);
+  // A drawing with a descriptor has no bytes and needs none: its shapes are
+  // rectangles, which both backends draw. Opacity rides on the bitmap's own
+  // primitive but has to wrap the drawn shapes, because a rect carries none.
+  const drawn =
+    source.preview === undefined
+      ? paintBitmap({ source, rect, context, label })
+      : withOpacity(paintPreview(source.preview, rect), opacityOf(source));
 
-  if (ref === undefined) {
-    const reason = context.images.failureFor(source.src) ?? "image could not be decoded";
-    const construct = reason.includes("not PNG or JPEG")
-      ? UNSUPPORTED_CONSTRUCT.imageFormat
-      : UNSUPPORTED_CONSTRUCT.imageSource;
-    context.unsupported.report(construct, context.pageIndex, `${label}: ${reason}`);
-  } else {
-    const crop = cropOf(source);
-    const image: DisplayImagePrimitive = {
-      kind: "image",
-      image: ref,
-      rect,
-      ...(crop === undefined ? {} : { crop }),
-      opacity: source.opacity == null ? 1 : Math.min(1, Math.max(0, source.opacity)),
-      ...(source.brightness == null ? {} : { brightness: source.brightness }),
-      ...(source.contrast == null ? {} : { contrast: source.contrast }),
-    };
-
+  if (drawn.length > 0) {
     const degrees = parseRotationDegrees(source.transform);
     if (degrees === 0) {
-      primitives.push(image);
+      primitives.push(...drawn);
     } else {
       // Word rotates a picture about its geometric centre, and so does the CSS
       // the painter emits (`transform-origin: center center`).
@@ -293,7 +322,7 @@ export const paintImage = ({
         degrees,
         originXPx: rect.xPx + rect.widthPx / 2,
         originYPx: rect.yPx + rect.heightPx / 2,
-        children: [image],
+        children: drawn,
       });
     }
   }

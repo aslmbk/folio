@@ -1,9 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import type { MediaFile, RelationshipMap } from "../types/document";
-import { parseDiagramPreview } from "./diagramPreview";
-import { ImageTable } from "../display-list/build/imagePrimitives";
+import type { Image, MediaFile, PreviewDescriptor, RelationshipMap } from "../types/document";
+import { MAX_PREVIEW_SHAPES, parseDiagramPreview } from "./diagramPreview";
+import { paintPreview } from "../display-list/build/previewPrimitives";
 import { parseRelationships } from "./relsParser";
 import { parseXmlDocument } from "./xmlParser";
+
+const BOX = { xPx: 0, yPx: 0, widthPx: 200, heightPx: 100 };
+
+const expectPreview = (image: Image | null | undefined): PreviewDescriptor => {
+  if (!image?.preview) {
+    throw new Error("diagram produced no preview descriptor");
+  }
+  return image.preview;
+};
+
+/** Every mark but the backdrop, which every preview paints. */
+const shapeMarks = (image: Image | null | undefined) =>
+  paintPreview(expectPreview(image), BOX)
+    .slice(1)
+    .map((primitive) => {
+      if (primitive.kind !== "rect") {
+        throw new Error(`a preview drew a ${primitive.kind}`);
+      }
+      return primitive;
+    });
 
 const drawing = parseXmlDocument(
   `<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rIdData"/></a:graphicData></a:graphic></wp:inline></w:drawing>`,
@@ -55,10 +75,26 @@ describe("SmartArt preview", () => {
       ],
     ]);
     const image = parseDiagramPreview(drawing, rels, media);
-    expect(image?.mimeType).toBe("image/png");
     expect(image?.size).toEqual({ width: 914400, height: 457200 });
-    expect(image?.src).toStartWith("data:image/png;base64,");
-    expect(new ImageTable().intern(image?.src ?? "")).toBeDefined();
+    // The parse describes the drawing and rasterises nothing, so there is no
+    // picture and no media type for one.
+    expect(image?.src).toBeUndefined();
+    expect(image?.mimeType).toBeUndefined();
+    expect(image?.preview?.kind).toBe("diagram");
+    expect(image?.preview?.extent).toEqual({ width: 914400, height: 457200 });
+    expect(image?.preview?.shapes).toEqual([
+      { x: 10_000, y: 10_000, width: 400_000, height: 200_000, color: "70AD47" },
+    ]);
+
+    // And the drawing is drawn, one step later: a backdrop and the shape,
+    // placed in the image's box without a picture existing anywhere.
+    const marks = shapeMarks(image);
+    expect(marks).toHaveLength(1);
+    expect(marks.at(0)?.fill).toEqual({ r: 0x70, g: 0xad, b: 0x47, a: 1 });
+    expect(marks.at(0)?.rect.xPx).toBeCloseTo((10_000 / 914_400) * BOX.widthPx, 9);
+    expect(marks.at(0)?.rect.yPx).toBeCloseTo((10_000 / 457_200) * BOX.heightPx, 9);
+    expect(marks.at(0)?.rect.widthPx).toBeCloseTo((400_000 / 914_400) * BOX.widthPx, 9);
+    expect(marks.at(0)?.rect.heightPx).toBeCloseTo((200_000 / 457_200) * BOX.heightPx, 9);
   });
 
   test("falls back to a bounded background when cached drawing data is unavailable", () => {
@@ -68,8 +104,9 @@ describe("SmartArt preview", () => {
     );
     const media = new Map<string, MediaFile>();
     const image = parseDiagramPreview(drawing, rels, media);
-    expect(image?.mimeType).toBe("image/png");
-    expect(new ImageTable().intern(image?.src ?? "")).toBeDefined();
+    expect(image?.preview?.shapes).toEqual([]);
+    // The backdrop alone, so the drawing still occupies the page it reserved.
+    expect(paintPreview(expectPreview(image), BOX)).toHaveLength(1);
   });
 
   /**
@@ -106,9 +143,42 @@ describe("SmartArt preview", () => {
     const first = diagramDrawingFor("rIdData1");
     const second = diagramDrawingFor("rIdData2");
 
-    // Each preview paints its own diagram's shape, so the two differ.
-    expect(first?.src).toStartWith("data:image/png;base64,");
-    expect(second?.src).toStartWith("data:image/png;base64,");
-    expect(first?.src).not.toBe(second?.src);
+    // Each preview describes its own diagram's shape, so the two differ.
+    expect(first?.preview?.shapes).toEqual([
+      { x: 0, y: 0, width: 400_000, height: 400_000, color: "70AD47" },
+    ]);
+    expect(second?.preview?.shapes).toEqual([
+      { x: 0, y: 0, width: 800_000, height: 400_000, color: "C00000" },
+    ]);
+
+    // And still draw different pictures.
+    expect(shapeMarks(first)).not.toEqual(shapeMarks(second));
+  });
+
+  /**
+   * The shape walk stops at the cap rather than collecting every `dsp:sp` and
+   * slicing afterwards, so a drawing with far more shapes than the cap cannot
+   * make the parse proportional to the drawing's size.
+   */
+  test("reads at most the capped number of shapes however many the drawing holds", () => {
+    const shape = (index: number): string =>
+      `<dsp:sp><dsp:spPr><a:xfrm><a:off x="${String(index)}" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></dsp:spPr></dsp:sp>`;
+    const rels = parseRelationships(
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdData" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/><Relationship Id="rIdDrawing" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"/></Relationships>`,
+    );
+    const media = new Map<string, MediaFile>([
+      xmlPart(
+        "word/diagrams/data1.xml",
+        `<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram">${dataModelExt("rIdDrawing")}</dgm:dataModel>`,
+      ),
+      xmlPart(
+        "word/diagrams/drawing1.xml",
+        `<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:spTree>${Array.from({ length: 500 }, (_unused, index) => shape(index)).join("")}</dsp:spTree></dsp:drawing>`,
+      ),
+    ]);
+    if (!drawing) throw new Error("fixture did not parse");
+    expect(parseDiagramPreview(drawing, rels, media)?.preview?.shapes).toHaveLength(
+      MAX_PREVIEW_SHAPES,
+    );
   });
 });
