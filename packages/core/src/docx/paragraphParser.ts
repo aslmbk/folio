@@ -38,7 +38,7 @@ import type {
 import { BIDI_CONTROLS, PARAGRAPH_MARK_CHANGE_KINDS, REVIEW_CARRIERS } from "@stll/docx-core/model";
 import { panic } from "better-result";
 import { isValidHexId } from "../utils/hexId";
-import { paraIdAttribute } from "./paraIdAttribute";
+import { paraIdAttribute, textIdAttribute } from "./paraIdAttribute";
 import { paraIdInRange } from "./paraIdRangeNormalization";
 import { assignParagraphPropertySource } from "./paragraphPropertySource";
 import {
@@ -1954,7 +1954,7 @@ export function parseParagraph(
     paragraph.paraId = paraIdInRange(paraId);
   }
 
-  const textId = getAttribute(node, "w14", "textId") ?? getAttribute(node, "w", "textId");
+  const textId = textIdAttribute(node);
   if (textId && isValidHexId(textId)) {
     paragraph.textId = paraIdInRange(textId);
   }
