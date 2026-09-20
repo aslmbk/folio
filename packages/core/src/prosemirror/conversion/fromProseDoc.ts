@@ -20,6 +20,8 @@ import {
   modelParagraphFormattingEmission,
   sameAuthoredParagraphNumberingReference,
 } from "../../internal/paragraphFormattingSerialization";
+import { joinCommentRangesAcrossParagraphs } from "../../docx/commentRangeJoin";
+import { completeCommentReferences } from "../../docx/commentReferenceCompletion";
 import { visitDocxParagraphs } from "../../docx/paragraphTraversal";
 import { isNumberingReference } from "../../docx/numberingReference";
 import { DATE_UTC_ATTRIBUTE } from "../../docx/trackedChangeInfo";
@@ -111,6 +113,7 @@ import {
   bookmarkBoundaryDisplacement,
   expectBookmarkBoundaryAttrs,
 } from "../bookmarkBoundaryAttrs";
+import { expectCommentReferenceAttrs } from "../commentReferenceAttrs";
 import {
   expectCharacterSpacingMarkAttrs,
   expectCharacterStyleMarkAttrs,
@@ -610,6 +613,8 @@ export function fromProseDoc(pmDoc: PMNode, baseDocument?: Document): Document {
     "resolve",
     baseDocument?.package.styles ? createStyleEngine(baseDocument.package.styles) : null,
   );
+  joinCommentRangesAcrossParagraphs(blocks);
+  completeCommentReferences(blocks);
   const linkedSources = restoreLinkedParagraphPropertySources(blocks);
   if (tokenSources) {
     restoreParagraphPropertySourcesByToken(blocks, tokenSources);
@@ -2118,6 +2123,16 @@ type RunFormattingContext = {
   styleResolver: RunStyleResolver | null;
 };
 
+/**
+ * Comment ids in the order their markers are written at a shared boundary.
+ *
+ * Two ranges that begin or end at the same position have no order in the
+ * editor, where each is a mark, so every emission site orders them by id: a
+ * boundary written in the order the marks happened to open is a different
+ * document each time the same one is saved.
+ */
+const byCommentId = (ids: Iterable<number>): number[] => [...ids].toSorted((a, b) => a - b);
+
 function extractParagraphContent(
   paragraph: PMNode,
   // Parameter retained for signature compatibility with the call sites
@@ -2264,12 +2279,11 @@ function extractParagraphContent(
     flushCurrentInline();
     currentTrackedChange = undefined;
 
-    // Stable id ordering keeps shared-boundary emission deterministic.
-    for (const commentId of toClose.toSorted((a, b) => a - b)) {
+    for (const commentId of byCommentId(toClose)) {
       content.push({ type: "commentRangeEnd", id: commentId });
       openedComments.delete(commentId);
     }
-    for (const commentId of toOpen.toSorted((a, b) => a - b)) {
+    for (const commentId of byCommentId(toOpen)) {
       content.push({ type: "commentRangeStart", id: commentId });
       openedComments.add(commentId);
     }
@@ -2295,6 +2309,17 @@ function extractParagraphContent(
     }
     leadingRenderedPageBreakPending = false;
     syncCommentRanges(node, offset);
+
+    // A comment reference is paragraph content in the model, so it never joins
+    // a run, a hyperlink or a tracked wrapper: it is emitted where the editor
+    // holds it, right after the range ends `syncCommentRanges` just wrote.
+    if (node.type.name === "commentReference") {
+      flushCurrentInline();
+      currentTrackedChange = undefined;
+      content.push({ type: "commentReference", id: expectCommentReferenceAttrs(node).commentId });
+      return;
+    }
+
     const linkMark = node.marks.find((m) => m.type.name === "hyperlink");
 
     const noteRefMark = node.marks.find((m) => m.type.name === "footnoteRef");
@@ -2645,7 +2670,7 @@ function extractParagraphContent(
 
   // Don't forget the last run/hyperlink
   flushCurrentInline();
-  for (const commentId of openedComments) {
+  for (const commentId of byCommentId(openedComments)) {
     content.push({ type: "commentRangeEnd", id: commentId });
   }
 
@@ -5649,6 +5674,8 @@ export function proseDocToBlocks(
     styles ? createStyleEngine(styles) : null,
     options?.emptyFieldResult ?? "serializerFallback",
   );
+  joinCommentRangesAcrossParagraphs(blocks);
+  completeCommentReferences(blocks);
   const linkedSources = restoreLinkedParagraphPropertySources(blocks);
   if (baseContent) {
     restoreParagraphPropertySources(

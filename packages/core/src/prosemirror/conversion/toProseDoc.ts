@@ -57,6 +57,7 @@ import {
   mergeParagraphFormatting,
   mergeParagraphTabStops,
 } from "../../utils/paragraphFormattingMerge";
+import { rangedCommentIds } from "../../docx/commentAnchorIndex";
 import { resolveColorValueToHex } from "../../docx/drawingUtils";
 import { isNumberingReference, NO_NUMBERING_NUM_ID } from "../../docx/numberingReference";
 import { isCellMergeContinuation } from "../../docx/tableParser";
@@ -368,6 +369,8 @@ export function toProseDoc(document: Document, options?: ToProseDocOptions): PMN
     nextHyperlinkInstanceIndex,
     pairedBookmarkIds,
     pageBreakRunSourceDescendants: buildPageBreakRunSourceDescendantIndex(paragraphs),
+    storyRangedCommentIds: rangedCommentIds(paragraphs),
+    openCommentIds: new Set<number>(),
   };
 
   const convertBodyBlocks = (blocks: BlockContent[]): PMNode[] => {
@@ -487,12 +490,17 @@ function convertParagraph(
   paragraph: Paragraph,
   styleResolver: StyleEngine | null,
   context: TableConversionContext,
-  activeCommentIds?: Set<number>,
   extraRunFormatting?: TextFormatting,
   tableParagraphOverlay?: TableCellParagraphSpacingOverlay,
   textBoxAnchors?: ReadonlyMap<Shape, string>,
 ): PMNode {
-  const { nextHyperlinkInstanceIndex, pairedBookmarkIds, pageBreakRunSourceDescendants } = context;
+  const {
+    nextHyperlinkInstanceIndex,
+    pairedBookmarkIds,
+    pageBreakRunSourceDescendants,
+    storyRangedCommentIds,
+    openCommentIds,
+  } = context;
   let pageBreakRunOwnerId = 0;
   const nextPageBreakRunOwnerId = (): number => pageBreakRunOwnerId++;
   const { attrs, effectiveFrame } = paragraphFormattingToAttrs(
@@ -512,13 +520,11 @@ function convertParagraph(
   let bookmarksArr: { id: number; name: string }[] | undefined;
   let emptyHyperlinks: NonNullable<ParagraphAttrs["_emptyHyperlinks"]> | undefined;
 
-  // Track active comment ranges for this paragraph
-  const commentIds = activeCommentIds ?? new Set<number>();
   const emitInlineNodes = (nodes: PMNode[]): void => {
     if (nodes.length === 0) {
       return;
     }
-    const markedNodes = applyCommentMarks(nodes, commentIds);
+    const markedNodes = applyCommentMarks(nodes, openCommentIds);
     inlineNodes.push(...markedNodes);
     for (const node of markedNodes) {
       inlineOffset += node.nodeSize;
@@ -645,13 +651,24 @@ function convertParagraph(
   for (const content of withoutBidiWrappers(paragraph.content)) {
     switch (content.type) {
       case "commentRangeStart":
-        commentIds.add(content.id);
+        openCommentIds.add(content.id);
         break;
       case "commentRangeEnd":
-        commentIds.delete(content.id);
+        openCommentIds.delete(content.id);
         break;
       case "commentReference":
-        anchorPointComment(inlineNodes, content.id);
+        // A reference whose own range exists already has its highlight;
+        // anchoring it onto neighbouring text would stretch that range to
+        // wherever the reference sits. Only a bare reference borrows a
+        // neighbour's.
+        if (!storyRangedCommentIds.has(content.id)) {
+          anchorPointComment(inlineNodes, content.id);
+        }
+        // The reference is an inline atom of its own, so where it sits among
+        // the range ends around it survives the edit. Emitting it through the
+        // shared path gives it the marks of the ranges still open over it,
+        // which is what tells `fromProseDoc` which ends precede it.
+        emitInlineNode(schema.node("commentReference", { commentId: content.id }));
         break;
       case "run":
         emitInlineNodes(
@@ -1710,6 +1727,17 @@ type TableConversionContext = {
   nextHyperlinkInstanceIndex: HyperlinkInstanceIndexAllocator;
   pairedBookmarkIds: ReadonlySet<number>;
   pageBreakRunSourceDescendants: PageBreakRunSourceDescendantIndex;
+  /** Comments the story opens a range for, for the point-comment question. */
+  storyRangedCommentIds: ReadonlySet<number>;
+  /**
+   * Comment ranges open at the walk's current position. A range is a story
+   * fact, not a paragraph one: it opens in one paragraph and closes in another,
+   * and every inline node between the two carries its mark. The walk visits the
+   * story in document order, so the set the block walker carries is exactly the
+   * set of ranges covering the node it is converting — the same way
+   * `pairedBookmarkIds` answers for a boundary whose partner is elsewhere.
+   */
+  openCommentIds: Set<number>;
 };
 
 function convertTable(
@@ -2429,6 +2457,8 @@ export function standaloneTableCellToProseMirror(
       nextHyperlinkInstanceIndex,
       pairedBookmarkIds: collectPairedBookmarkIds(cell.content),
       pageBreakRunSourceDescendants,
+      storyRangedCommentIds: rangedCommentIds(cell.content),
+      openCommentIds: new Set<number>(),
     },
     isHeader: nodeType === "tableHeader",
     gridWidthPercent: undefined,
@@ -4158,7 +4188,6 @@ function convertParagraphWithTextBoxes(
     block,
     styleResolver,
     context,
-    undefined,
     extraRunFormatting,
     tableParagraphOverlay,
     textBoxAnchors,
@@ -4508,19 +4537,26 @@ function convertTextBox(
   const marginRight =
     textBox.margins?.right !== undefined ? emuToPixels(textBox.margins.right) : undefined;
 
-  // Convert text box content to PM nodes
+  // Convert text box content to PM nodes.
+  //
+  // `w:txbxContent` is a story of its own: a comment range open in the body
+  // does not cover what the box holds, and a marker inside the box does not
+  // close it. Carrying the body's open set in would mark the box's text, and
+  // the save would then write a second range for that comment id inside the
+  // box; carrying the box's markers out would close a body range at the box.
+  const textBoxContext = { ...options.context, openCommentIds: new Set<number>() };
   const contentNodes: PMNode[] = [];
   for (const block of textBox.content) {
     if (block.type === "paragraph") {
       contentNodes.push(
         ...convertParagraphWithTextBoxes(block, styleResolver, {
-          textBoxGroupId: options.context.nextTextBoxGroupId(),
-          context: options.context,
+          textBoxGroupId: textBoxContext.nextTextBoxGroupId(),
+          context: textBoxContext,
         }),
       );
       continue;
     }
-    contentNodes.push(convertTable(block, styleResolver, options.context));
+    contentNodes.push(convertTable(block, styleResolver, textBoxContext));
   }
 
   // Ensure at least one paragraph
@@ -4679,6 +4715,8 @@ export function headerFooterToProseDoc(
     nextHyperlinkInstanceIndex,
     pairedBookmarkIds,
     pageBreakRunSourceDescendants: buildPageBreakRunSourceDescendantIndex(content),
+    storyRangedCommentIds: rangedCommentIds(content),
+    openCommentIds: new Set<number>(),
   };
 
   const convertBlocks = (blocks: BlockContent[]): PMNode[] => {
