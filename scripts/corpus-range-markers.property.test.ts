@@ -253,12 +253,11 @@ const saveEdited = async ({ subject, viaEditor }: SaveOptions): Promise<SaveResu
  * only trades a parse-time loss for a round-trip loss. `bookmarkBoundary` is a
  * real ProseMirror node, so a bookmark survives the editor whole. A comment
  * range is rebuilt from the comment mark, which carries the id and nothing
- * else. A move range has no projection at all and its markers do not survive
- * unless a content control replays them verbatim. The last two are losses the
- * public corpus already records; stating them here makes closing one a test
- * change rather than a silent one.
+ * else. Move-range boundaries are real ProseMirror nodes too, so they carry
+ * the complete marker. Stating each disposition here makes a projection
+ * change deliberate rather than silent.
  */
-const EDITOR_PROJECTIONS = { whole: "whole", idOnly: "id-only", dropped: "dropped" } as const;
+const EDITOR_PROJECTIONS = { whole: "whole", idOnly: "id-only" } as const;
 
 type EditorProjection = (typeof EDITOR_PROJECTIONS)[keyof typeof EDITOR_PROJECTIONS];
 
@@ -267,10 +266,10 @@ const EDITOR_PROJECTION = {
   bookmarkEnd: EDITOR_PROJECTIONS.whole,
   commentRangeStart: EDITOR_PROJECTIONS.idOnly,
   commentRangeEnd: EDITOR_PROJECTIONS.idOnly,
-  moveFromRangeStart: EDITOR_PROJECTIONS.dropped,
-  moveFromRangeEnd: EDITOR_PROJECTIONS.dropped,
-  moveToRangeStart: EDITOR_PROJECTIONS.dropped,
-  moveToRangeEnd: EDITOR_PROJECTIONS.dropped,
+  moveFromRangeStart: EDITOR_PROJECTIONS.whole,
+  moveFromRangeEnd: EDITOR_PROJECTIONS.whole,
+  moveToRangeStart: EDITOR_PROJECTIONS.whole,
+  moveToRangeEnd: EDITOR_PROJECTIONS.whole,
 } as const satisfies Record<MarkerName, EditorProjection>;
 
 describe("range markers keep every attribute a real save re-serializes", () => {
@@ -310,9 +309,6 @@ describe("what the editor projection carries, it carries whole", () => {
               return;
             case EDITOR_PROJECTIONS.idOnly:
               expect(written).toEqual({ id: subject.attributes["id"] ?? "" });
-              return;
-            case EDITOR_PROJECTIONS.dropped:
-              expect(written).toBeUndefined();
               return;
             default: {
               const unreachable: never = projection;

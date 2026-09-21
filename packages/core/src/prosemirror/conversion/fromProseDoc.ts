@@ -21,7 +21,7 @@ import {
 } from "../../internal/paragraphFormattingSerialization";
 import { joinCommentRangesAcrossParagraphs } from "../../docx/commentRangeJoin";
 import { completeCommentReferences } from "../../docx/commentReferenceCompletion";
-import { isInlineSdtContent } from "../../docx/inlineWrapperContent";
+import { isInlineSdtContent, isSimpleFieldContent } from "../../docx/inlineWrapperContent";
 import { visitDocxParagraphs } from "../../docx/paragraphTraversal";
 import {
   paragraphNumberingReferenceId,
@@ -124,6 +124,10 @@ import { presetDashForCssBorderStyle } from "../../utils/borderCss";
 import { emuToPixels, emuToStrokePixels, pixelsToEmu } from "../../utils/units";
 import { bookmarkMarkerFromAttrs, expectBookmarkBoundaryAttrs } from "../bookmarkBoundaryAttrs";
 import { expectCommentReferenceAttrs } from "../commentReferenceAttrs";
+import { MOVE_RANGE_BOUNDARY_NODE_NAME } from "../extensions/nodes/MoveRangeBoundaryExtension";
+import { RANGE_ANCHOR_NODE_NAME } from "../extensions/nodes/RangeAnchorExtension";
+import { expectMoveRangeBoundaryAttrs } from "../moveRangeBoundaryAttrs";
+import { expectRangeAnchorAttrs } from "../rangeAnchorAttrs";
 import {
   expectCharacterSpacingMarkAttrs,
   expectCharacterStyleMarkAttrs,
@@ -2495,6 +2499,25 @@ function extractParagraphContent(
       return;
     }
 
+    // A range that spans no content: its two markers go back adjacent, at the
+    // anchor's own position. They are cloned because the attrs hold them for as
+    // long as the editor state does, and the rebuilt document must not share a
+    // record with it.
+    if (node.type.name === RANGE_ANCHOR_NODE_NAME) {
+      flushCurrentInline();
+      currentTrackedChange = undefined;
+      const { start, end } = expectRangeAnchorAttrs(node);
+      content.push({ ...start }, { ...end });
+      return;
+    }
+
+    if (node.type.name === MOVE_RANGE_BOUNDARY_NODE_NAME) {
+      flushCurrentInline();
+      currentTrackedChange = undefined;
+      content.push({ ...expectMoveRangeBoundaryAttrs(node) });
+      return;
+    }
+
     const linkMark = node.marks.find((m) => m.type.name === "hyperlink");
 
     const noteRefMark = node.marks.find((m) => m.type.name === "footnoteRef");
@@ -3586,10 +3609,7 @@ function createFieldFromNode(
     textBoxAnchorMarkers,
     false,
     fieldFormattingContext,
-  ).filter(
-    (content): content is SimpleField["content"][number] =>
-      content.type === "run" || content.type === "hyperlink" || content.type === "preservedInline",
-  );
+  ).filter(isSimpleFieldContent);
   // A result-less PAGE/NUMPAGES field gets its visible fallback from
   // `materializeSerializerFieldFallbacks`, before the walk reaches here, so a
   // read can opt out of it while a save keeps it.
@@ -3650,21 +3670,22 @@ const synchronizeFieldDisplayText = (
   fallbackRun: Run,
 ): SimpleField["content"] => {
   let currentText = "";
-  const visitRuns = (visit: (run: Run) => void): void => {
-    for (const child of content) {
+  // A transparent wrapper is stepped through rather than stopped at: the runs
+  // it holds carry the field's cached display, so a field whose result was
+  // authored inside a `w:bdo` must not read as holding no text at all.
+  const visitRunsIn = (items: readonly ParagraphContent[], visit: (run: Run) => void): void => {
+    for (const child of items) {
       if (child.type === "run") {
         visit(child);
         continue;
       }
-      if (child.type !== "hyperlink") {
-        continue;
-      }
-      for (const hyperlinkChild of child.children) {
-        if (hyperlinkChild.type === "run") {
-          visit(hyperlinkChild);
-        }
+      if (child.type === "hyperlink" || child.type === "inlineWrapper") {
+        visitRunsIn(child.type === "hyperlink" ? child.children : child.content, visit);
       }
     }
+  };
+  const visitRuns = (visit: (run: Run) => void): void => {
+    visitRunsIn(content, visit);
   };
   visitRuns((run) => {
     for (const runContent of run.content) {
@@ -3719,13 +3740,42 @@ function createMathFromNode(node: PMNode): MathEquation {
 }
 
 /**
+ * A revision covering every child of a control, written around the control.
+ *
+ * `w:ins > w:sdt` and `w:sdt > w:ins` reach the editor as the same revision
+ * mark on the same leaves, so the save leg has to pick one and writes the
+ * canonical order: the revision outermost, as it already is around a hyperlink
+ * and around a transparent wrapper. Outermost is also the only form in which
+ * accepting or rejecting the change is an operation over the whole control —
+ * the reader who inserted a bound field inserted the field, not its text.
+ *
+ * A revision that covers only part of the content has no such form and stays
+ * where the editor holds it, per child.
+ */
+const hoistUniformRevision = (sdt: InlineSdt): InlineSdt | TrackedRunWrapper => {
+  const only = sdt.content.length === 1 ? sdt.content.at(0) : undefined;
+  if (only === undefined || !isRevisionWrapper(only)) {
+    return sdt;
+  }
+  // The two wrappers decide admission separately, so a revision may hold
+  // content the control does not: moving that inside the control would write
+  // markup the control's content model rejects. Nothing is hoisted in that
+  // case, and the revision stays where the editor holds it.
+  const admitted = only.content.filter(isInlineSdtContent);
+  if (admitted.length !== only.content.length) {
+    return sdt;
+  }
+  return { ...only, content: [{ ...sdt, content: admitted }] };
+};
+
+/**
  * Create an InlineSdt from a PM sdt node
  */
 function createInlineSdtFromNode(
   node: PMNode,
   textBoxAnchorMarkers?: Map<string, Run>,
   formattingContext?: RunFormattingContext,
-): InlineSdt {
+): InlineSdt | TrackedRunWrapper {
   const attrs = expectSdtAttrs(node);
   const properties = sdtPropertiesFromAttrs(attrs);
 
@@ -3743,11 +3793,11 @@ function createInlineSdtFromNode(
     formattingContext,
   ).filter(isInlineSdtContent);
 
-  return {
+  return hoistUniformRevision({
     type: "inlineSdt",
     properties,
     content,
-  };
+  });
 }
 
 /**

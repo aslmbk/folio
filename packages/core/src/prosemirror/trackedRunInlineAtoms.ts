@@ -26,8 +26,12 @@ export const TRACKED_RUN_INLINE_ATOM_DISPOSITIONS = Object.freeze({
   hardBreak: "carry",
   image: "carry",
   math: "carry",
+  moveRangeBoundary: "transparent",
   pageBreakRun: "page-break-carrier",
   preservedXml: "carry",
+  // A range marker is not content a revision owns: `TRACKED_CHANGE_WRAPPER_CONTENT`
+  // admits neither half, so the model keeps an empty range beside the wrapper.
+  rangeAnchor: "transparent",
   renderedPageBreak: "transparent",
   shape: "carry",
   structuredField: "carry",

@@ -31,11 +31,10 @@ import type {
   TrackedChangeInfo,
   TrackedRunChange,
   MathEquation,
-  BidiControl,
   InlineWrapper,
   RunContent,
 } from "../types/document";
-import { BIDI_CONTROLS, PARAGRAPH_MARK_CHANGE_KINDS, REVIEW_CARRIERS } from "@stll/docx-core/model";
+import { PARAGRAPH_MARK_CHANGE_KINDS, REVIEW_CARRIERS } from "@stll/docx-core/model";
 import { panic } from "better-result";
 import { isValidHexId } from "../utils/hexId";
 import { attributeRemainder } from "./attributeRemainder";
@@ -67,13 +66,19 @@ import {
 import { parseParagraphProperties } from "./paragraphProperties";
 import {
   CAPTURE,
+  type ChildHandlers,
   dispatchChildren,
-  DROPPED_WITH_ITS_WRAPPER,
   ownedElsewhere,
   transitionalNamespaceOf,
   withPreservedChildren,
 } from "./containerChildren";
-import { isInlineSdtContent, isTrackedChangeWrapperChild } from "./inlineWrapperContent";
+import {
+  isHyperlinkContent,
+  isInlineSdtContent,
+  isTrackedChangeWrapperChild,
+} from "./inlineWrapperContent";
+import { inlineWrapperOf } from "./inlineWrapperParser";
+import type { InlineWrapperElement } from "./inlineWrapperParser";
 import {
   preservedInlineCapture,
   preserveInlineChild,
@@ -589,14 +594,6 @@ const mathContentOf = (child: XmlElement): MathEquation | undefined => {
   return equation;
 };
 
-const isHyperlinkChildContent = (
-  content: ParagraphContent,
-): content is Hyperlink["children"][number] =>
-  content.type === "run" ||
-  content.type === "bookmarkStart" ||
-  content.type === "bookmarkEnd" ||
-  content.type === "preservedInline";
-
 /**
  * A `w:hyperlink` as paragraph content, with any revision wrapper it holds
  * hoisted around it.
@@ -654,7 +651,7 @@ function parseHyperlinkParagraphContents(
         }
       };
       for (const item of wrapped) {
-        if (isHyperlinkChildContent(item)) {
+        if (isHyperlinkContent(item)) {
           linked.push(item);
           continue;
         }
@@ -789,63 +786,137 @@ function parseSimpleField(
     element: node,
     container: "w:fldSimple",
     capturePosition: () => content.length,
-    handlers: {
-      r: (child) => {
-        content.push(parseRun(child, styles, theme, rels, media, inScopeXmlns));
+    handlers: simpleFieldChildHandlers({
+      push: (child) => {
+        content.push(child);
       },
-      hyperlink: (child) => {
-        content.push(parseHyperlink(child, rels, styles, theme, media, inScopeXmlns));
-      },
-      customXml: (child) => {
-        content.push(preserveInlineChild(child));
-      },
-      smartTag: (child) => {
-        content.push(preserveInlineChild(child));
-      },
-      // A field inside a field's cached result. The schema admits it and the
-      // public corpus has none, so it is kept as it arrived rather than
-      // modelled — but through the element, not the sink: its runs are the
-      // outer field's visible result, and an opaque capture would keep the
-      // markup and lose the words.
-      fldSimple: (child) => {
-        content.push(preserveInlineChild(child));
-      },
-      bdo: CAPTURE,
-      bookmarkEnd: CAPTURE,
-      bookmarkStart: CAPTURE,
-      commentRangeEnd: CAPTURE,
-      commentRangeStart: CAPTURE,
-      customXmlDelRangeEnd: CAPTURE,
-      customXmlDelRangeStart: CAPTURE,
-      customXmlInsRangeEnd: CAPTURE,
-      customXmlInsRangeStart: CAPTURE,
-      customXmlMoveFromRangeEnd: CAPTURE,
-      customXmlMoveFromRangeStart: CAPTURE,
-      customXmlMoveToRangeEnd: CAPTURE,
-      customXmlMoveToRangeStart: CAPTURE,
-      del: CAPTURE,
-      dir: CAPTURE,
-      // The field's own custom data (`CT_Text`), meaningful only to the
-      // producer that wrote it, so it travels as the bytes it arrived as.
-      fldData: CAPTURE,
-      ins: CAPTURE,
-      moveFrom: CAPTURE,
-      moveFromRangeEnd: CAPTURE,
-      moveFromRangeStart: CAPTURE,
-      moveTo: CAPTURE,
-      moveToRangeEnd: CAPTURE,
-      moveToRangeStart: CAPTURE,
-      permEnd: CAPTURE,
-      permStart: CAPTURE,
-      proofErr: CAPTURE,
-      sdt: CAPTURE,
-      subDoc: CAPTURE,
-    },
+      styles,
+      theme,
+      rels,
+      media,
+      inScopeXmlns,
+    }),
   });
   field.content = withPreservedChildren(content, preserved, preservedInlineCapture);
 
   return field;
 }
+
+/** What {@link simpleFieldChildHandlers} needs to read one child of a field. */
+type SimpleFieldChildContext = {
+  /** Where a parsed or captured child lands, in source order. */
+  push: (child: SimpleField["content"][number]) => void;
+  styles: StyleMap | null;
+  theme: Theme | null;
+  rels: RelationshipMap | null;
+  media: Map<string, MediaFile> | null;
+  inScopeXmlns: Record<string, string>;
+};
+
+/**
+ * What a `w:fldSimple` does with every child its content model declares.
+ *
+ * Two callers read this one map: {@link parseSimpleField}, and
+ * {@link parseFieldInlineWrapper} for a transparent wrapper the field holds —
+ * `CT_BdoContentRun` and its three siblings are the same `EG_PContent` the
+ * field is, so the decision per child is the field's own.
+ */
+const simpleFieldChildHandlers = (context: SimpleFieldChildContext) => {
+  const { push, styles, theme, rels, media, inScopeXmlns } = context;
+  const wrapper =
+    (element: InlineWrapperElement) =>
+    (child: XmlElement): void => {
+      push(parseFieldInlineWrapper(element, child, context));
+    };
+  return {
+    r: (child) => {
+      push(parseRun(child, styles, theme, rels, media, inScopeXmlns));
+    },
+    hyperlink: (child) => {
+      push(parseHyperlink(child, rels, styles, theme, media, inScopeXmlns));
+    },
+
+    // The transparent wrappers, read as the wrappers they are: a cached field
+    // result written inside a `w:dir` keeps its runs editable.
+    bdo: wrapper("bdo"),
+    dir: wrapper("dir"),
+    customXml: wrapper("customXml"),
+    smartTag: wrapper("smartTag"),
+
+    bookmarkEnd: CAPTURE,
+    bookmarkStart: CAPTURE,
+    commentRangeEnd: CAPTURE,
+    commentRangeStart: CAPTURE,
+    customXmlDelRangeEnd: CAPTURE,
+    customXmlDelRangeStart: CAPTURE,
+    customXmlInsRangeEnd: CAPTURE,
+    customXmlInsRangeStart: CAPTURE,
+    customXmlMoveFromRangeEnd: CAPTURE,
+    customXmlMoveFromRangeStart: CAPTURE,
+    customXmlMoveToRangeEnd: CAPTURE,
+    customXmlMoveToRangeStart: CAPTURE,
+    del: CAPTURE,
+    // The field's own custom data (`CT_Text`), meaningful only to the
+    // producer that wrote it, so it travels as the bytes it arrived as.
+    fldData: CAPTURE,
+    fldSimple: (child) => {
+      push(preserveInlineChild(child));
+    },
+    ins: CAPTURE,
+    moveFrom: CAPTURE,
+    moveFromRangeEnd: CAPTURE,
+    moveFromRangeStart: CAPTURE,
+    moveTo: CAPTURE,
+    moveToRangeEnd: CAPTURE,
+    moveToRangeStart: CAPTURE,
+    permEnd: CAPTURE,
+    permStart: CAPTURE,
+    proofErr: CAPTURE,
+    sdt: CAPTURE,
+    subDoc: CAPTURE,
+  } satisfies ChildHandlers<"w:fldSimple">;
+};
+
+/**
+ * A transparent wrapper a simple field holds, with the content the field holds.
+ *
+ * The mirror of `parseLinkedInlineWrapper`: the wrapper's declared children are
+ * run-level content, the decision per child is the container's own map, and the
+ * wrapper's properties bag is read by `inlineWrapperOf` rather than captured a
+ * second time by the sink.
+ */
+const parseFieldInlineWrapper = (
+  element: InlineWrapperElement,
+  node: XmlElement,
+  context: SimpleFieldChildContext,
+): InlineWrapper => {
+  const inScopeXmlns = mergeXmlnsDeclarations(context.inScopeXmlns, node);
+  const content: SimpleField["content"] = [];
+  const preserved = dispatchChildren({
+    element: node,
+    container: "run-level-content",
+    capturePosition: () => content.length,
+    handlers: {
+      ...simpleFieldChildHandlers({
+        ...context,
+        inScopeXmlns,
+        push: (child) => {
+          content.push(child);
+        },
+      }),
+      customXmlPr: CUSTOM_XML_PROPERTIES_OWNER,
+      smartTagPr: SMART_TAG_PROPERTIES_OWNER,
+      // Not a child of any of the four wrappers; the declared set is shared
+      // with `w:p`, where the paragraph reads it off the element.
+      pPr: CAPTURE,
+    },
+  });
+  return inlineWrapperOf(
+    element,
+    node,
+    withPreservedChildren(content, preserved, preservedInlineCapture),
+  );
+};
 
 /**
  * Whether a run is worth keeping once it has been parsed.
@@ -1003,6 +1074,18 @@ const PARAGRAPH_PROPERTIES_OWNER = ownedElsewhere({
   reader: "paragraphProperties#parseParagraphProperties",
 });
 
+const SMART_TAG_PROPERTIES_OWNER = ownedElsewhere({
+  container: "run-level-content",
+  child: "smartTagPr",
+  reader: "inlineWrapperParser#inlineWrapperOf",
+});
+
+const CUSTOM_XML_PROPERTIES_OWNER = ownedElsewhere({
+  container: "run-level-content",
+  child: "customXmlPr",
+  reader: "inlineWrapperParser#inlineWrapperOf",
+});
+
 /**
  * Parse all content within a paragraph
  *
@@ -1043,15 +1126,15 @@ function parseParagraphContents(
   // fallback when the field has no separate result run (eigenpal/docx-editor#909).
   let complexFieldFormatting: TextFormatting | undefined;
 
-  // A bidirectional embedding (`w:dir`) or override (`w:bdo`). Both hold
-  // inline content and change only how it is laid out, so the recursion is
-  // the ordinary one and the wrapper carries its direction.
-  const parseBidiWrapper = (child: XmlElement, control: BidiControl): InlineWrapper => {
-    const wrapper: InlineWrapper = {
-      type: "inlineWrapper",
-      kind: "bidi",
-      control,
-      content: parseParagraphContents(
+  // A transparent wrapper at paragraph level. All four hold ordinary inline
+  // content and say something about it rather than about the text, so the
+  // recursion is this same walk and `inlineWrapperOf` reads what the element
+  // adds.
+  const parseInlineWrapper = (child: XmlElement, element: InlineWrapperElement): InlineWrapper =>
+    inlineWrapperOf(
+      element,
+      child,
+      parseParagraphContents(
         child,
         styles,
         theme,
@@ -1059,15 +1142,9 @@ function parseParagraphContents(
         rels,
         media,
         trackedContext,
-        inScopeXmlns,
+        mergeXmlnsDeclarations(inScopeXmlns, child),
       ),
-    };
-    const direction = getAttribute(child, "w", "val");
-    if (direction === "ltr" || direction === "rtl") {
-      wrapper.direction = direction;
-    }
-    return wrapper;
-  };
+    );
 
   const preserved = dispatchChildren({
     element: paraElement,
@@ -1313,11 +1390,8 @@ function parseParagraphContents(
 
       pPr: PARAGRAPH_PROPERTIES_OWNER,
 
-      // A transparent wrapper folio has no model for. Captured whole rather
-      // than skipped: its content was dropped outright before, and the text it
-      // puts on the line rides along so a wrapped party name still reads.
       customXml: (child) => {
-        contents.push(preserveInlineChild(child));
+        contents.push(parseInlineWrapper(child, "customXml"));
       },
 
       proofErr: CAPTURE,
@@ -1333,11 +1407,11 @@ function parseParagraphContents(
       customXmlMoveToRangeEnd: CAPTURE,
       customXmlMoveToRangeStart: CAPTURE,
 
-      // folio splices a smart tag's content into the paragraph and keeps no
-      // wrapper, so the properties describing that wrapper have nothing left
-      // to describe; a captured `w:smartTagPr` would land where the schema
-      // admits none.
-      smartTagPr: DROPPED_WITH_ITS_WRAPPER,
+      // The wrapper's own record holds these verbatim and the serializer
+      // writes them back ahead of the content, so the walk that reads the
+      // wrapper's children must not capture them a second time.
+      smartTagPr: SMART_TAG_PROPERTIES_OWNER,
+      customXmlPr: CUSTOM_XML_PROPERTIES_OWNER,
 
       sdt: (child) => {
         // Structured document tag - extract properties and content
@@ -1453,21 +1527,7 @@ function parseParagraphContents(
       },
 
       smartTag: (child) => {
-        // w:smartTag is a transparent inline wrapper (legacy Word smart-tag
-        // recognizer markup). Its children are ordinary paragraph content;
-        // recurse so the wrapped runs are not dropped.
-        const smartTagInScopeXmlns = mergeXmlnsDeclarations(inScopeXmlns, child);
-        const inner = parseParagraphContents(
-          child,
-          styles,
-          theme,
-          null,
-          rels,
-          media,
-          trackedContext,
-          smartTagInScopeXmlns,
-        );
-        contents.push(...inner);
+        contents.push(parseInlineWrapper(child, "smartTag"));
       },
 
       moveFromRangeStart: (child) => {
@@ -1491,10 +1551,10 @@ function parseParagraphContents(
       },
 
       bdo: (child) => {
-        contents.push(parseBidiWrapper(child, BIDI_CONTROLS.override));
+        contents.push(parseInlineWrapper(child, "bdo"));
       },
       dir: (child) => {
-        contents.push(parseBidiWrapper(child, BIDI_CONTROLS.embedding));
+        contents.push(parseInlineWrapper(child, "dir"));
       },
     },
   });
@@ -1960,6 +2020,9 @@ const getHyperlinkText = (hyperlink: Hyperlink): string =>
         // nothing except for a transparent wrapper such as `w:customXml`.
         case "preservedInline":
           return child.text;
+        // A transparent wrapper puts its content on the line, unchanged.
+        case "inlineWrapper":
+          return child.content.map(getParagraphContentText).join("");
         default: {
           const unsupported: never = child;
           return panic(

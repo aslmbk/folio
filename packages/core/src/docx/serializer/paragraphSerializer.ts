@@ -532,21 +532,32 @@ function hyperlinkAttributes(hyperlink: Hyperlink): string {
   return attrs.length > 0 ? ` ${attrs.join(" ")}` : "";
 }
 
-/** One `w:hyperlink` child, with the caller deciding how a run is written. */
+/** One `w:hyperlink` child, written with the link's own disposition. */
 function serializeHyperlinkChild(
   child: Hyperlink["children"][number],
-  serializeChildRun: (run: Run) => string,
+  disposition: InlineTextDisposition,
 ): string {
-  if (child.type === "run") {
-    return serializeChildRun(child);
+  switch (child.type) {
+    case "run":
+      return serializeInlineRun(child, disposition);
+    case "bookmarkStart":
+      return serializeBookmarkMarker(child);
+    case "bookmarkEnd":
+      return serializeBookmarkMarker(child);
+    // A transparent wrapper the link was authored around, written where the
+    // author put it and carrying the link's disposition down to its runs.
+    case "inlineWrapper":
+      return serializeParagraphContent(child, disposition);
+    // Opaque markup, replayed between the same two children it was read
+    // between, so a permission range or a proofing error does not leave the
+    // link it was authored inside.
+    case "preservedInline":
+      return child.xml;
+    default: {
+      const unwritten: never = child;
+      return unwritten;
+    }
   }
-  if (child.type === "bookmarkStart" || child.type === "bookmarkEnd") {
-    return serializeBookmarkMarker(child);
-  }
-  // Opaque markup, replayed between the same two children it was read
-  // between, so a permission range or a proofing error does not leave the
-  // link it was authored inside.
-  return child.xml;
 }
 
 /**
@@ -557,7 +568,7 @@ function serializeHyperlink(
   disposition: InlineTextDisposition = "kept",
 ): string {
   const childrenXml = hyperlink.children
-    .map((child) => serializeHyperlinkChild(child, (run) => serializeInlineRun(run, disposition)))
+    .map((child) => serializeHyperlinkChild(child, disposition))
     .join("");
   return `<w:hyperlink${hyperlinkAttributes(hyperlink)}>${childrenXml}</w:hyperlink>`;
 }
@@ -570,11 +581,22 @@ function serializeSimpleField(field: SimpleField): string {
   ];
 
   const contentXml = field.content
-    .map((item) => {
-      if (item.type === "run") {
-        return serializeRun(item);
+    .map((item): string => {
+      switch (item.type) {
+        case "run":
+          return serializeRun(item);
+        case "hyperlink":
+          return serializeHyperlink(item);
+        // A transparent wrapper the field's cached result was authored inside.
+        case "inlineWrapper":
+          return serializeParagraphContent(item);
+        case "preservedInline":
+          return item.xml;
+        default: {
+          const unwritten: never = item;
+          return unwritten;
+        }
       }
-      return item.type === "hyperlink" ? serializeHyperlink(item) : item.xml;
     })
     .join("");
 
@@ -759,6 +781,12 @@ function serializeInlineSdt(sdt: InlineSdt, disposition: InlineTextDisposition =
           return serializeInlineSdt(item, disposition);
         case "inlineWrapper":
           return serializeParagraphContent(item, disposition);
+        // Inside the control, where the source put it: a marker written beside
+        // the control is a bookmark whose extent has changed.
+        case "bookmarkStart":
+          return serializeBookmarkMarker(item);
+        case "bookmarkEnd":
+          return serializeBookmarkMarker(item);
         case "insertion":
           return serializeTrackedChange("ins", item);
         case "deletion":
@@ -971,7 +999,7 @@ function serializeTrackedChange(
     if (item.type === "hyperlink") {
       flushPending();
       const childrenXml = item.children
-        .map((child) => serializeHyperlinkChild(child, serializeContentRun))
+        .map((child) => serializeHyperlinkChild(child, disposition))
         .join("");
       // Always the full wrapper, never `wrap`: a linked run range that is
       // empty still has to say it was inserted or deleted, or reopening the
@@ -986,6 +1014,44 @@ function serializeTrackedChange(
   flushPending();
 
   return segments.join("");
+}
+
+/** The properties element each tagged wrapper declares ahead of its content. */
+const TAGGED_WRAPPER_PROPERTIES = { smartTag: "smartTagPr", customXml: "customXmlPr" } as const;
+const TAGGED_WRAPPER_PROPERTY_NAMES = {
+  smartTag: new Set(["smartTagPr"]),
+  customXml: new Set(["customXmlPr"]),
+} as const satisfies Record<keyof typeof TAGGED_WRAPPER_PROPERTIES, ReadonlySet<string>>;
+
+/**
+ * Emit a `w:smartTag` or a run-level `w:customXml` around content already written.
+ *
+ * `w:element` is required by both content models, so it is always spelled;
+ * `w:uri` is written only when the source stated one, because inventing an
+ * empty namespace would change what the tag names. The properties element
+ * comes first, as both content models declare it.
+ *
+ * The captured properties are replayed only when they are structurally the one
+ * element they claim to be. The layer rides a ProseMirror mark, so a paste from
+ * outside the editor can put any string there, and a string that closed the
+ * wrapper early would splice sibling markup into the part.
+ */
+function serializeTaggedWrapper(
+  kind: keyof typeof TAGGED_WRAPPER_PROPERTIES,
+  wrapper: { element: string; uri?: string; propertiesXml?: string },
+  inner: string,
+): string {
+  const uri = wrapper.uri === undefined ? "" : ` w:uri="${escapeXmlAttribute(wrapper.uri)}"`;
+  const properties =
+    sanitizeCapturedXmlElement(wrapper.propertiesXml, {
+      allowedLocalNames: TAGGED_WRAPPER_PROPERTY_NAMES[kind],
+      allowedNamespaceUris: WORDPROCESSINGML_NAMESPACE,
+      inheritedNamespaceScope: OOXML_NAMESPACE_SCOPE,
+    }) ?? "";
+  return (
+    `<w:${kind}${uri} w:element="${escapeXmlAttribute(wrapper.element)}">` +
+    `${properties}${inner}</w:${kind}>`
+  );
 }
 
 /** Emit the `<w:commentReference>` run Word places after a comment range end. */
@@ -1057,8 +1123,15 @@ function serializeParagraphContent(
               : ` w:val="${escapeXmlAttribute(content.direction)}"`;
           return `<w:${tag}${value}>${inner}</w:${tag}>`;
         }
+        // `CT_SmartTagRun` and `CT_CustomXmlRun` declare the properties child
+        // ahead of the content, so it is written first; the content model is
+        // the same paragraph content the branches above went back through.
+        case "smartTag":
+          return serializeTaggedWrapper("smartTag", content, inner);
+        case "customXml":
+          return serializeTaggedWrapper("customXml", content, inner);
         default: {
-          const unwritten: never = content.kind;
+          const unwritten: never = content;
           return unwritten;
         }
       }

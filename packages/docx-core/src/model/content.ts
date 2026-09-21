@@ -281,16 +281,21 @@ export type Hyperlink = {
   /** Document location */
   docLocation?: string;
   /**
-   * The link's content: runs, bookmark boundaries, and markup folio does not
-   * model kept where the source put it.
+   * The link's content: runs, bookmark boundaries, the transparent wrappers,
+   * and markup folio does not model kept where the source put it.
    *
    * `CT_Hyperlink` is `EG_PContent`, so a link may hold a permission range, a
-   * proofing error, a smart tag or a custom-XML revision range between its
-   * runs. The capture is a member of this union rather than a sink beside it
-   * for the reason `PreservedInline` gives: position inside the link is what
-   * decides whether the markup goes with the link when the link moves.
+   * proofing error or a custom-XML revision range between its runs. The
+   * capture is a member of this union rather than a sink beside it for the
+   * reason `PreservedInline` gives: position inside the link is what decides
+   * whether the markup goes with the link when the link moves.
+   *
+   * `EG_PContent` also declares `w:bdo`, `w:dir`, `w:smartTag` and the
+   * run-level `w:customXml`, so an author may write `w:hyperlink > w:bdo`.
+   * That is the parse leg only: the editor carries a wrapper as a mark and the
+   * save leg writes the canonical order, wrapper outside the link.
    */
-  children: (Run | BookmarkStart | BookmarkEnd | PreservedInline)[];
+  children: (Run | BookmarkStart | BookmarkEnd | InlineWrapper | PreservedInline)[];
 };
 
 /**
@@ -438,11 +443,13 @@ export type SimpleField = {
   /** Parsed field type */
   fieldType: FieldType;
   /**
-   * The field's cached display, and any markup folio does not model between
-   * the runs that carry it. `CT_SimpleField` is `EG_PContent` plus
-   * `w:fldData`, so everything `EG_PContent` admits can sit here.
+   * The field's cached display, the transparent wrappers around it, and any
+   * markup folio does not model between the runs that carry it.
+   * `CT_SimpleField` is `EG_PContent` plus `w:fldData`, so everything
+   * `EG_PContent` admits can sit here, `w:bdo` / `w:dir` / `w:smartTag` /
+   * `w:customXml` among them.
    */
-  content: (Run | Hyperlink | PreservedInline)[];
+  content: (Run | Hyperlink | InlineWrapper | PreservedInline)[];
   /** `@w:fldLock`: absent states nothing, `false` is an explicit unlock. */
   fldLock?: boolean;
   /** `@w:dirty`: absent states nothing, `false` explicitly forbids a recompute. */
@@ -1542,19 +1549,60 @@ export type BidiControl = (typeof BIDI_CONTROLS)[keyof typeof BIDI_CONTROLS];
  * Transparent means it says something about its content without constraining
  * it: it nests, it may hold anything paragraph content may hold, and dropping
  * it changes what the reader sees or what the markup states rather than what
- * the text is. `bidi` is the one kind folio parses today; a smart tag and a
- * custom-XML wrapper are the same shape and land with their parser.
+ * the text is.
  *
- * `bidi` is `w:dir` / `w:bdo` — ECMA-376 §17.3.2.8, §17.3.2.3.
+ * The discriminant is what keeps the kinds apart structurally: a smart tag
+ * cannot carry a bidirectional `control`, and a bidirectional wrapper cannot
+ * carry an `element`, because neither branch declares the other's field.
+ *
+ * `smartTag` and `customXml` declare the same three slots because their
+ * content models do, and they are written out rather than shared through a
+ * helper so that the published type says what each kind carries without
+ * naming a second one. They stay separate kinds because they are separate
+ * elements: a smart tag is Word's own recognizer markup and a custom-XML
+ * wrapper is a mapping into a caller's schema.
+ *
+ * - `bidi` is `w:dir` / `w:bdo` — ECMA-376 §17.3.2.8, §17.3.2.3.
+ * - `smartTag` is `w:smartTag` — §17.5.1.9.
+ * - `customXml` is the run-level `w:customXml` — §17.5.1.6.
  */
-export type InlineWrapper = {
-  type: "inlineWrapper";
-  kind: "bidi";
-  control: BidiControl;
-  /** `w:val`; absent in the source means the wrapper states no direction. */
-  direction?: "ltr" | "rtl";
-  content: ParagraphContent[];
-};
+export type InlineWrapper =
+  | {
+      type: "inlineWrapper";
+      kind: "bidi";
+      control: BidiControl;
+      /** `w:val`; absent in the source means the wrapper states no direction. */
+      direction?: "ltr" | "rtl";
+      content: ParagraphContent[];
+    }
+  | {
+      type: "inlineWrapper";
+      kind: "smartTag";
+      /** `w:element`: the local name of the tagged element. */
+      element: string;
+      /** `w:uri`; absent means the tag names no namespace. */
+      uri?: string;
+      /**
+       * `w:smartTagPr` verbatim: an attribute bag (`w:attr` children) whose
+       * meaning belongs to the producer that wrote it, so folio replays the
+       * bytes rather than modelling them. See
+       * `docs/verbatim-markup-trust-boundary.md` for what that obliges a
+       * writer that builds a document from scratch to check.
+       */
+      propertiesXml?: string;
+      content: ParagraphContent[];
+    }
+  | {
+      type: "inlineWrapper";
+      kind: "customXml";
+      /** `w:element`: the local name of the tagged element. */
+      element: string;
+      /** `w:uri`; absent means the tag names no namespace. */
+      uri?: string;
+      /** `w:customXmlPr` verbatim; see the `smartTag` branch. */
+      propertiesXml?: string;
+      content: ParagraphContent[];
+    };
 
 /**
  * Move-from range start marker (w:moveFromRangeStart) — ECMA-376 §17.13.5.22
@@ -1850,6 +1898,14 @@ export type SdtProperties = {
  * tracked insertions/deletions/moves, the bidirectional controls, and math at
  * this level. All of them must survive parse → edit → save so docProps-bound
  * fields and reviewed template content do not lose their wrapper on round-trip.
+ *
+ * The bookmark boundaries belong here for the reason the revision wrapper's
+ * do: `CT_SdtContentRun` reaches them through
+ * `EG_RunLevelElts > EG_RangeMarkupElements`, and a marker lifted out to a
+ * sibling of the control is a bookmark whose extent has changed. A range that
+ * covered the control's content ends up covering the control and whatever
+ * follows it, so a `REF` field or a link to the bookmark resolves to the
+ * wrong text.
  */
 export type InlineSdt = {
   type: "inlineSdt";
@@ -1859,6 +1915,8 @@ export type InlineSdt = {
   content: (
     | Run
     | Hyperlink
+    | BookmarkStart
+    | BookmarkEnd
     | SimpleField
     | ComplexField
     | InlineSdt
