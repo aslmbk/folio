@@ -5401,6 +5401,13 @@ function convertPMTableRow(
   if (rowFormatting) {
     row.formatting = rowFormatting;
   }
+  // The table properties the row overrides, carried whole through PM.
+  if (attrs._tablePropertyExceptions) {
+    row.tablePropertyExceptions = attrs._tablePropertyExceptions;
+  }
+  if (Array.isArray(attrs.tblPrExChange) && attrs.tblPrExChange.length > 0) {
+    row.tablePropertyExceptionChanges = [...attrs.tblPrExChange];
+  }
   // Restore `w:trPrChange` entries PM carried opaquely (see the paragraph
   // `_propertyChanges` attr for the rationale).
   if (Array.isArray(attrs.trPrChange) && attrs.trPrChange.length > 0) {
@@ -5487,11 +5494,11 @@ export function tableRowAttrsToFormatting(attrs: TableRowAttrs): TableRowFormatt
         delete result.header;
       }
     }
-    if (attrs.hidden !== (orig.hidden ?? undefined)) {
-      if (attrs.hidden) {
-        result.hidden = attrs.hidden;
-      } else {
+    if (attrs.hidden !== orig.hidden) {
+      if (attrs.hidden === undefined) {
         delete result.hidden;
+      } else {
+        result.hidden = attrs.hidden;
       }
     }
 
@@ -5499,7 +5506,7 @@ export function tableRowAttrsToFormatting(attrs: TableRowAttrs): TableRowFormatt
   }
 
   // Fallback: reconstruct formatting from individual attrs
-  const hasFormatting = attrs.height || attrs.isHeader || attrs.hidden;
+  const hasFormatting = attrs.height || attrs.isHeader || attrs.hidden !== undefined;
 
   if (!hasFormatting) {
     return undefined;
@@ -5515,7 +5522,7 @@ export function tableRowAttrsToFormatting(attrs: TableRowAttrs): TableRowFormatt
   if (attrs.isHeader) {
     f.header = attrs.isHeader;
   }
-  if (attrs.hidden) {
+  if (attrs.hidden !== undefined) {
     f.hidden = attrs.hidden;
   }
   return f;
@@ -5637,14 +5644,13 @@ export function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellForm
     } else if (result.vMerge === "restart" && !attrs._preserveVMergeRestart) {
       delete result.vMerge;
     }
-    const cellWidth = attrs.width;
-    // A merge clears an unsafe preferred width with the schema's null value;
-    // do not resurrect `_originalFormatting.width` from the first source cell.
-    if (typeof cellWidth === "number") {
-      result.width = {
-        value: cellWidth,
-        type: attrs.widthType ?? "dxa",
-      };
+    // Only what the cell states: `attrs.width` also carries the width the
+    // table resolved from its grid, and a merge clears an unsafe preferred
+    // width, so neither `_originalFormatting.width` nor the rendered width may
+    // decide whether a `w:tcW` goes back.
+    const authoredWidth = attrs._authoredWidth;
+    if (authoredWidth) {
+      result.width = authoredWidth;
     } else {
       delete result.width;
     }
@@ -5679,11 +5685,11 @@ export function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellForm
   }
 
   // Fallback: reconstruct formatting from individual attrs
-  const cellWidth = attrs.width;
+  const authoredWidth = attrs._authoredWidth;
   const hasFormatting =
     attrs.colspan > 1 ||
     attrs.rowspan > 1 ||
-    typeof cellWidth === "number" ||
+    authoredWidth !== undefined ||
     attrs.verticalAlign ||
     backgroundChanged ||
     attrs.borders ||
@@ -5701,11 +5707,8 @@ export function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellForm
   if (attrs.rowspan > 1) {
     f.vMerge = "restart";
   }
-  if (typeof cellWidth === "number") {
-    f.width = {
-      value: cellWidth,
-      type: attrs.widthType ?? "dxa",
-    };
+  if (authoredWidth) {
+    f.width = authoredWidth;
   }
   if (attrs.verticalAlign) {
     f.verticalAlign = attrs.verticalAlign;

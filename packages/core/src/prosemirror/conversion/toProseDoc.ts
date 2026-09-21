@@ -2261,14 +2261,22 @@ function convertTableRow(
   if (row.formatting?.heightRule) {
     attrsWithoutStructuralChange.heightRule = row.formatting.heightRule;
   }
-  if (row.formatting?.hidden) {
-    attrsWithoutStructuralChange.hidden = true;
+  if (row.formatting?.hidden !== undefined) {
+    attrsWithoutStructuralChange.hidden = row.formatting.hidden;
   }
   if (resolvedJustification) {
     attrsWithoutStructuralChange._resolvedJustification = resolvedJustification;
   }
   if (row.formatting) {
     attrsWithoutStructuralChange._originalFormatting = row.formatting;
+  }
+  // The table properties the row overrides, and their revision: the editor
+  // surfaces neither, so both ride the row node whole.
+  if (row.tablePropertyExceptions) {
+    attrsWithoutStructuralChange._tablePropertyExceptions = row.tablePropertyExceptions;
+  }
+  if (row.tablePropertyExceptionChanges && row.tablePropertyExceptionChanges.length > 0) {
+    attrsWithoutStructuralChange.tblPrExChange = [...row.tablePropertyExceptionChanges];
   }
   // Carry `w:trPrChange` opaquely through PM for round-trip + accept/reject.
   if (row.propertyChanges && row.propertyChanges.length > 0) {
@@ -2590,6 +2598,14 @@ function convertTableCell({
     attrs.width = effectiveFormatting.width.value;
     if (effectiveFormatting.width.widthType) {
       attrs.widthType = effectiveFormatting.width.widthType;
+    }
+    // Only a `w:tcW` the cell wrote itself; the grid's width renders the cell
+    // but is not a preferred width the save may hand back to it.
+    if (effectiveFormatting.width.source === "direct") {
+      attrs._authoredWidth = {
+        value: effectiveFormatting.width.value,
+        type: effectiveFormatting.width.widthType,
+      };
     }
   }
   if (formatting?.verticalAlign) {

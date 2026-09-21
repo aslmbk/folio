@@ -124,6 +124,7 @@ export type {
   FloatingTableProperties,
   TableGridChange,
   TableFormatting,
+  TablePropertyExceptionFormatting,
   TableRowFormatting,
   ConditionalFormatStyle,
   TableCellFormatting,
@@ -151,6 +152,7 @@ export {
   MAX_REVISION_ID,
   normalizeRevisionId,
   PARAGRAPH_MARK_CHANGE_KINDS,
+  PROPERTY_REVISION_KINDS,
   REVIEW_CARRIERS,
 } from "./content";
 
@@ -235,9 +237,12 @@ export type {
   RunPropertyChange,
   ParagraphPropertyChange,
   TablePropertyChange,
+  TablePropertyExceptionChange,
   TableRowPropertyChange,
   TableCellPropertyChange,
   SectionPropertyChange,
+  PropertyChange,
+  PropertyRevisionKind,
   TableStructuralChangeInfo,
   SdtType,
   SdtProperties,

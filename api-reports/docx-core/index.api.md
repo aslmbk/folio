@@ -323,6 +323,7 @@ export type SectionProperties = {
     rtlGutter?: boolean;
     printerSettingsRelationshipId?: string;
     propertyChanges?: SectionPropertyChange[];
+    preserved?: PreservedMarkup;
     preservedAttributes?: PreservedAttribute[];
 };
 
@@ -383,7 +384,9 @@ export type TableCell = {
 export type TableRow = {
     type: "tableRow";
     formatting?: TableRowFormatting;
+    tablePropertyExceptions?: TablePropertyExceptionFormatting;
     propertyChanges?: TableRowPropertyChange[];
+    tablePropertyExceptionChanges?: TablePropertyExceptionChange[];
     structuralChange?: TableStructuralChangeInfo;
     cells: TableCell[];
     preserved?: PreservedMarkup;

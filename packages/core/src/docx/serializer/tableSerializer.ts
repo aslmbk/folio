@@ -19,10 +19,12 @@ import type {
   TableRow,
   TableCell,
   TableFormatting,
+  TablePropertyExceptionFormatting,
   TableGridChange,
   TableRowFormatting,
   TableCellFormatting,
   TablePropertyChange,
+  TablePropertyExceptionChange,
   TableRowPropertyChange,
   TableCellPropertyChange,
   TableStructuralChangeInfo,
@@ -46,10 +48,11 @@ import {
   parseTableCellProperties,
   parseTableGrid,
   parseTableProperties,
+  parseTablePropertyExceptions,
   parseTableRowProperties,
 } from "../tableParser";
 import { serializePreservedAttributes } from "../attributeRemainder";
-import { serializeWithPreservedChildren } from "../containerChildren";
+import { serializeSequenceChildren, serializeWithPreservedChildren } from "../containerChildren";
 import { TRANSITIONAL_NAME_BY_STRICT_NAME } from "../strictNames.gen";
 import { TABLE_LOOK_FLAGS } from "../tableLook";
 import { OOXML_NAMESPACE_SCOPE, parseXml, type XmlElement } from "../xmlParser";
@@ -84,27 +87,46 @@ const withRevisionChildren = (sourceXml: string, revisions: readonly string[]): 
     : `${sourceXml.slice(0, close)}${written}${sourceXml.slice(close)}`;
 };
 
+/**
+ * A structural revision as its own declared child, or nothing.
+ *
+ * The element name is part of the answer rather than something the caller
+ * restates: the property set is written by declared-child name, and a
+ * `<w:del/>` filed under `ins` would land at the wrong ordinal.
+ */
+type StructuralChangeXml<Name extends string> = { name: Name; xml: string } | undefined;
+
 /** `w:trPr/w:ins` | `w:trPr/w:del`, the row's own structural revision. */
-const rowStructuralChangeXml = (change: TableStructuralChangeInfo | undefined): string[] => {
+const rowStructuralChangeXml = (
+  change: TableStructuralChangeInfo | undefined,
+): StructuralChangeXml<"ins" | "del"> => {
   if (change?.type === "tableRowInsertion") {
-    return [`<w:ins ${serializeTrackedChangeAttributes(change.info)}/>`];
+    return { name: "ins", xml: `<w:ins ${serializeTrackedChangeAttributes(change.info)}/>` };
   }
   if (change?.type === "tableRowDeletion") {
-    return [`<w:del ${serializeTrackedChangeAttributes(change.info)}/>`];
+    return { name: "del", xml: `<w:del ${serializeTrackedChangeAttributes(change.info)}/>` };
   }
-  return [];
+  return undefined;
 };
 
 /** `w:tcPr/w:cellIns` | `w:cellDel` | `w:cellMerge`, the cell's own. */
-const cellStructuralChangeXml = (change: TableStructuralChangeInfo | undefined): string[] => {
+const cellStructuralChangeXml = (
+  change: TableStructuralChangeInfo | undefined,
+): StructuralChangeXml<"cellIns" | "cellDel" | "cellMerge"> => {
   if (change?.type === "tableCellInsertion") {
-    return [`<w:cellIns ${serializeTrackedChangeAttributes(change.info)}/>`];
+    return {
+      name: "cellIns",
+      xml: `<w:cellIns ${serializeTrackedChangeAttributes(change.info)}/>`,
+    };
   }
   if (change?.type === "tableCellDeletion") {
-    return [`<w:cellDel ${serializeTrackedChangeAttributes(change.info)}/>`];
+    return {
+      name: "cellDel",
+      xml: `<w:cellDel ${serializeTrackedChangeAttributes(change.info)}/>`,
+    };
   }
   if (change?.type !== "tableCellMerge") {
-    return [];
+    return undefined;
   }
   const attrs = [serializeTrackedChangeAttributes(change.info)];
   if (change.verticalMerge) {
@@ -113,8 +135,14 @@ const cellStructuralChangeXml = (change: TableStructuralChangeInfo | undefined):
   if (change.verticalMergeOriginal) {
     attrs.push(`w:vMergeOrig="${change.verticalMergeOriginal === "continue" ? "cont" : "rest"}"`);
   }
-  return [`<w:cellMerge ${attrs.join(" ")}/>`];
+  return { name: "cellMerge", xml: `<w:cellMerge ${attrs.join(" ")}/>` };
 };
+
+/** The one structural revision a property set carries, as a modelled entry. */
+const structuralChangeEntry = <Name extends string>(
+  name: Name,
+  change: StructuralChangeXml<Name>,
+): readonly [name: Name, xml: string] => [name, change?.name === name ? change.xml : ""];
 
 /**
  * A property set without the elements kept beside it. Only the typed values
@@ -459,6 +487,27 @@ function serializeFloatingTableProperties(floating: FloatingTableProperties | un
 // TABLE PROPERTIES SERIALIZATION (w:tblPr)
 // ============================================================================
 
+/** `<w:name w:val="…"/>`, or nothing when the model holds no value. */
+const tagWithVal = (name: string, value: string | undefined): string =>
+  value === undefined ? "" : `<w:${name} w:val="${escapeXmlAttribute(value)}"/>`;
+
+const numberTag = (name: string, value: number | undefined): string =>
+  value === undefined ? "" : `<w:${name} w:val="${intAttr(value)}"/>`;
+
+/**
+ * `CT_OnOff`: present means on, and an explicit off is not an absent one.
+ *
+ * `ST_OnOff` spells an off three ways and the package writes `0`, the spelling
+ * `scripts/on-off-spelling.test.ts` holds every serializer to. The reader takes
+ * all six, so a source that spelled it otherwise still reads as what it said.
+ */
+const serializeOnOffElement = (value: boolean | undefined, name: string): string => {
+  if (value === undefined) {
+    return "";
+  }
+  return value ? `<w:${name}/>` : `<w:${name} w:val="0"/>`;
+};
+
 /**
  * Serialize table formatting properties (w:tblPr)
  */
@@ -477,78 +526,37 @@ export function serializeTableFormatting(
     );
   }
 
-  const parts: string[] = [];
-
-  // CT_TblPrBase is a SEQUENCE (ECMA-376 §17.4.60), so the children are
-  // written in the order it declares: tblStyle, tblpPr, tblOverlap,
-  // bidiVisual, tblW, jc, tblCellSpacing, tblInd, tblBorders, shd, tblLayout,
-  // tblCellMar, tblLook. A consumer validating the part refuses one written in
-  // any other order.
-  if (formatting) {
-    if (formatting.styleId) {
-      parts.push(`<w:tblStyle w:val="${escapeXmlAttribute(formatting.styleId)}"/>`);
-    }
-
-    const floatingXml = serializeFloatingTableProperties(formatting.floating);
-    if (floatingXml) {
-      parts.push(floatingXml);
-    }
-
-    if (formatting.overlap) {
-      parts.push(`<w:tblOverlap w:val="${formatting.overlap}"/>`);
-    }
-
-    if (formatting.bidi !== undefined) {
-      parts.push(formatting.bidi ? "<w:bidiVisual/>" : '<w:bidiVisual w:val="0"/>');
-    }
-
-    const widthXml = serializeMeasurement(formatting.width, "tblW");
-    if (widthXml) {
-      parts.push(widthXml);
-    }
-
-    if (formatting.justification) {
-      parts.push(`<w:jc w:val="${formatting.justification}"/>`);
-    }
-
-    const cellSpacingXml = serializeMeasurement(formatting.cellSpacing, "tblCellSpacing");
-    if (cellSpacingXml) {
-      parts.push(cellSpacingXml);
-    }
-
-    const indentXml = serializeMeasurement(formatting.indent, "tblInd");
-    if (indentXml) {
-      parts.push(indentXml);
-    }
-
-    const bordersXml = serializeTableBorders(formatting.borders, "tblBorders");
-    if (bordersXml) {
-      parts.push(bordersXml);
-    }
-
-    const shadingXml = serializeShading(formatting.shading);
-    if (shadingXml) {
-      parts.push(shadingXml);
-    }
-
-    if (formatting.layout) {
-      parts.push(`<w:tblLayout w:type="${formatting.layout}"/>`);
-    }
-
-    const marginsXml = serializeCellMargins(formatting.cellMargins, "tblCellMar");
-    if (marginsXml) {
-      parts.push(marginsXml);
-    }
-
-    const lookXml = serializeTableLook(formatting.look);
-    if (lookXml) {
-      parts.push(lookXml);
-    }
-  }
-
-  if (propertyChanges && propertyChanges.length > 0) {
-    parts.push(...propertyChanges.map((change) => serializeTablePropertyChange(change)));
-  }
+  // `CT_TblPr` is a sequence (ECMA-376 §17.4.60) and a consumer refuses a
+  // `w:tblPr` whose children are in any other order. The order is the
+  // generated declared-child list rather than the order of the statements
+  // below, so it cannot drift from the schema the census and the contract read.
+  const parts = serializeSequenceChildren({
+    container: "table-properties",
+    modelled: [
+      ["tblStyle", formatting?.styleId ? tagWithVal("tblStyle", formatting.styleId) : ""],
+      ["tblpPr", serializeFloatingTableProperties(formatting?.floating)],
+      ["tblOverlap", formatting?.overlap ? `<w:tblOverlap w:val="${formatting.overlap}"/>` : ""],
+      ["bidiVisual", serializeOnOffElement(formatting?.bidi, "bidiVisual")],
+      ["tblStyleRowBandSize", numberTag("tblStyleRowBandSize", formatting?.rowBandSize)],
+      ["tblStyleColBandSize", numberTag("tblStyleColBandSize", formatting?.columnBandSize)],
+      ["tblW", serializeMeasurement(formatting?.width, "tblW")],
+      ["jc", formatting?.justification ? `<w:jc w:val="${formatting.justification}"/>` : ""],
+      ["tblCellSpacing", serializeMeasurement(formatting?.cellSpacing, "tblCellSpacing")],
+      ["tblInd", serializeMeasurement(formatting?.indent, "tblInd")],
+      ["tblBorders", serializeTableBorders(formatting?.borders, "tblBorders")],
+      ["shd", serializeShading(formatting?.shading)],
+      ["tblLayout", formatting?.layout ? `<w:tblLayout w:type="${formatting.layout}"/>` : ""],
+      ["tblCellMar", serializeCellMargins(formatting?.cellMargins, "tblCellMar")],
+      ["tblLook", serializeTableLook(formatting?.look)],
+      ["tblCaption", tagWithVal("tblCaption", formatting?.caption)],
+      ["tblDescription", tagWithVal("tblDescription", formatting?.description)],
+      [
+        "tblPrChange",
+        (propertyChanges ?? []).map((change) => serializeTablePropertyChange(change)).join(""),
+      ],
+    ],
+    preserved: formatting?.preserved,
+  });
 
   if (parts.length === 0) {
     return "";
@@ -575,8 +583,84 @@ function serializeTablePropertyChange(change: TablePropertyChange): string {
 }
 
 // ============================================================================
+// TABLE PROPERTY EXCEPTIONS SERIALIZATION (w:tblPrEx)
+// ============================================================================
+
+/**
+ * Serialize a row's table property exceptions (w:tblPrEx).
+ *
+ * `CT_TblPrEx` is a sequence like `CT_TblPr`, and the nine children it shares
+ * with it are written by the same statements: the modelled half is keyed by
+ * element name and `serializeSequenceChildren` puts it in the generated order,
+ * so the exception and the property it overrides cannot come out spelled two
+ * different ways.
+ */
+function serializeTablePropertyExceptions(
+  exceptions: TablePropertyExceptionFormatting | undefined,
+  propertyChanges?: TablePropertyExceptionChange[],
+): string {
+  if (exceptions === undefined && (propertyChanges ?? []).length === 0) {
+    return "";
+  }
+
+  // See `serializeTableFormatting`: the source element is written back while
+  // the model holds what it was parsed into, with the revisions spliced in.
+  const exceptionSource = verifiedSourceXml(exceptions, parseTablePropertyExceptions);
+  if (exceptionSource !== null) {
+    return withRevisionChildren(
+      exceptionSource,
+      (propertyChanges ?? []).map((change) => serializeTablePropertyExceptionChange(change)),
+    );
+  }
+
+  const parts = serializeSequenceChildren({
+    container: "table-property-exceptions",
+    modelled: [
+      ["tblW", serializeMeasurement(exceptions?.width, "tblW")],
+      ["jc", exceptions?.justification ? `<w:jc w:val="${exceptions.justification}"/>` : ""],
+      ["tblCellSpacing", serializeMeasurement(exceptions?.cellSpacing, "tblCellSpacing")],
+      ["tblInd", serializeMeasurement(exceptions?.indent, "tblInd")],
+      ["tblBorders", serializeTableBorders(exceptions?.borders, "tblBorders")],
+      ["shd", serializeShading(exceptions?.shading)],
+      ["tblLayout", exceptions?.layout ? `<w:tblLayout w:type="${exceptions.layout}"/>` : ""],
+      ["tblCellMar", serializeCellMargins(exceptions?.cellMargins, "tblCellMar")],
+      ["tblLook", serializeTableLook(exceptions?.look)],
+      [
+        "tblPrExChange",
+        (propertyChanges ?? [])
+          .map((change) => serializeTablePropertyExceptionChange(change))
+          .join(""),
+      ],
+    ],
+    preserved: exceptions?.preserved,
+  });
+
+  // `<w:tblPrEx/>` rather than nothing: the element is optional, so the row
+  // that wrote an empty one said something the absent element does not.
+  return parts.length === 0 ? "<w:tblPrEx/>" : `<w:tblPrEx>${parts.join("")}</w:tblPrEx>`;
+}
+
+function serializeTablePropertyExceptionChange(change: TablePropertyExceptionChange): string {
+  const attrs = serializeTrackedChangeAttributes(change.info);
+  const previous = serializeTablePropertyExceptions(change.previousFormatting) || "<w:tblPrEx/>";
+  return `<w:tblPrExChange ${attrs}>${previous}</w:tblPrExChange>`;
+}
+
+// ============================================================================
 // TABLE ROW PROPERTIES SERIALIZATION (w:trPr)
 // ============================================================================
+
+/** `w:trHeight`, whose value rides `w:val` rather than `w:w`. */
+const serializeRowHeight = (formatting: TableRowFormatting | undefined): string => {
+  if (!formatting?.height) {
+    return "";
+  }
+  const attrs = [`w:val="${intAttr(formatting.height.value)}"`];
+  if (formatting.heightRule) {
+    attrs.push(`w:hRule="${formatting.heightRule}"`);
+  }
+  return `<w:trHeight ${attrs.join(" ")}/>`;
+};
 
 /**
  * Serialize table row formatting properties (w:trPr)
@@ -586,84 +670,58 @@ export function serializeTableRowFormatting(
   propertyChanges?: TableRowPropertyChange[],
   structuralChange?: TableStructuralChangeInfo,
 ): string {
+  const rowStructuralChange = rowStructuralChangeXml(structuralChange);
+
   // See `serializeTableFormatting`: the source element is written back while
   // the model holds what it was parsed into, with the revisions spliced in.
   const rowSource = verifiedSourceXml(formatting, parseTableRowProperties);
   if (rowSource !== null) {
     return withRevisionChildren(rowSource, [
-      ...rowStructuralChangeXml(structuralChange),
+      ...(rowStructuralChange ? [rowStructuralChange.xml] : []),
       ...(propertyChanges ?? []).map((change) => serializeTableRowPropertyChange(change)),
     ]);
   }
 
-  const parts: string[] = [];
+  // `CT_TrPrBase` is a repeated choice, so the row's properties have no order
+  // a consumer enforces; `CT_TrPr` closes a sequence over it, so `w:ins`,
+  // `w:del` and `w:trPrChange` do have to come last. The generated
+  // declared-child list is both, and writing by it puts the sink's captures
+  // back between the same neighbours the parser read them between.
+  const parts = serializeSequenceChildren({
+    container: "row-properties",
+    modelled: [
+      ["cnfStyle", serializeConditionalFormatStyle(formatting?.conditionalFormat)],
+      [
+        "gridBefore",
+        formatting?.gridBefore ? `<w:gridBefore w:val="${intAttr(formatting.gridBefore)}"/>` : "",
+      ],
+      [
+        "gridAfter",
+        formatting?.gridAfter ? `<w:gridAfter w:val="${intAttr(formatting.gridAfter)}"/>` : "",
+      ],
+      ["wBefore", serializeMeasurement(formatting?.widthBefore, "wBefore")],
+      ["wAfter", serializeMeasurement(formatting?.widthAfter, "wAfter")],
+      ["cantSplit", serializeOnOffElement(formatting?.cantSplit, "cantSplit")],
+      ["trHeight", serializeRowHeight(formatting)],
+      ["tblHeader", serializeOnOffElement(formatting?.header, "tblHeader")],
+      ["jc", formatting?.justification ? `<w:jc w:val="${formatting.justification}"/>` : ""],
+      ["hidden", serializeOnOffElement(formatting?.hidden, "hidden")],
+      structuralChangeEntry("ins", rowStructuralChange),
+      structuralChangeEntry("del", rowStructuralChange),
+      [
+        "trPrChange",
+        (propertyChanges ?? []).map((change) => serializeTableRowPropertyChange(change)).join(""),
+      ],
+    ],
+    preserved: formatting?.preserved,
+  });
 
-  if (formatting) {
-    const cnfStyleXml = serializeConditionalFormatStyle(formatting.conditionalFormat);
-    if (cnfStyleXml) {
-      parts.push(cnfStyleXml);
-    }
-
-    if (formatting.gridBefore) {
-      parts.push(`<w:gridBefore w:val="${intAttr(formatting.gridBefore)}"/>`);
-    }
-
-    if (formatting.widthBefore) {
-      parts.push(
-        `<w:wBefore w:w="${intAttr(formatting.widthBefore.value)}" w:type="${formatting.widthBefore.type}"/>`,
-      );
-    }
-
-    if (formatting.gridAfter) {
-      parts.push(`<w:gridAfter w:val="${intAttr(formatting.gridAfter)}"/>`);
-    }
-
-    if (formatting.widthAfter) {
-      parts.push(
-        `<w:wAfter w:w="${intAttr(formatting.widthAfter.value)}" w:type="${formatting.widthAfter.type}"/>`,
-      );
-    }
-
-    // Can't split
-    if (formatting.cantSplit) {
-      parts.push("<w:cantSplit/>");
-    }
-
-    // Header row
-    if (formatting.header) {
-      parts.push("<w:tblHeader/>");
-    }
-
-    // Row height
-    if (formatting.height) {
-      const attrs: string[] = [`w:val="${intAttr(formatting.height.value)}"`];
-
-      if (formatting.heightRule) {
-        attrs.push(`w:hRule="${formatting.heightRule}"`);
-      }
-
-      parts.push(`<w:trHeight ${attrs.join(" ")}/>`);
-    }
-
-    // Row justification
-    if (formatting.justification) {
-      parts.push(`<w:jc w:val="${formatting.justification}"/>`);
-    }
-
-    // Hidden
-    if (formatting.hidden) {
-      parts.push("<w:hidden/>");
-    }
-  }
-
-  parts.push(...rowStructuralChangeXml(structuralChange));
-
-  if (propertyChanges && propertyChanges.length > 0) {
-    parts.push(...propertyChanges.map((change) => serializeTableRowPropertyChange(change)));
-  }
-
+  // `<w:trPr/>` rather than nothing when the row carried one: the element is
+  // optional on a `w:tr`, so a row that wrote an empty one said something an
+  // absent element does not. A row that never had one has no formatting at
+  // all, and still writes nothing.
   if (parts.length === 0) {
-    return "";
+    return formatting === undefined ? "" : "<w:trPr/>";
   }
 
   return `<w:trPr>${parts.join("")}</w:trPr>`;
@@ -728,6 +786,14 @@ function serializeConditionalFormatStyle(style: ConditionalFormatStyle | undefin
 // TABLE CELL PROPERTIES SERIALIZATION (w:tcPr)
 // ============================================================================
 
+/** `w:vMerge`: no `w:val` is the continuation, so only a restart states one. */
+const serializeVerticalMerge = (vMerge: TableCellFormatting["vMerge"]): string => {
+  if (vMerge === undefined) {
+    return "";
+  }
+  return vMerge === "restart" ? '<w:vMerge w:val="restart"/>' : "<w:vMerge/>";
+};
+
 /**
  * Serialize table cell formatting properties (w:tcPr)
  */
@@ -736,100 +802,62 @@ export function serializeTableCellFormatting(
   propertyChanges?: TableCellPropertyChange[],
   structuralChange?: TableStructuralChangeInfo,
 ): string {
+  const cellStructuralChange = cellStructuralChangeXml(structuralChange);
+
   // See `serializeTableFormatting`: the source element is written back while
   // the model holds what it was parsed into, with the revisions spliced in.
   const cellSource = verifiedSourceXml(formatting, parseTableCellProperties);
   if (cellSource !== null) {
     return withRevisionChildren(cellSource, [
-      ...cellStructuralChangeXml(structuralChange),
+      ...(cellStructuralChange ? [cellStructuralChange.xml] : []),
       ...(propertyChanges ?? []).map((change) => serializeTableCellPropertyChange(change)),
     ]);
   }
 
-  const parts: string[] = [];
+  // `CT_TcPrBase` is a sequence and so is every type extending it, so a
+  // consumer refuses a `w:tcPr` whose children are in any other order. The
+  // order is the generated declared-child list rather than the order of the
+  // statements below, so it cannot drift from the schema.
+  const parts = serializeSequenceChildren({
+    container: "cell-properties",
+    modelled: [
+      ["cnfStyle", serializeConditionalFormatStyle(formatting?.conditionalFormat)],
+      ["tcW", serializeMeasurement(formatting?.width, "tcW")],
+      [
+        "gridSpan",
+        formatting?.gridSpan && formatting.gridSpan > 1
+          ? `<w:gridSpan w:val="${intAttr(formatting.gridSpan)}"/>`
+          : "",
+      ],
+      ["vMerge", serializeVerticalMerge(formatting?.vMerge)],
+      ["tcBorders", serializeTableCellBorders(formatting?.borders)],
+      ["shd", serializeShading(formatting?.shading)],
+      ["noWrap", serializeOnOffElement(formatting?.noWrap, "noWrap")],
+      ["tcMar", serializeCellMargins(formatting?.margins, "tcMar")],
+      [
+        "textDirection",
+        formatting?.textDirection ? `<w:textDirection w:val="${formatting.textDirection}"/>` : "",
+      ],
+      ["tcFitText", serializeOnOffElement(formatting?.fitText, "tcFitText")],
+      [
+        "vAlign",
+        formatting?.verticalAlign ? `<w:vAlign w:val="${formatting.verticalAlign}"/>` : "",
+      ],
+      ["hideMark", serializeOnOffElement(formatting?.hideMark, "hideMark")],
+      structuralChangeEntry("cellIns", cellStructuralChange),
+      structuralChangeEntry("cellDel", cellStructuralChange),
+      structuralChangeEntry("cellMerge", cellStructuralChange),
+      [
+        "tcPrChange",
+        (propertyChanges ?? []).map((change) => serializeTableCellPropertyChange(change)).join(""),
+      ],
+    ],
+    preserved: formatting?.preserved,
+  });
 
-  if (formatting) {
-    // Conditional format style
-    const cnfStyleXml = serializeConditionalFormatStyle(formatting.conditionalFormat);
-    if (cnfStyleXml) {
-      parts.push(cnfStyleXml);
-    }
-
-    // Cell width
-    const widthXml = serializeMeasurement(formatting.width, "tcW");
-    if (widthXml) {
-      parts.push(widthXml);
-    }
-
-    // Grid span (horizontal merge)
-    if (formatting.gridSpan && formatting.gridSpan > 1) {
-      parts.push(`<w:gridSpan w:val="${intAttr(formatting.gridSpan)}"/>`);
-    }
-
-    // Vertical merge
-    if (formatting.vMerge) {
-      if (formatting.vMerge === "restart") {
-        parts.push('<w:vMerge w:val="restart"/>');
-      } else {
-        // continue is the default when w:vMerge has no value
-        parts.push("<w:vMerge/>");
-      }
-    }
-
-    // Cell borders
-    const bordersXml = serializeTableCellBorders(formatting.borders);
-    if (bordersXml) {
-      parts.push(bordersXml);
-    }
-
-    // Shading
-    const shadingXml = serializeShading(formatting.shading);
-    if (shadingXml) {
-      parts.push(shadingXml);
-    }
-
-    // No wrap
-    if (formatting.noWrap) {
-      parts.push("<w:noWrap/>");
-    }
-
-    // Cell margins
-    const marginsXml = serializeCellMargins(formatting.margins, "tcMar");
-    if (marginsXml) {
-      parts.push(marginsXml);
-    }
-
-    // Text direction
-    if (formatting.textDirection) {
-      parts.push(`<w:textDirection w:val="${formatting.textDirection}"/>`);
-    }
-
-    // Fit text
-    if (formatting.fitText) {
-      parts.push("<w:tcFitText/>");
-    }
-
-    // Vertical alignment
-    if (formatting.verticalAlign) {
-      parts.push(`<w:vAlign w:val="${formatting.verticalAlign}"/>`);
-    }
-
-    // Hide mark
-    if (formatting.hideMark === true) {
-      parts.push("<w:hideMark/>");
-    } else if (formatting.hideMark === false) {
-      parts.push('<w:hideMark w:val="off"/>');
-    }
-  }
-
-  parts.push(...cellStructuralChangeXml(structuralChange));
-
-  if (propertyChanges && propertyChanges.length > 0) {
-    parts.push(...propertyChanges.map((change) => serializeTableCellPropertyChange(change)));
-  }
-
+  // `<w:tcPr/>` for a cell that carried one, for the reason `w:trPr` does.
   if (parts.length === 0) {
-    return "";
+    return formatting === undefined ? "" : "<w:tcPr/>";
   }
 
   return `<w:tcPr>${parts.join("")}</w:tcPr>`;
@@ -844,7 +872,12 @@ function extractTcPrInner(tcPrXml: string): string {
 
 function serializeTableCellPropertyChange(change: TableCellPropertyChange): string {
   const attrs = serializeTrackedChangeAttributes(change.info);
-  const previousTcPrXml = serializeTableCellFormatting(change.previousFormatting) || "<w:tcPr/>";
+  const previousTcPrXml =
+    serializeTableCellFormatting(
+      change.previousFormatting,
+      undefined,
+      change.previousStructuralChange,
+    ) || "<w:tcPr/>";
   const previousTcPrInner = extractTcPrInner(previousTcPrXml);
   const normalizedPreviousTcPr =
     previousTcPrInner.length > 0 ? `<w:tcPr>${previousTcPrInner}</w:tcPr>` : "<w:tcPr/>";
@@ -1024,6 +1057,17 @@ const positionedChildren = (
  */
 export function serializeTableRow(row: TableRow, serializeParagraph: ParagraphSerializer): string {
   const parts: string[] = [];
+
+  // `CT_Row` opens with `w:tblPrEx` and only then `w:trPr`, so the exceptions
+  // are written first: a row that states both in the other order is markup a
+  // validating consumer refuses.
+  const tblPrExXml = serializeTablePropertyExceptions(
+    row.tablePropertyExceptions,
+    row.tablePropertyExceptionChanges,
+  );
+  if (tblPrExXml) {
+    parts.push(tblPrExXml);
+  }
 
   // Row properties
   const trPrXml = serializeTableRowFormatting(

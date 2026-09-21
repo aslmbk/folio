@@ -150,8 +150,92 @@ const classifyUnrelatedCapturedDrawings: AttrSchemaMigrationStep = (fragment) =>
   return rewritten;
 };
 
+/** The node types whose stated cell width version 5 backfills. */
+const TABLE_CELL_ELEMENT_NAMES = new Set(["tableCell", "tableHeader"]);
+
+/** Write a node attribute the binding stores as JSON. */
+const setJsonAttribute = (node: Y.XmlElement, name: string, value: object): void => {
+  // SAFETY: y-prosemirror reads this value back as the object written here;
+  // Yjs's XML typing names a string even though the binding stores JSON.
+  node.setAttribute(name, value as unknown as string);
+};
+
+const statedWidthOf = (attributes: Record<string, unknown>): object | undefined => {
+  const original = attributes["_originalFormatting"];
+  if (typeof original !== "object" || original === null || !("width" in original)) {
+    return undefined;
+  }
+  const { width } = original;
+  if (typeof width !== "object" || width === null) {
+    return undefined;
+  }
+  const value = attributes["width"];
+  return typeof value === "number"
+    ? { value, type: attributes["widthType"] ?? Reflect.get(width, "type") }
+    : width;
+};
+
+/**
+ * Version 5 adds `_authoredWidth` to table cells. Version 4 wrote `w:tcW`
+ * from the resolved cell width, including cells that stated no preferred
+ * width. `_originalFormatting.width` records which cells authored one, so
+ * only those cells receive the new attr.
+ */
+const backfillStatedCellWidths: AttrSchemaMigrationStep = (fragment) => {
+  let rewritten = 0;
+  const visit = (node: Y.XmlElement | Y.XmlFragment): void => {
+    if ("nodeName" in node && TABLE_CELL_ELEMENT_NAMES.has(node.nodeName)) {
+      // A Yjs attribute holds JSON, not a string; the typings say otherwise.
+      const attributes: Record<string, unknown> = node.getAttributes();
+      const stated = statedWidthOf(attributes);
+      if (stated !== undefined) {
+        setJsonAttribute(node, "_authoredWidth", stated);
+        rewritten += 1;
+      }
+    }
+    for (const child of node.toArray()) {
+      if (typeof child !== "string" && "toArray" in child) {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return rewritten;
+};
+
+/**
+ * Version 6 gives `tableRow`'s `hidden` attr the `null` default the other
+ * tri-states carry. Up to version 5 it defaulted to `false`, and the reader
+ * that filled it took only an explicit on, so a row that authored
+ * `<w:hidden w:val="0"/>` and one that authored nothing were both stored as
+ * `false`. `false` therefore never meant an explicit off and cannot be kept as
+ * one: a version-5 snapshot's `false` would start writing an element the
+ * document never carried. The explicit offs it does hold travelled as captured
+ * bytes on `_originalFormatting`, which the step leaves alone.
+ */
+const dropUnstatedRowHidden: AttrSchemaMigrationStep = (fragment) => {
+  let rewritten = 0;
+  const visit = (node: Y.XmlElement | Y.XmlFragment): void => {
+    if ("nodeName" in node && node.nodeName === "tableRow") {
+      // A Yjs attribute holds JSON, not a string; the typings say otherwise.
+      const attributes: Record<string, unknown> = node.getAttributes();
+      if (attributes["hidden"] === false) {
+        node.removeAttribute("hidden");
+        rewritten += 1;
+      }
+    }
+    for (const child of node.toArray()) {
+      if (typeof child !== "string" && "toArray" in child) {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return rewritten;
+};
+
 /** Every attr-schema version this build reads, oldest first, with no gaps. */
-const FOLIO_YJS_ATTR_SCHEMA_VERSIONS = [0, 1, 2, 3, 4] as const;
+const FOLIO_YJS_ATTR_SCHEMA_VERSIONS = [0, 1, 2, 3, 4, 5, 6] as const;
 
 /** An attr-schema version this build can read. */
 export type FolioYjsAttrSchemaVersion = (typeof FOLIO_YJS_ATTR_SCHEMA_VERSIONS)[number];
@@ -171,7 +255,9 @@ const ATTR_SCHEMA_MIGRATIONS = {
   1: dropUnstatedFieldFlags,
   2: drawingTransformAttrsAreAdditive,
   3: classifyUnrelatedCapturedDrawings,
-  4: "current",
+  4: backfillStatedCellWidths,
+  5: dropUnstatedRowHidden,
+  6: "current",
 } as const satisfies Record<FolioYjsAttrSchemaVersion, AttrSchemaMigrationStep | "current">;
 
 type CurrentAttrSchemaVersion = {
@@ -184,7 +270,7 @@ type CurrentAttrSchemaVersion = {
  * The attr-schema version this build writes. Derived against the migration map
  * so the constant and the map cannot disagree.
  */
-export const FOLIO_YJS_ATTR_SCHEMA_VERSION = 4 satisfies CurrentAttrSchemaVersion;
+export const FOLIO_YJS_ATTR_SCHEMA_VERSION = 6 satisfies CurrentAttrSchemaVersion;
 
 /**
  * The steps that carry a snapshot written under `fromVersion` up to

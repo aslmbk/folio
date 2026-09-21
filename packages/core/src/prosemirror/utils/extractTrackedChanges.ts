@@ -16,6 +16,12 @@ import type { EditorState } from "prosemirror-state";
 import { getTableCellMergeChange } from "../tableCellMergeRevision";
 import type { Mark, MarkType } from "prosemirror-model";
 import { expectRunPropertyChangeMarkAttrs } from "../attrs";
+import {
+  nodePropertyRevisionSites,
+  propertyRevisionMetadata,
+  propertyRevisionRecords,
+  type PropertyRevisionCarrier,
+} from "../revisionCarriers";
 
 /**
  * One tracked change surfaced by {@link extractTrackedChanges}. Each entry
@@ -37,16 +43,14 @@ export type TrackedChangeEntry = {
    * - `paragraphMarkInsertion` / `paragraphMarkDeletion` — Enter /
    *   Backspace produced a tracked paragraph break (`<w:pPr><w:rPr><w:ins/>` /
    *   `<w:del/>`).
-   * - `paragraphPropertiesChanged` — formatting (alignment, spacing,
-   *   etc.) on the paragraph was changed (`<w:pPrChange>`).
-   * - `rowInserted` / `rowDeleted` / `rowPropertiesChanged` — table
-   *   row authored / removed / formatted (`<w:trPr><w:ins/>` / `<w:del/>`
-   *   / `<w:trPrChange>`).
-   * - `cellInserted` / `cellDeleted` / `cellMerged` /
-   *   `cellPropertiesChanged` — per-cell revisions
-   *   (`<w:cellIns>` / `<w:cellDel>` / `<w:cellMerge>` / `<w:tcPrChange>`).
-   * - `tablePropertiesChanged` — table-level formatting
-   *   (`<w:tblPrChange>`).
+   * - `rowInserted` / `rowDeleted` — table row authored / removed
+   *   (`<w:trPr><w:ins/>` / `<w:del/>`).
+   * - `cellInserted` / `cellDeleted` / `cellMerged` — per-cell structural
+   *   revisions (`<w:cellIns>` / `<w:cellDel>` / `<w:cellMerge>`).
+   * - {@link PropertyRevisionCarrier} — a tracked property revision carried on
+   *   a node's attrs (`<w:pPrChange>`, `<w:sectPrChange>`, `<w:tblPrChange>`,
+   *   `<w:tblPrExChange>`, `<w:trPrChange>`, `<w:tcPrChange>`). The set comes
+   *   from the site table, not from a list kept here.
    */
   type:
     | "insertion"
@@ -55,17 +59,14 @@ export type TrackedChangeEntry = {
     | "runPropertiesChanged"
     | "paragraphMarkInsertion"
     | "paragraphMarkDeletion"
-    | "paragraphPropertiesChanged"
     | "rowInserted"
     | "rowDeleted"
-    | "rowPropertiesChanged"
     | "cellInserted"
     | "cellDeleted"
     | "cellMerged"
-    | "cellPropertiesChanged"
     | "tableInserted"
     | "tableDeleted"
-    | "tablePropertiesChanged";
+    | PropertyRevisionCarrier;
   /**
    * Affected text. For inline types this is the run's text; for
    * structural types it's the surrounding paragraph / cell content
@@ -239,29 +240,10 @@ export function extractTrackedChanges(state: EditorState | null): TrackedChanges
           revisionId: del.revisionId,
         });
       }
-      // Paragraph-property changes — one entry per (id, author, date) entry
-      // in the pPrChange array. Reject restores prior values; accept clears.
-      const pPrChange = node.attrs["pPrChange"] as Array<{
-        info: { id: number; author: string; date?: string };
-      }> | null;
-      if (Array.isArray(pPrChange)) {
-        for (const entry of pPrChange) {
-          if (!entry?.info || typeof entry.info.id !== "number") continue;
-          raw.push({
-            type: "paragraphPropertiesChanged",
-            text: node.textContent || "",
-            author: entry.info.author || "",
-            date: entry.info.date ?? undefined,
-            from: pos,
-            to: pos + node.nodeSize,
-            revisionId: entry.info.id,
-          });
-        }
-      }
       // Descend into paragraph content; do not return here.
     }
 
-    // Table-row revisions (`<w:trPr><w:ins/>` / `<w:del/>` / `<w:trPrChange>`).
+    // Table-row revisions (`<w:trPr><w:ins/>` / `<w:del/>`).
     if (node.type.name === "tableRow") {
       const trIns = node.attrs["trIns"] as {
         revisionId: number;
@@ -298,23 +280,6 @@ export function extractTrackedChanges(state: EditorState | null): TrackedChanges
         };
         raw.push(entry);
         rowRevisionScopes.push({ end: pos + node.nodeSize, markType: deletionType, entry });
-      }
-      const trPrChange = node.attrs["trPrChange"] as Array<{
-        info: { id: number; author: string; date?: string };
-      }> | null;
-      if (Array.isArray(trPrChange)) {
-        for (const entry of trPrChange) {
-          if (!entry?.info || typeof entry.info.id !== "number") continue;
-          raw.push({
-            type: "rowPropertiesChanged",
-            text: node.textContent || "",
-            author: entry.info.author || "",
-            date: entry.info.date ?? undefined,
-            from: pos,
-            to: pos + node.nodeSize,
-            revisionId: entry.info.id,
-          });
-        }
       }
       // Descend into cells.
     }
@@ -363,45 +328,9 @@ export function extractTrackedChanges(state: EditorState | null): TrackedChanges
           });
         }
       }
-      const tcPrChange = node.attrs["tcPrChange"] as Array<{
-        info: { id: number; author: string; date?: string };
-      }> | null;
-      if (Array.isArray(tcPrChange)) {
-        for (const entry of tcPrChange) {
-          if (!entry?.info || typeof entry.info.id !== "number") continue;
-          raw.push({
-            type: "cellPropertiesChanged",
-            text: node.textContent || "",
-            author: entry.info.author || "",
-            date: entry.info.date ?? undefined,
-            from: pos,
-            to: pos + node.nodeSize,
-            revisionId: entry.info.id,
-          });
-        }
-      }
     }
 
-    // Table-level property change (`<w:tblPrChange>`).
     if (node.type.name === "table") {
-      const tblPrChange = node.attrs["tblPrChange"] as Array<{
-        info: { id: number; author: string; date?: string };
-      }> | null;
-      if (Array.isArray(tblPrChange)) {
-        for (const entry of tblPrChange) {
-          if (!entry?.info || typeof entry.info.id !== "number") continue;
-          raw.push({
-            type: "tablePropertiesChanged",
-            text: "",
-            author: entry.info.author || "",
-            date: entry.info.date ?? undefined,
-            from: pos,
-            to: pos + node.nodeSize,
-            revisionId: entry.info.id,
-          });
-        }
-      }
-
       // Whole-table insertion / deletion: when every row carries a trIns
       // (or trDel) from the SAME (author, date) — not necessarily the same
       // `w:id`, since foreign editors mint a fresh id per row — surface ONE
@@ -491,6 +420,28 @@ export function extractTrackedChanges(state: EditorState | null): TrackedChanges
       }
     }
 
+    // Tracked property revisions carried on this node's attrs — the paragraph's
+    // `w:pPrChange` and `w:sectPrChange`, the table's `w:tblPrChange`, the
+    // row's `w:trPrChange` and `w:tblPrExChange`, the cell's `w:tcPrChange`.
+    // Read from the one site table, so the list cannot know a different set
+    // from the resolver: a row carries two of them, and the attr a paragraph's
+    // records live on is `_propertyChanges`, not `pPrChange`.
+    for (const site of nodePropertyRevisionSites(node.type.name)) {
+      for (const record of propertyRevisionRecords(node, site)) {
+        const metadata = propertyRevisionMetadata(record.info);
+        if (!metadata) continue;
+        raw.push({
+          type: site.carrier,
+          text: node.textContent || "",
+          author: metadata.author,
+          date: metadata.date ?? undefined,
+          from: pos,
+          to: pos + node.nodeSize,
+          revisionId: metadata.id,
+        });
+      }
+    }
+
     // Text AND inline atoms (image, shape) can carry tracked-change marks, so
     // an inserted picture shows up in the sidebar like inserted text. Atoms
     // have no `.text`, so label them by node type (alt text when present).
@@ -569,40 +520,37 @@ export function extractTrackedChanges(state: EditorState | null): TrackedChanges
   // Single-pass: track each triple's slot index in `ordered` so an
   // in-place replacement is O(1) (vs `ordered.indexOf(existing)` which
   // would be O(n) inside an O(n) loop).
-  const STRUCTURAL_PRIORITY: Record<string, number> = {
-    tableInserted: 6,
-    tableDeleted: 6,
-    tablePropertiesChanged: 5,
-    rowInserted: 4,
-    rowDeleted: 4,
-    rowPropertiesChanged: 4,
-    cellInserted: 3,
-    cellDeleted: 3,
-    cellMerged: 3,
-    cellPropertiesChanged: 3,
-    paragraphMarkInsertion: 2,
-    paragraphMarkDeletion: 2,
-    paragraphPropertiesChanged: 2,
-    runPropertiesChanged: 1,
-  };
-  const STRUCTURAL_FAMILY_BY_TYPE: Readonly<Record<string, string>> = {
-    tableInserted: "insertion",
-    rowInserted: "insertion",
-    cellInserted: "insertion",
-    paragraphMarkInsertion: "insertion",
-    tableDeleted: "deletion",
-    rowDeleted: "deletion",
-    cellDeleted: "deletion",
-    paragraphMarkDeletion: "deletion",
-    tablePropertiesChanged: "properties",
-    rowPropertiesChanged: "properties",
-    cellPropertiesChanged: "properties",
-    paragraphPropertiesChanged: "properties",
-    runPropertiesChanged: "properties",
-    cellMerged: "merge",
-  };
-  const isStructuralType = (t: TrackedChangeEntry["type"]) => t in STRUCTURAL_PRIORITY;
-  const slotByKey = new Map<string, number>();
+  type StructuralTrackedChangeType = Exclude<
+    TrackedChangeEntry["type"],
+    "insertion" | "deletion" | "replacement"
+  >;
+  type StructuralFamily = "insertion" | "deletion" | "properties" | "merge";
+  type StructuralCoalescingPolicy =
+    | { type: "coalesce"; family: StructuralFamily; priority: number }
+    | { type: "separate" };
+  const STRUCTURAL_COALESCING = {
+    tableInserted: { type: "coalesce", family: "insertion", priority: 6 },
+    tableDeleted: { type: "coalesce", family: "deletion", priority: 6 },
+    tablePropertiesChanged: { type: "coalesce", family: "properties", priority: 5 },
+    tablePropertyExceptionsChanged: { type: "separate" },
+    rowInserted: { type: "coalesce", family: "insertion", priority: 4 },
+    rowDeleted: { type: "coalesce", family: "deletion", priority: 4 },
+    rowPropertiesChanged: { type: "coalesce", family: "properties", priority: 4 },
+    cellInserted: { type: "coalesce", family: "insertion", priority: 3 },
+    cellDeleted: { type: "coalesce", family: "deletion", priority: 3 },
+    cellMerged: { type: "coalesce", family: "merge", priority: 3 },
+    cellPropertiesChanged: { type: "coalesce", family: "properties", priority: 3 },
+    paragraphMarkInsertion: { type: "coalesce", family: "insertion", priority: 2 },
+    paragraphMarkDeletion: { type: "coalesce", family: "deletion", priority: 2 },
+    paragraphPropertiesChanged: { type: "coalesce", family: "properties", priority: 2 },
+    sectionPropertiesChanged: { type: "separate" },
+    runPropertiesChanged: { type: "coalesce", family: "properties", priority: 1 },
+  } as const satisfies Record<StructuralTrackedChangeType, StructuralCoalescingPolicy>;
+  const isStructuralType = (
+    type: TrackedChangeEntry["type"],
+  ): type is StructuralTrackedChangeType =>
+    type !== "insertion" && type !== "deletion" && type !== "replacement";
+  const slotByKey = new Map<string, { index: number; priority: number }>();
   const ordered: TrackedChangeEntry[] = [];
   // Helper: collect every distinct `w:id` involved in coalescing the dropped
   // entry into the survivor, EXCLUDING the survivor's own primary id.
@@ -618,26 +566,29 @@ export function extractTrackedChanges(state: EditorState | null): TrackedChanges
       ordered.push(entry);
       continue;
     }
+    const policy = STRUCTURAL_COALESCING[entry.type];
+    if (policy.type === "separate") {
+      ordered.push(entry);
+      continue;
+    }
     // Foreign editors mint a fresh `w:id` per atomic edit, so compatible
     // structural records in one revision burst share a card. Keep insertions,
     // deletions, merges, and property changes in separate families even when
     // their author and timestamp match.
-    const family = STRUCTURAL_FAMILY_BY_TYPE[entry.type] ?? entry.type;
-    const key = `${family}|${entry.author}|${entry.date ?? ""}`;
+    const key = `${policy.family}|${entry.author}|${entry.date ?? ""}`;
     const slot = slotByKey.get(key);
     if (slot === undefined) {
-      slotByKey.set(key, ordered.push(entry) - 1);
+      slotByKey.set(key, { index: ordered.push(entry) - 1, priority: policy.priority });
       continue;
     }
-    const existing = ordered[slot]!;
-    const incomingPri = STRUCTURAL_PRIORITY[entry.type] ?? 0;
-    const existingPri = STRUCTURAL_PRIORITY[existing.type] ?? 0;
-    if (incomingPri > existingPri) {
+    const existing = ordered[slot.index]!;
+    if (policy.priority > slot.priority) {
       // Incoming wins (broader scope). Carry the existing id forward.
-      ordered[slot] = { ...entry, coalescedRevisionIds: mergeIds(entry, existing) };
+      ordered[slot.index] = { ...entry, coalescedRevisionIds: mergeIds(entry, existing) };
+      slotByKey.set(key, { index: slot.index, priority: policy.priority });
     } else {
       // Existing stays; absorb the dropped id so accept clears every site.
-      ordered[slot] = { ...existing, coalescedRevisionIds: mergeIds(existing, entry) };
+      ordered[slot.index] = { ...existing, coalescedRevisionIds: mergeIds(existing, entry) };
     }
   }
 

@@ -1,6 +1,6 @@
 /**
  * Accept/reject of tracked property changes (w:pPrChange, w:sectPrChange,
- * w:tblPrChange, w:trPrChange, w:tcPrChange) against the REAL editor schema,
+ * w:tblPrChange, w:tblPrExChange, w:trPrChange, w:tcPrChange) against the REAL editor schema,
  * built via toProseDoc so the attr names under test are the ones the parser
  * actually produces — and round-tripped through fromProseDoc so the
  * serializer provably no longer re-emits a resolved change.
@@ -17,6 +17,7 @@ import type {
   Table,
   TableCellPropertyChange,
   TablePropertyChange,
+  TablePropertyExceptionChange,
   TableRowPropertyChange,
 } from "../../types/document";
 import { fromProseDoc } from "../conversion/fromProseDoc";
@@ -470,10 +471,20 @@ describe("table property-change accept/reject (real schema)", () => {
     info: CHANGE_INFO,
     previousFormatting: { height: { value: 300, type: "dxa" }, heightRule: "atLeast" },
   };
+  // `w:tblPrEx` sits on the same row as `w:trPr`, so the row carries two
+  // property revisions and one sweep has to resolve both.
+  const tblPrExChange: TablePropertyExceptionChange = {
+    type: "tablePropertyExceptionChange",
+    info: CHANGE_INFO,
+    previousFormatting: { justification: "start" },
+  };
   const tcChange: TableCellPropertyChange = {
     type: "tableCellPropertyChange",
     info: CHANGE_INFO,
-    previousFormatting: { shading: { fill: { rgb: "00FF00" } } },
+    previousFormatting: {
+      width: { value: 2400, type: "dxa" },
+      shading: { fill: { rgb: "00FF00" } },
+    },
   };
 
   const makeTable = (): Table => ({
@@ -485,11 +496,16 @@ describe("table property-change accept/reject (real schema)", () => {
       {
         type: "tableRow",
         formatting: { height: { value: 500, type: "dxa" }, heightRule: "exact" },
+        tablePropertyExceptions: { justification: "center" },
+        tablePropertyExceptionChanges: [tblPrExChange],
         propertyChanges: [trChange],
         cells: [
           {
             type: "tableCell",
-            formatting: { shading: { fill: { rgb: "FF0000" } } },
+            formatting: {
+              width: { value: 3600, type: "dxa" },
+              shading: { fill: { rgb: "FF0000" } },
+            },
             propertyChanges: [tcChange],
             content: [{ type: "paragraph", content: paragraphText("cell") }],
           },
@@ -504,6 +520,7 @@ describe("table property-change accept/reject (real schema)", () => {
 
     expect(roundtripped.propertyChanges).toEqual([tblChange]);
     expect(roundtripped.rows[0]?.propertyChanges).toEqual([trChange]);
+    expect(roundtripped.rows[0]?.tablePropertyExceptionChanges).toEqual([tblPrExChange]);
     expect(roundtripped.rows[0]?.cells[0]?.propertyChanges).toEqual([tcChange]);
   });
 
@@ -523,8 +540,12 @@ describe("table property-change accept/reject (real schema)", () => {
     expect(row.attrs["height"]).toBe(300);
     expect(row.attrs["heightRule"]).toBe("atLeast");
     expect(row.attrs["trPrChange"]).toBeNull();
+    // Both of the row's revisions resolve; neither patch clobbers the other.
+    expect(row.attrs["_tablePropertyExceptions"]).toEqual({ justification: "start" });
+    expect(row.attrs["tblPrExChange"]).toBeNull();
 
     const cell = row.child(0);
+    expect(cell.attrs["_authoredWidth"]).toEqual({ value: 2400, type: "dxa" });
     expect(cell.attrs["backgroundColor"]).toBe("00FF00");
     expect(cell.attrs["tcPrChange"]).toBeNull();
 
@@ -534,7 +555,13 @@ describe("table property-change accept/reject (real schema)", () => {
     expect(roundtripped.formatting?.justification).toBeUndefined();
     expect(roundtripped.rows[0]?.propertyChanges).toBeUndefined();
     expect(roundtripped.rows[0]?.formatting?.height).toEqual({ value: 300, type: "dxa" });
+    expect(roundtripped.rows[0]?.tablePropertyExceptionChanges).toBeUndefined();
+    expect(roundtripped.rows[0]?.tablePropertyExceptions).toEqual({ justification: "start" });
     expect(roundtripped.rows[0]?.cells[0]?.propertyChanges).toBeUndefined();
+    expect(roundtripped.rows[0]?.cells[0]?.formatting?.width).toEqual({
+      value: 2400,
+      type: "dxa",
+    });
     expect(roundtripped.rows[0]?.cells[0]?.formatting?.shading).toEqual({
       fill: { rgb: "00FF00" },
     });
@@ -554,6 +581,8 @@ describe("table property-change accept/reject (real schema)", () => {
     expect(row.attrs["height"]).toBe(500);
     expect(row.attrs["heightRule"]).toBe("exact");
     expect(row.attrs["trPrChange"]).toBeNull();
+    expect(row.attrs["_tablePropertyExceptions"]).toEqual({ justification: "center" });
+    expect(row.attrs["tblPrExChange"]).toBeNull();
 
     const cell = row.child(0);
     expect(cell.attrs["backgroundColor"]).toBe("FF0000");
@@ -563,6 +592,8 @@ describe("table property-change accept/reject (real schema)", () => {
     expect(roundtripped.propertyChanges).toBeUndefined();
     expect(roundtripped.formatting?.justification).toBe("center");
     expect(roundtripped.rows[0]?.propertyChanges).toBeUndefined();
+    expect(roundtripped.rows[0]?.tablePropertyExceptionChanges).toBeUndefined();
+    expect(roundtripped.rows[0]?.tablePropertyExceptions).toEqual({ justification: "center" });
     expect(roundtripped.rows[0]?.cells[0]?.propertyChanges).toBeUndefined();
   });
 });

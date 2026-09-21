@@ -1069,9 +1069,26 @@ export type PreviewShape = {
 };
 
 // @public
+export const PROPERTY_REVISION_KINDS: Readonly<{
+    readonly runPropertyChange: "runPropertyChange";
+    readonly paragraphPropertyChange: "paragraphPropertyChange";
+    readonly sectionPropertyChange: "sectionPropertyChange";
+    readonly tablePropertyChange: "tablePropertyChange";
+    readonly tablePropertyExceptionChange: "tablePropertyExceptionChange";
+    readonly tableRowPropertyChange: "tableRowPropertyChange";
+    readonly tableCellPropertyChange: "tableCellPropertyChange";
+}>;
+
+// @public
+export type PropertyChange = RunPropertyChange | ParagraphPropertyChange | SectionPropertyChange | TablePropertyChange | TablePropertyExceptionChange | TableRowPropertyChange | TableCellPropertyChange;
+
+// @public
 export type PropertyChangeInfo = {
     rsid?: string;
 } & TrackedChangeInfo;
+
+// @public
+export type PropertyRevisionKind = PropertyChange["type"];
 
 // @public
 export const readThemeColor: (raw: string | null | undefined) => ThemeColorValue | undefined;
@@ -1254,6 +1271,7 @@ export type SectionProperties = {
     rtlGutter?: boolean;
     printerSettingsRelationshipId?: string;
     propertyChanges?: SectionPropertyChange[];
+    preserved?: PreservedMarkup;
     preservedAttributes?: PreservedAttribute[];
 };
 
@@ -1521,6 +1539,7 @@ export type TableCellFormatting = {
     noWrap?: boolean;
     hideMark?: boolean;
     conditionalFormat?: ConditionalFormatStyle;
+    preserved?: PreservedMarkup;
     sourceXml?: string;
 };
 
@@ -1530,6 +1549,7 @@ export type TableCellPropertyChange = {
     info: PropertyChangeInfo;
     previousFormatting?: TableCellFormatting;
     currentFormatting?: TableCellFormatting;
+    previousStructuralChange?: TableStructuralChangeInfo;
 };
 
 // @public
@@ -1547,6 +1567,11 @@ export type TableFormatting = {
     overlap?: "never" | "overlap";
     floating?: FloatingTableProperties;
     bidi?: boolean;
+    caption?: string;
+    description?: string;
+    rowBandSize?: number;
+    columnBandSize?: number;
+    preserved?: PreservedMarkup;
     gridSourceXml?: string;
     gridChange?: TableGridChange;
     sourceXml?: string;
@@ -1584,10 +1609,23 @@ export type TablePropertyChange = {
 };
 
 // @public
+export type TablePropertyExceptionChange = {
+    type: "tablePropertyExceptionChange";
+    info: PropertyChangeInfo;
+    previousFormatting?: TablePropertyExceptionFormatting;
+    currentFormatting?: TablePropertyExceptionFormatting;
+};
+
+// @public
+export type TablePropertyExceptionFormatting = Pick<TableFormatting, "width" | "justification" | "cellSpacing" | "indent" | "borders" | "shading" | "layout" | "cellMargins" | "look" | "preserved" | "sourceXml">;
+
+// @public
 export type TableRow = {
     type: "tableRow";
     formatting?: TableRowFormatting;
+    tablePropertyExceptions?: TablePropertyExceptionFormatting;
     propertyChanges?: TableRowPropertyChange[];
+    tablePropertyExceptionChanges?: TablePropertyExceptionChange[];
     structuralChange?: TableStructuralChangeInfo;
     cells: TableCell[];
     preserved?: PreservedMarkup;
@@ -1608,6 +1646,7 @@ export type TableRowFormatting = {
     justification?: TableAlignment;
     hidden?: boolean;
     conditionalFormat?: ConditionalFormatStyle;
+    preserved?: PreservedMarkup;
     sourceXml?: string;
 };
 

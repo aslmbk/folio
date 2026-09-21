@@ -543,6 +543,10 @@ export type TableCellAttrs = {
     colwidth?: number[] | null;
     width?: number;
     widthType?: import__stll_docx_core_model.TableWidthType;
+    _authoredWidth?: {
+        value: number;
+        type: import__stll_docx_core_model.TableWidthType;
+    };
     verticalAlign?: "top" | "center" | "bottom";
     backgroundColor?: string;
     _resolvedBackgroundColor?: string;
@@ -600,7 +604,9 @@ export type TableRowAttrs = {
     hidden?: boolean;
     _resolvedJustification?: NonNullable<import__stll_docx_core_model.TableRowFormatting["justification"]>;
     _originalFormatting?: import__stll_docx_core_model.TableRowFormatting;
+    _tablePropertyExceptions?: import__stll_docx_core_model.TablePropertyExceptionFormatting;
     trPrChange?: import__stll_docx_core_model.TableRowPropertyChange[];
+    tblPrExChange?: import__stll_docx_core_model.TablePropertyExceptionChange[];
     _preservedAttributes?: import__stll_docx_core_model.PreservedAttribute[];
     _bookmarks?: import__stll_docx_core_model.PositionedBookmarkMarker[];
 } & ({

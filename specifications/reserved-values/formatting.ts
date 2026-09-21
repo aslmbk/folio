@@ -462,6 +462,12 @@ export const TABLE_FORMATTING_RESERVED = {
   }),
   floating: NO_RESERVED_VALUE,
   bidi: toggle("w:bidiVisual@val"),
+  caption: NO_RESERVED_VALUE,
+  description: NO_RESERVED_VALUE,
+  rowBandSize: NO_RESERVED_VALUE,
+  columnBandSize: NO_RESERVED_VALUE,
+  // Children replayed as the source wrote them; nothing interprets a spelling.
+  preserved: NO_RESERVED_VALUE,
   gridSourceXml: NO_RESERVED_VALUE,
   gridChange: NO_RESERVED_VALUE,
   sourceXml: NO_RESERVED_VALUE,
@@ -488,6 +494,7 @@ export const TABLE_ROW_FORMATTING_RESERVED = {
   justification: NO_RESERVED_VALUE,
   hidden: toggle("w:hidden@val"),
   conditionalFormat: NO_RESERVED_VALUE,
+  preserved: NO_RESERVED_VALUE,
   sourceXml: NO_RESERVED_VALUE,
 } satisfies Record<keyof TableRowFormatting, ReservedValueDisposition>;
 
@@ -542,6 +549,7 @@ export const TABLE_CELL_FORMATTING_RESERVED = {
   noWrap: toggle("w:noWrap@val"),
   hideMark: toggle("w:hideMark@val"),
   conditionalFormat: NO_RESERVED_VALUE,
+  preserved: NO_RESERVED_VALUE,
   sourceXml: NO_RESERVED_VALUE,
 } satisfies Record<keyof TableCellFormatting, ReservedValueDisposition>;
 

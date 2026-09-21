@@ -38,7 +38,9 @@ import type {
   TableBorders,
   TableCellBorders,
   TableFormatting,
+  TablePropertyExceptionFormatting,
   TablePropertyChange,
+  TablePropertyExceptionChange,
   TableRowFormatting,
   TableRowPropertyChange,
   TableCellFormatting,
@@ -1051,8 +1053,17 @@ export type TableRowAttrs = {
   _resolvedJustification?: NonNullable<TableRowFormatting["justification"]>;
   /** Original row formatting from DOCX for lossless round-trip serialization */
   _originalFormatting?: TableRowFormatting;
+  /**
+   * The table properties the authored row overrides (`w:tblPrEx`), carried
+   * whole for the reason `_originalFormatting` is: the editor surfaces none of
+   * them, and rebuilding the element from the handful of attrs it does surface
+   * would drop the rest.
+   */
+  _tablePropertyExceptions?: TablePropertyExceptionFormatting;
   /** Tracked row property changes (w:trPrChange) for round-trip + accept/reject */
   trPrChange?: TableRowPropertyChange[];
+  /** Tracked changes to the property exceptions (w:tblPrExChange), carried opaquely */
+  tblPrExChange?: TablePropertyExceptionChange[];
   /**
    * Attributes the authored `w:tr` carried and the model has no field for
    * (`w:rsidR`, `w:rsidDel`, `w:rsidTr`, `w:rsidRPr`), carried opaquely for
@@ -1143,6 +1154,18 @@ export type TableCellAttrs = {
   width?: number;
   /** Cell width type */
   widthType?: TableWidthType;
+  /**
+   * The preferred width the cell itself states, absent when it states none.
+   *
+   * `width` is the width the cell *renders* at, which the table resolves from
+   * its grid when the cell declares no `w:tcW`, so a save that read it would
+   * give every cell in the document a preferred width its author never wrote.
+   * The companion to `width` that `_resolvedBorders` is to `borders`, and the
+   * one the save leg writes `w:tcW` from. A command that moves a cell's width
+   * states one: `mergeTableCellAttrs` records it for every command that goes
+   * through it.
+   */
+  _authoredWidth?: { value: number; type: TableWidthType };
   /** Vertical alignment */
   verticalAlign?: "top" | "center" | "bottom";
   /** Background color (RGB hex) */

@@ -25,10 +25,12 @@ import type {
   TableRow,
   TableCell,
   TableFormatting,
+  TablePropertyExceptionFormatting,
   TableGridChange,
   TableRowFormatting,
   TableCellFormatting,
   TablePropertyChange,
+  TablePropertyExceptionChange,
   TableRowPropertyChange,
   TableCellPropertyChange,
   TableStructuralChangeInfo,
@@ -54,8 +56,11 @@ import { parseBookmarkEnd, parseBookmarkStart } from "./bookmarkParser";
 import { TABLE_LOOK_FLAGS } from "./tableLook";
 import {
   CAPTURE,
+  type ChildHandlers,
   dispatchChildren,
-  OWNED_ELSEWHERE,
+  keptUnless,
+  ownedElsewhere,
+  sequencePositions,
   withPreservedChildren,
 } from "./containerChildren";
 import type { NumberingMap } from "./numberingParser";
@@ -437,6 +442,7 @@ export function parseFloatingTableProperties(
  */
 const REVISION_PROPERTY_CHILDREN: ReadonlySet<string> = new Set([
   "tblPrChange",
+  "tblPrExChange",
   "trPrChange",
   "tcPrChange",
   "ins",
@@ -465,6 +471,187 @@ const withSourceXml = <TFormatting extends { sourceXml?: string }>(
   ),
 });
 
+/**
+ * The nine children `w:tblPr` and `w:tblPrEx` both declare, read once.
+ *
+ * `CT_TblPrEx` is the middle of `CT_TblPrBase`: the same elements, declared in
+ * the same order, without the ones that describe the table as a whole. Two
+ * handler maps over the same names would be two answers to the same question,
+ * and the one folio would notice is the day they stop agreeing.
+ */
+const sharedTablePropertyHandlers = (formatting: TablePropertyExceptionFormatting) => ({
+  tblW: (child: XmlElement) => {
+    const width = parseWidth(child);
+    if (width) {
+      formatting.width = width;
+    }
+    return keptUnless(width !== undefined);
+  },
+  jc: (child: XmlElement) => {
+    const justification = narrowEnum(getAttribute(child, "w", "val"), TableAlignmentSchema);
+    if (justification !== undefined) {
+      formatting.justification = justification;
+    }
+    return keptUnless(justification !== undefined);
+  },
+  tblCellSpacing: (child: XmlElement) => {
+    const cellSpacing = parseWidth(child);
+    if (cellSpacing) {
+      formatting.cellSpacing = cellSpacing;
+    }
+    return keptUnless(cellSpacing !== undefined);
+  },
+  tblInd: (child: XmlElement) => {
+    const indent = parseWidth(child);
+    if (indent) {
+      formatting.indent = indent;
+    }
+    return keptUnless(indent !== undefined);
+  },
+  tblBorders: (child: XmlElement) => {
+    const borders = parseTableBorders(child);
+    if (borders) {
+      formatting.borders = borders;
+    }
+    return keptUnless(borders !== undefined);
+  },
+  shd: (child: XmlElement) => {
+    const shading = parseShading(child);
+    if (shading) {
+      formatting.shading = shading;
+    }
+    return keptUnless(shading !== undefined);
+  },
+  tblLayout: (child: XmlElement) => {
+    const layout = getAttribute(child, "w", "type");
+    if (layout === "fixed" || layout === "autofit") {
+      formatting.layout = layout;
+      return undefined;
+    }
+    return CAPTURE;
+  },
+  tblCellMar: (child: XmlElement) => {
+    const cellMargins = parseCellMargins(child);
+    if (cellMargins) {
+      formatting.cellMargins = cellMargins;
+    }
+    return keptUnless(cellMargins !== undefined);
+  },
+  tblLook: (child: XmlElement) => {
+    const look = parseTableLook(child);
+    if (look) {
+      formatting.look = look;
+    }
+    return keptUnless(look !== undefined);
+  },
+});
+
+/**
+ * The children the table walks skip, and the reader that takes each instead.
+ *
+ * Every one of them is read off its container element before the child walk
+ * runs, so capturing it here as well would write it twice. The claims are at
+ * module scope, not inside the parsers, so they are registered when the module
+ * loads rather than the first time a table is parsed; `ownedElsewhere` is the
+ * only way to make one, which is what keeps the set complete.
+ */
+const TABLE_PROPERTY_CHANGE_OWNER = ownedElsewhere({
+  container: "table-properties",
+  child: "tblPrChange",
+  // A revision, not a property: `parseTablePropertyChanges` reads it into
+  // `Table.propertyChanges` and the serializer writes it back from there.
+  reader: "tableParser#parseTable",
+});
+
+const TABLE_PROPERTY_EXCEPTION_CHANGE_OWNER = ownedElsewhere({
+  container: "table-property-exceptions",
+  child: "tblPrExChange",
+  reader: "tableParser#parseTableRow",
+});
+
+const CELL_PROPERTIES_OWNER = ownedElsewhere({
+  container: "block-content",
+  child: "tcPr",
+  reader: "tableParser#parseTableCell",
+});
+
+/**
+ * The revisions a row's and a cell's property set carry.
+ *
+ * Each is read off the property element before its child walk runs, into
+ * `TableRow.structuralChange` / `propertyChanges` and the cell's equivalents,
+ * and written back from there. Capturing one here as well would write it twice,
+ * and worse: a capture replays a resolved revision into the document after a
+ * reviewer accepted it.
+ */
+const ROW_INSERTION_OWNER = ownedElsewhere({
+  container: "row-properties",
+  child: "ins",
+  reader: "tableParser#parseTableRow",
+});
+
+const ROW_DELETION_OWNER = ownedElsewhere({
+  container: "row-properties",
+  child: "del",
+  reader: "tableParser#parseTableRow",
+});
+
+const ROW_PROPERTY_CHANGE_OWNER = ownedElsewhere({
+  container: "row-properties",
+  child: "trPrChange",
+  reader: "tableParser#parseTableRow",
+});
+
+const CELL_INSERTION_OWNER = ownedElsewhere({
+  container: "cell-properties",
+  child: "cellIns",
+  reader: "tableParser#parseTableCell",
+});
+
+const CELL_DELETION_OWNER = ownedElsewhere({
+  container: "cell-properties",
+  child: "cellDel",
+  reader: "tableParser#parseTableCell",
+});
+
+const CELL_MERGE_OWNER = ownedElsewhere({
+  container: "cell-properties",
+  child: "cellMerge",
+  reader: "tableParser#parseTableCell",
+});
+
+const CELL_PROPERTY_CHANGE_OWNER = ownedElsewhere({
+  container: "cell-properties",
+  child: "tcPrChange",
+  reader: "tableParser#parseTableCell",
+});
+
+const ROW_CHILD_OWNERS = {
+  trPr: ownedElsewhere({
+    container: "row-content",
+    child: "trPr",
+    reader: "tableParser#parseTableRowProperties",
+  }),
+  tblPrEx: ownedElsewhere({
+    container: "row-content",
+    child: "tblPrEx",
+    reader: "tableParser#parseTablePropertyExceptions",
+  }),
+};
+
+const TABLE_CHILD_OWNERS = {
+  tblPr: ownedElsewhere({
+    container: "table-content",
+    child: "tblPr",
+    reader: "tableParser#parseTableProperties",
+  }),
+  tblGrid: ownedElsewhere({
+    container: "table-content",
+    child: "tblGrid",
+    reader: "tableParser#parseTableGrid",
+  }),
+};
+
 export function parseTableProperties(tblPrElement: XmlElement | null): TableFormatting | undefined {
   if (!tblPrElement) {
     return undefined;
@@ -472,96 +659,74 @@ export function parseTableProperties(tblPrElement: XmlElement | null): TableForm
 
   const formatting: TableFormatting = {};
 
-  // Table width (w:tblW)
-  const width = parseWidth(findChild(tblPrElement, "w", "tblW"));
-  if (width) {
-    formatting.width = width;
-  }
+  const handlers: ChildHandlers<"table-properties"> = {
+    ...sharedTablePropertyHandlers(formatting),
+    tblStyle: (child) => {
+      const styleId = getAttribute(child, "w", "val");
+      if (styleId) {
+        formatting.styleId = styleId;
+      }
+      return keptUnless(Boolean(styleId));
+    },
+    tblpPr: (child) => {
+      const floating = parseFloatingTableProperties(child);
+      if (floating) {
+        formatting.floating = floating;
+      }
+      return keptUnless(floating !== undefined);
+    },
+    tblOverlap: (child) => {
+      const overlap = getAttribute(child, "w", "val");
+      if (overlap === "never" || overlap === "overlap") {
+        formatting.overlap = overlap;
+        return undefined;
+      }
+      return CAPTURE;
+    },
+    // `CT_OnOff` with no `w:val` is the value `on`, so an empty element states
+    // something and the tri-state reader keeps it.
+    bidiVisual: (child) => {
+      formatting.bidi = parseBooleanElement(child);
+    },
+    tblStyleRowBandSize: (child) => {
+      const size = parseNumericAttribute(child, "w", "val");
+      if (size !== undefined) {
+        formatting.rowBandSize = size;
+      }
+      return keptUnless(size !== undefined);
+    },
+    tblStyleColBandSize: (child) => {
+      const size = parseNumericAttribute(child, "w", "val");
+      if (size !== undefined) {
+        formatting.columnBandSize = size;
+      }
+      return keptUnless(size !== undefined);
+    },
+    tblCaption: (child) => {
+      const caption = getAttribute(child, "w", "val");
+      if (caption !== null) {
+        formatting.caption = caption;
+      }
+      return keptUnless(caption !== null);
+    },
+    tblDescription: (child) => {
+      const description = getAttribute(child, "w", "val");
+      if (description !== null) {
+        formatting.description = description;
+      }
+      return keptUnless(description !== null);
+    },
+    tblPrChange: TABLE_PROPERTY_CHANGE_OWNER,
+  };
 
-  // Table placement (w:jc), narrowed against `ST_JcTable`. `start` and `end`
-  // are kept as written: they name an edge of the table's direction, and
-  // folding them onto `left` lost the distinction and the authored spelling.
-  const justification = narrowEnum(
-    getAttribute(findChild(tblPrElement, "w", "jc"), "w", "val"),
-    TableAlignmentSchema,
-  );
-  if (justification) {
-    formatting.justification = justification;
-  }
-
-  // Cell spacing (w:tblCellSpacing)
-  const cellSpacing = parseWidth(findChild(tblPrElement, "w", "tblCellSpacing"));
-  if (cellSpacing) {
-    formatting.cellSpacing = cellSpacing;
-  }
-
-  // Table indent (w:tblInd)
-  const indent = parseWidth(findChild(tblPrElement, "w", "tblInd"));
-  if (indent) {
-    formatting.indent = indent;
-  }
-
-  // Table borders (w:tblBorders)
-  const borders = parseTableBorders(findChild(tblPrElement, "w", "tblBorders"));
-  if (borders) {
-    formatting.borders = borders;
-  }
-
-  // Default cell margins (w:tblCellMar)
-  const cellMargins = parseCellMargins(findChild(tblPrElement, "w", "tblCellMar"));
-  if (cellMargins) {
-    formatting.cellMargins = cellMargins;
-  }
-
-  // Table layout (w:tblLayout)
-  const layoutElement = findChild(tblPrElement, "w", "tblLayout");
-  if (layoutElement) {
-    const layoutVal = getAttribute(layoutElement, "w", "type");
-    if (layoutVal === "fixed" || layoutVal === "autofit") {
-      formatting.layout = layoutVal;
-    }
-  }
-
-  // Table style (w:tblStyle)
-  const styleElement = findChild(tblPrElement, "w", "tblStyle");
-  if (styleElement) {
-    const styleId = getAttribute(styleElement, "w", "val");
-    if (styleId) {
-      formatting.styleId = styleId;
-    }
-  }
-
-  // Table look (w:tblLook)
-  const look = parseTableLook(findChild(tblPrElement, "w", "tblLook"));
-  if (look) {
-    formatting.look = look;
-  }
-
-  // Shading (w:shd)
-  const shading = parseShading(findChild(tblPrElement, "w", "shd"));
-  if (shading) {
-    formatting.shading = shading;
-  }
-
-  // Table overlap (w:tblOverlap)
-  const overlapElement = findChild(tblPrElement, "w", "tblOverlap");
-  if (overlapElement) {
-    const overlapVal = getAttribute(overlapElement, "w", "val");
-    if (overlapVal === "never" || overlapVal === "overlap") {
-      formatting.overlap = overlapVal;
-    }
-  }
-
-  // Floating table (w:tblpPr)
-  const floating = parseFloatingTableProperties(findChild(tblPrElement, "w", "tblpPr"));
-  if (floating) {
-    formatting.floating = floating;
-  }
-
-  // Bidirectional (w:bidiVisual)
-  const bidiVisual = findChild(tblPrElement, "w", "bidiVisual");
-  if (bidiVisual) {
-    formatting.bidi = parseBooleanElement(bidiVisual);
+  const preserved = dispatchChildren({
+    element: tblPrElement,
+    container: "table-properties",
+    handlers,
+    capturePosition: sequencePositions("table-properties", tblPrElement),
+  });
+  if (preserved) {
+    formatting.preserved = preserved;
   }
 
   if (Object.keys(formatting).length === 0) {
@@ -571,6 +736,16 @@ export function parseTableProperties(tblPrElement: XmlElement | null): TableForm
   return withSourceXml(formatting, tblPrElement);
 }
 
+/**
+ * A revision is the author, the date and the id; the snapshot may be empty.
+ *
+ * `<w:tblPrChange …><w:tblPr/></w:tblPrChange>` on a table that states no
+ * properties of its own records that a reviewer changed the table's
+ * properties from nothing to nothing — an accepted style change, most often.
+ * Dropping it because neither snapshot carried a typed value threw the
+ * revision away, and with it the reviewer's ability to accept or reject.
+ * `w:pPrChange` and `w:rPrChange` never did this.
+ */
 function parseTablePropertyChanges(
   tblPrElement: XmlElement | null,
   currentFormatting: TableFormatting | undefined,
@@ -579,8 +754,8 @@ function parseTablePropertyChanges(
     return undefined;
   }
 
-  const changes = findChildren(tblPrElement, "w", "tblPrChange")
-    .map((changeElement): TablePropertyChange => {
+  const changes = findChildren(tblPrElement, "w", "tblPrChange").map(
+    (changeElement): TablePropertyChange => {
       const previousTblPr = findChild(changeElement, "w", "tblPr");
       const change: TablePropertyChange = {
         type: "tablePropertyChange",
@@ -594,8 +769,78 @@ function parseTablePropertyChanges(
         change.currentFormatting = currentFormatting;
       }
       return change;
-    })
-    .filter((change) => change.previousFormatting || change.currentFormatting);
+    },
+  );
+
+  return changes.length > 0 ? changes : undefined;
+}
+
+/**
+ * Parse a row's table property exceptions (`w:tblPrEx`).
+ *
+ * The nine children are the table's own, read by the same handlers, so an
+ * exception and the property it overrides can never be read into two different
+ * shapes. `w:tblPrExChange` is a revision rather than a property and is read by
+ * {@link parseTablePropertyExceptionChanges}.
+ */
+export function parseTablePropertyExceptions(
+  tblPrExElement: XmlElement | null,
+): TablePropertyExceptionFormatting | undefined {
+  if (!tblPrExElement) {
+    return undefined;
+  }
+
+  const formatting: TablePropertyExceptionFormatting = {};
+
+  const handlers: ChildHandlers<"table-property-exceptions"> = {
+    ...sharedTablePropertyHandlers(formatting),
+    tblPrExChange: TABLE_PROPERTY_EXCEPTION_CHANGE_OWNER,
+  };
+
+  const preserved = dispatchChildren({
+    element: tblPrExElement,
+    container: "table-property-exceptions",
+    handlers,
+    capturePosition: sequencePositions("table-property-exceptions", tblPrExElement),
+  });
+  if (preserved) {
+    formatting.preserved = preserved;
+  }
+
+  // No empty-record guard, unlike the table's own properties: `w:tblPr` is
+  // required on a `w:tbl` and written back whatever the model holds, while
+  // `w:tblPrEx` is optional, so its presence is itself the value. Returning
+  // `undefined` for `<w:tblPrEx/>` deleted the element, and a row that
+  // overrides the table's properties with nothing is not a row that does not
+  // override them.
+  return withSourceXml(formatting, tblPrExElement);
+}
+
+/** `w:tblPrExChange`, read the way `w:tblPrChange` is. */
+function parseTablePropertyExceptionChanges(
+  tblPrExElement: XmlElement | null,
+  currentFormatting: TablePropertyExceptionFormatting | undefined,
+): TablePropertyExceptionChange[] | undefined {
+  if (!tblPrExElement) {
+    return undefined;
+  }
+
+  const changes = findChildren(tblPrExElement, "w", "tblPrExChange").map(
+    (changeElement): TablePropertyExceptionChange => {
+      const change: TablePropertyExceptionChange = {
+        type: "tablePropertyExceptionChange",
+        info: parsePropertyChangeInfo(changeElement),
+      };
+      const prev = parseTablePropertyExceptions(findChild(changeElement, "w", "tblPrEx"));
+      if (prev !== undefined) {
+        change.previousFormatting = prev;
+      }
+      if (currentFormatting !== undefined) {
+        change.currentFormatting = currentFormatting;
+      }
+      return change;
+    },
+  );
 
   return changes.length > 0 ? changes : undefined;
 }
@@ -608,8 +853,8 @@ function parseTableRowPropertyChanges(
     return undefined;
   }
 
-  const changes = findChildren(trPrElement, "w", "trPrChange")
-    .map((changeElement): TableRowPropertyChange => {
+  const changes = findChildren(trPrElement, "w", "trPrChange").map(
+    (changeElement): TableRowPropertyChange => {
       const previousTrPr = findChild(changeElement, "w", "trPr");
       const change: TableRowPropertyChange = {
         type: "tableRowPropertyChange",
@@ -623,8 +868,8 @@ function parseTableRowPropertyChanges(
         change.currentFormatting = currentFormatting;
       }
       return change;
-    })
-    .filter((change) => change.previousFormatting || change.currentFormatting);
+    },
+  );
 
   return changes.length > 0 ? changes : undefined;
 }
@@ -637,8 +882,8 @@ function parseTableCellPropertyChanges(
     return undefined;
   }
 
-  const changes = findChildren(tcPrElement, "w", "tcPrChange")
-    .map((changeElement): TableCellPropertyChange => {
+  const changes = findChildren(tcPrElement, "w", "tcPrChange").map(
+    (changeElement): TableCellPropertyChange => {
       const previousTcPr = findChild(changeElement, "w", "tcPr");
       const change: TableCellPropertyChange = {
         type: "tableCellPropertyChange",
@@ -648,12 +893,18 @@ function parseTableCellPropertyChanges(
       if (prev !== undefined) {
         change.previousFormatting = prev;
       }
+      // `CT_TcPrInner` declares the cell's structural revision, so a snapshot
+      // may state one; it belongs to the snapshot rather than to the cell.
+      const previousStructuralChange = parseTableCellStructuralChange(previousTcPr);
+      if (previousStructuralChange !== undefined) {
+        change.previousStructuralChange = previousStructuralChange;
+      }
       if (currentFormatting !== undefined) {
         change.currentFormatting = currentFormatting;
       }
       return change;
-    })
-    .filter((change) => change.previousFormatting || change.currentFormatting);
+    },
+  );
 
   return changes.length > 0 ? changes : undefined;
 }
@@ -757,78 +1008,99 @@ export function parseTableRowProperties(
 
   const formatting: TableRowFormatting = {};
 
-  const gridBefore = parseNumericAttribute(findChild(trPrElement, "w", "gridBefore"), "w", "val");
-  if (gridBefore !== undefined && gridBefore > 0) {
-    formatting.gridBefore = gridBefore;
-  }
-
-  const widthBefore = parseTableMeasurement(findChild(trPrElement, "w", "wBefore"));
-  if (widthBefore) {
-    formatting.widthBefore = widthBefore;
-  }
-
-  const gridAfter = parseNumericAttribute(findChild(trPrElement, "w", "gridAfter"), "w", "val");
-  if (gridAfter !== undefined && gridAfter > 0) {
-    formatting.gridAfter = gridAfter;
-  }
-
-  const widthAfter = parseTableMeasurement(findChild(trPrElement, "w", "wAfter"));
-  if (widthAfter) {
-    formatting.widthAfter = widthAfter;
-  }
-
-  // Row height (w:trHeight)
-  // Note: w:trHeight uses w:val (not w:w) for the height value in twips.
-  const heightElement = findChild(trPrElement, "w", "trHeight");
-  if (heightElement) {
-    const heightVal = parseNumericAttribute(heightElement, "w", "val");
-    if (heightVal !== undefined && heightVal > 0) {
-      formatting.height = { value: heightVal, type: "dxa" as const };
-
-      const hRule = getAttribute(heightElement, "w", "hRule");
+  const handlers: ChildHandlers<"row-properties"> = {
+    cnfStyle: (child) => {
+      const conditionalFormat = parseConditionalFormatStyle(child);
+      if (conditionalFormat) {
+        formatting.conditionalFormat = conditionalFormat;
+      }
+      return keptUnless(conditionalFormat !== undefined);
+    },
+    // `w:divId` names an HTML `div` the row belonged to in a web page Word
+    // round-tripped. Nothing in the editor has a place for it, so it travels
+    // as markup.
+    divId: CAPTURE,
+    gridBefore: (child) => {
+      const gridBefore = parseNumericAttribute(child, "w", "val");
+      if (gridBefore !== undefined && gridBefore > 0) {
+        formatting.gridBefore = gridBefore;
+      }
+      return keptUnless(gridBefore !== undefined && gridBefore > 0);
+    },
+    gridAfter: (child) => {
+      const gridAfter = parseNumericAttribute(child, "w", "val");
+      if (gridAfter !== undefined && gridAfter > 0) {
+        formatting.gridAfter = gridAfter;
+      }
+      return keptUnless(gridAfter !== undefined && gridAfter > 0);
+    },
+    wBefore: (child) => {
+      const widthBefore = parseTableMeasurement(child);
+      if (widthBefore) {
+        formatting.widthBefore = widthBefore;
+      }
+      return keptUnless(widthBefore !== undefined);
+    },
+    wAfter: (child) => {
+      const widthAfter = parseTableMeasurement(child);
+      if (widthAfter) {
+        formatting.widthAfter = widthAfter;
+      }
+      return keptUnless(widthAfter !== undefined);
+    },
+    // `CT_OnOff` with no `w:val` is the value `on`, so an empty element states
+    // something and the tri-state reader keeps an explicit off apart from an
+    // absent element.
+    cantSplit: (child) => {
+      formatting.cantSplit = parseBooleanElement(child);
+    },
+    // `w:trHeight` carries the height on `w:val`, not on `w:w`.
+    trHeight: (child) => {
+      const heightVal = parseNumericAttribute(child, "w", "val");
+      if (heightVal === undefined || heightVal <= 0) {
+        return CAPTURE;
+      }
+      formatting.height = { value: heightVal, type: "dxa" };
+      const hRule = getAttribute(child, "w", "hRule");
       if (hRule === "auto" || hRule === "atLeast" || hRule === "exact") {
         formatting.heightRule = hRule;
       }
-    }
+      return undefined;
+    },
+    tblHeader: (child) => {
+      formatting.header = parseBooleanElement(child);
+    },
+    // The cell spacing a row overrides. `TableRowFormatting` has no field for
+    // it and `w:tblPrEx` is where a row states table geometry, so the element
+    // travels as markup rather than being read into a shape nothing writes.
+    tblCellSpacing: CAPTURE,
+    jc: (child) => {
+      const justification = narrowEnum(getAttribute(child, "w", "val"), TableAlignmentSchema);
+      if (justification !== undefined) {
+        formatting.justification = justification;
+      }
+      return keptUnless(justification !== undefined);
+    },
+    hidden: (child) => {
+      formatting.hidden = parseBooleanElement(child);
+    },
+    ins: ROW_INSERTION_OWNER,
+    del: ROW_DELETION_OWNER,
+    trPrChange: ROW_PROPERTY_CHANGE_OWNER,
+  };
+
+  const preserved = dispatchChildren({
+    element: trPrElement,
+    container: "row-properties",
+    handlers,
+    capturePosition: sequencePositions("row-properties", trPrElement),
+  });
+  if (preserved) {
+    formatting.preserved = preserved;
   }
 
-  // Header row (w:tblHeader)
-  const header = parseBooleanElement(findChild(trPrElement, "w", "tblHeader"));
-  if (header) {
-    formatting.header = true;
-  }
-
-  // Can't split (w:cantSplit)
-  const cantSplit = parseBooleanElement(findChild(trPrElement, "w", "cantSplit"));
-  if (cantSplit) {
-    formatting.cantSplit = true;
-  }
-
-  // Row placement (w:jc), the same `ST_JcTable` the table's own carries.
-  const justification = narrowEnum(
-    getAttribute(findChild(trPrElement, "w", "jc"), "w", "val"),
-    TableAlignmentSchema,
-  );
-  if (justification) {
-    formatting.justification = justification;
-  }
-
-  // Hidden row (w:hidden)
-  const hidden = parseBooleanElement(findChild(trPrElement, "w", "hidden"));
-  if (hidden) {
-    formatting.hidden = true;
-  }
-
-  // Conditional format style (w:cnfStyle)
-  const conditionalFormat = parseConditionalFormatStyle(findChild(trPrElement, "w", "cnfStyle"));
-  if (conditionalFormat) {
-    formatting.conditionalFormat = conditionalFormat;
-  }
-
-  if (Object.keys(formatting).length === 0) {
-    return undefined;
-  }
-
+  // No empty-record guard: see `parseTableCellProperties` for why the element's
+  // presence is the value.
   return withSourceXml(formatting, trPrElement);
 }
 
@@ -966,99 +1238,111 @@ export function parseTableCellProperties(
 
   const formatting: TableCellFormatting = {};
 
-  // Cell width (w:tcW)
-  const width = parseWidth(findChild(tcPrElement, "w", "tcW"));
-  if (width) {
-    formatting.width = width;
+  const handlers: ChildHandlers<"cell-properties"> = {
+    cnfStyle: (child) => {
+      const conditionalFormat = parseConditionalFormatStyle(child);
+      if (conditionalFormat) {
+        formatting.conditionalFormat = conditionalFormat;
+      }
+      return keptUnless(conditionalFormat !== undefined);
+    },
+    tcW: (child) => {
+      const width = parseWidth(child);
+      if (width) {
+        formatting.width = width;
+      }
+      return keptUnless(width !== undefined);
+    },
+    gridSpan: (child) => {
+      const gridSpan = parseNumericAttribute(child, "w", "val");
+      if (gridSpan !== undefined && gridSpan > 1) {
+        formatting.gridSpan = Math.min(gridSpan, MAX_TABLE_COLUMNS);
+        return undefined;
+      }
+      return CAPTURE;
+    },
+    // The legacy horizontal merge `w:gridSpan` replaced. folio models the span
+    // and nothing reads `w:hMerge`, so it travels as markup: rewriting it as a
+    // span would change how a consumer that still honours it lays the row out.
+    hMerge: CAPTURE,
+    vMerge: (child) => {
+      // No `w:val`, or `w:val="continue"`, is a continuation.
+      formatting.vMerge = getAttribute(child, "w", "val") === "restart" ? "restart" : "continue";
+    },
+    tcBorders: (child) => {
+      const borders = parseTableCellBorders(child);
+      if (borders) {
+        formatting.borders = borders;
+      }
+      return keptUnless(borders !== undefined);
+    },
+    shd: (child) => {
+      const shading = parseShading(child);
+      if (shading) {
+        formatting.shading = shading;
+      }
+      return keptUnless(shading !== undefined);
+    },
+    // `CT_OnOff` with no `w:val` is the value `on`; the tri-state reader keeps
+    // an explicit off apart from an absent element.
+    noWrap: (child) => {
+      formatting.noWrap = parseBooleanElement(child);
+    },
+    tcMar: (child) => {
+      const margins = parseCellMargins(child);
+      if (margins) {
+        formatting.margins = margins;
+      }
+      return keptUnless(margins !== undefined);
+    },
+    textDirection: (child) => {
+      const textDir = narrowEnum(getAttribute(child, "w", "val"), TextDirectionSchema);
+      if (textDir) {
+        formatting.textDirection = textDir;
+      }
+      return keptUnless(textDir !== undefined);
+    },
+    tcFitText: (child) => {
+      formatting.fitText = parseBooleanElement(child);
+    },
+    vAlign: (child) => {
+      const vAlign = getAttribute(child, "w", "val");
+      if (vAlign === "top" || vAlign === "center" || vAlign === "bottom") {
+        formatting.verticalAlign = vAlign;
+        return undefined;
+      }
+      return CAPTURE;
+    },
+    hideMark: (child) => {
+      formatting.hideMark = parseBooleanElement(child);
+    },
+    // `w:headers` names the header cells this one is described by, as
+    // accessibility metadata keyed on bookmark names. folio models neither the
+    // list nor the bookmarks it points at, so the element travels whole rather
+    // than being rebuilt from names it would have to invent.
+    headers: CAPTURE,
+    cellIns: CELL_INSERTION_OWNER,
+    cellDel: CELL_DELETION_OWNER,
+    cellMerge: CELL_MERGE_OWNER,
+    tcPrChange: CELL_PROPERTY_CHANGE_OWNER,
+  };
+
+  const preserved = dispatchChildren({
+    element: tcPrElement,
+    container: "cell-properties",
+    handlers,
+    capturePosition: sequencePositions("cell-properties", tcPrElement),
+  });
+  if (preserved) {
+    formatting.preserved = preserved;
   }
 
-  // Cell borders (w:tcBorders)
-  const borders = parseTableCellBorders(findChild(tcPrElement, "w", "tcBorders"));
-  if (borders) {
-    formatting.borders = borders;
-  }
-
-  // Cell margins (w:tcMar)
-  const margins = parseCellMargins(findChild(tcPrElement, "w", "tcMar"));
-  if (margins) {
-    formatting.margins = margins;
-  }
-
-  // Shading (w:shd)
-  const shading = parseShading(findChild(tcPrElement, "w", "shd"));
-  if (shading) {
-    formatting.shading = shading;
-  }
-
-  // Vertical alignment (w:vAlign)
-  const vAlignElement = findChild(tcPrElement, "w", "vAlign");
-  if (vAlignElement) {
-    const vAlign = getAttribute(vAlignElement, "w", "val");
-    if (vAlign === "top" || vAlign === "center" || vAlign === "bottom") {
-      formatting.verticalAlign = vAlign;
-    }
-  }
-
-  // Text direction (w:textDirection)
-  const textDirElement = findChild(tcPrElement, "w", "textDirection");
-  if (textDirElement) {
-    const textDir = narrowEnum(getAttribute(textDirElement, "w", "val"), TextDirectionSchema);
-    if (textDir) {
-      formatting.textDirection = textDir;
-    }
-  }
-
-  // Grid span (horizontal merge) (w:gridSpan)
-  const gridSpanElement = findChild(tcPrElement, "w", "gridSpan");
-  if (gridSpanElement) {
-    const gridSpan = parseNumericAttribute(gridSpanElement, "w", "val");
-    if (gridSpan !== undefined && gridSpan > 1) {
-      formatting.gridSpan = Math.min(gridSpan, MAX_TABLE_COLUMNS);
-    }
-  }
-
-  // Vertical merge (w:vMerge)
-  const vMergeElement = findChild(tcPrElement, "w", "vMerge");
-  if (vMergeElement) {
-    const vMergeVal = getAttribute(vMergeElement, "w", "val");
-    if (vMergeVal === "restart") {
-      formatting.vMerge = "restart";
-    } else {
-      // No val attribute or val="continue" means continuation
-      formatting.vMerge = "continue";
-    }
-  }
-
-  // Fit text (w:tcFitText)
-  const fitText = parseBooleanElement(findChild(tcPrElement, "w", "tcFitText"));
-  if (fitText) {
-    formatting.fitText = true;
-  }
-
-  // No wrap (w:noWrap)
-  const noWrap = parseBooleanElement(findChild(tcPrElement, "w", "noWrap"));
-  if (noWrap) {
-    formatting.noWrap = true;
-  }
-
-  // Hide mark (w:hideMark). Only when the element is there: `w:hideMark` is a
-  // presence flag, and reading its absence as an explicit `false` made every
-  // cell that never mentioned it serialize `<w:hideMark w:val="off"/>`.
-  const hideMarkElement = findChild(tcPrElement, "w", "hideMark");
-  if (hideMarkElement) {
-    formatting.hideMark = parseBooleanElement(hideMarkElement);
-  }
-
-  // Conditional format style (w:cnfStyle)
-  const conditionalFormat = parseConditionalFormatStyle(findChild(tcPrElement, "w", "cnfStyle"));
-  if (conditionalFormat) {
-    formatting.conditionalFormat = conditionalFormat;
-  }
-
-  if (Object.keys(formatting).length === 0) {
-    return undefined;
-  }
-
+  // No empty-record guard, the decision `w:tblPrEx` already made: the element
+  // is optional, so its presence is the value, and returning "no properties"
+  // for `<w:tcPr/>` deleted the element a producer wrote. The record is
+  // present-and-empty rather than absent, and the carrier is the element
+  // rather than the properties it yielded — which is what kept an empty
+  // property set out of the model and out of the save.
   return withSourceXml(formatting, tcPrElement);
 }
 
@@ -1117,7 +1401,7 @@ function parseCellContent(
     const preserved = dispatchChildren({
       element,
       container: "block-content",
-      modelledCount: () => modelled.length,
+      capturePosition: () => modelled.length,
       undeclared: {
         AlternateContent: (child) => {
           const selectedBranch = selectAlternateContentBranch(child);
@@ -1164,8 +1448,7 @@ function parseCellContent(
         bookmarkEnd: (child) => {
           modelled.push(parseBookmarkEnd(child));
         },
-        // Read from the `w:tc` element by the cell parser, not from here.
-        tcPr: OWNED_ELSEWHERE,
+        tcPr: CELL_PROPERTIES_OWNER,
         // Declared for `w:body`, not for a cell; the handler map is total over
         // the union every block container shares.
         sectPr: CAPTURE,
@@ -1302,6 +1585,19 @@ export function parseTableRow(
     cells: [],
   };
 
+  // The table properties this row overrides (w:tblPrEx). `CT_Row` declares it
+  // before `w:trPr`, and the two are read off the element rather than by the
+  // child walk below, which is why {@link ROW_CHILD_OWNERS} names this reader.
+  const tblPrExElement = findChild(trElement, "w", "tblPrEx");
+  const exceptions = parseTablePropertyExceptions(tblPrExElement);
+  if (exceptions) {
+    row.tablePropertyExceptions = exceptions;
+  }
+  const exceptionChanges = parseTablePropertyExceptionChanges(tblPrExElement, exceptions);
+  if (exceptionChanges !== undefined) {
+    row.tablePropertyExceptionChanges = exceptionChanges;
+  }
+
   // Parse row properties (w:trPr)
   const trPrElement = findChild(trElement, "w", "trPr");
   const formatting = parseTableRowProperties(trPrElement);
@@ -1336,7 +1632,7 @@ export function parseTableRow(
     const captured = dispatchChildren({
       element,
       container: "row-content",
-      modelledCount: () => row.cells.length,
+      capturePosition: () => row.cells.length,
       handlers: {
         tc: (child) => {
           row.cells.push(
@@ -1366,10 +1662,7 @@ export function parseTableRow(
           bookmarks.push({ index: row.cells.length, marker: parseBookmarkEnd(child) });
         },
 
-        // Read from `trElement` by the property parsers above, not by this
-        // walk: capturing them as well would write each twice.
-        trPr: OWNED_ELSEWHERE,
-        tblPrEx: OWNED_ELSEWHERE,
+        ...ROW_CHILD_OWNERS,
 
         commentRangeEnd: CAPTURE,
         commentRangeStart: CAPTURE,
@@ -1635,7 +1928,7 @@ export function parseTable(
     const captured = dispatchChildren({
       element,
       container: "table-content",
-      modelledCount: () => table.rows.length,
+      capturePosition: () => table.rows.length,
       handlers: {
         tr: (child) => {
           const rowIndex = table.rows.length;
@@ -1656,10 +1949,7 @@ export function parseTable(
           dispatchTableChildren(sdtContent, withContainerXmlns(sdtOptions, sdtContent));
         },
 
-        // Read from `tblElement` by the property and grid parsers above, not
-        // by this walk: capturing them as well would write each twice.
-        tblPr: OWNED_ELSEWHERE,
-        tblGrid: OWNED_ELSEWHERE,
+        ...TABLE_CHILD_OWNERS,
 
         // A bookmark that selects a whole table opens and closes here. The
         // sink would keep the bytes and hide the marker from the pass that

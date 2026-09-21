@@ -58,6 +58,100 @@ const versionOneFieldSnapshot = (): Uint8Array => {
   return update;
 };
 
+/**
+ * A version-4 snapshot holding one row of two cells, with the widths a
+ * version-4 build stored: the cell that stated a `w:tcW` and the one that
+ * states none both carry `width`, because it is the width the table resolved.
+ */
+const versionFourTableSnapshot = (): Uint8Array => {
+  const ydoc = new Y.Doc();
+  const cells = [
+    { width: 2400, original: { width: { value: 2400, type: "dxa" } } },
+    { width: 2400, original: { vAlign: "center" } },
+  ].map(({ width, original }) => {
+    const cell = new Y.XmlElement("tableCell");
+    // @ts-expect-error — a Yjs attribute holds JSON, and the stored shape is
+    // the point of the test; the typings narrow to string.
+    cell.setAttribute("width", width);
+    cell.setAttribute("widthType", "dxa");
+    // @ts-expect-error — as above.
+    cell.setAttribute("_originalFormatting", original);
+    cell.insert(0, [new Y.XmlElement("paragraph")]);
+    return cell;
+  });
+  const row = new Y.XmlElement("tableRow");
+  row.insert(0, cells);
+  const table = new Y.XmlElement("table");
+  table.insert(0, [row]);
+  ydoc.getXmlFragment(FOLIO_YJS_PROSEMIRROR_FRAGMENT_NAME).insert(0, [table]);
+  ydoc.getMap(METADATA_MAP_NAME).set(ATTR_SCHEMA_VERSION_KEY, 4);
+  const update = Y.encodeStateAsUpdate(ydoc);
+  ydoc.destroy();
+  return update;
+};
+
+/**
+ * A version-5 snapshot holding one row, with the `hidden` a version-5 build
+ * stored: `false` for a row that authored no `w:hidden`, because the reader
+ * that filled it took only an explicit on.
+ */
+const versionFiveRowSnapshot = (): Uint8Array => {
+  const ydoc = new Y.Doc();
+  const cell = new Y.XmlElement("tableCell");
+  cell.insert(0, [new Y.XmlElement("paragraph")]);
+  const row = new Y.XmlElement("tableRow");
+  // @ts-expect-error — a Yjs attribute holds JSON, and the stored shape is the
+  // point of the test; the typings narrow to string.
+  row.setAttribute("hidden", false);
+  // @ts-expect-error — as above.
+  row.setAttribute("isHeader", false);
+  row.insert(0, [cell]);
+  const table = new Y.XmlElement("table");
+  table.insert(0, [row]);
+  ydoc.getXmlFragment(FOLIO_YJS_PROSEMIRROR_FRAGMENT_NAME).insert(0, [table]);
+  ydoc.getMap(METADATA_MAP_NAME).set(ATTR_SCHEMA_VERSION_KEY, 5);
+  const update = Y.encodeStateAsUpdate(ydoc);
+  ydoc.destroy();
+  return update;
+};
+
+const rowAttributes = (update: Uint8Array): Record<string, unknown> => {
+  const ydoc = new Y.Doc();
+  Y.applyUpdate(ydoc, update);
+  const table = ydoc.getXmlFragment(FOLIO_YJS_PROSEMIRROR_FRAGMENT_NAME).get(0);
+  if (!(table instanceof Y.XmlElement)) {
+    throw new Error("Expected a table element");
+  }
+  const row = table.get(0);
+  if (!(row instanceof Y.XmlElement)) {
+    throw new Error("Expected a row element");
+  }
+  const attributes = row.getAttributes();
+  ydoc.destroy();
+  return attributes;
+};
+
+const cellAttributes = (update: Uint8Array): Record<string, unknown>[] => {
+  const ydoc = new Y.Doc();
+  Y.applyUpdate(ydoc, update);
+  const table = ydoc.getXmlFragment(FOLIO_YJS_PROSEMIRROR_FRAGMENT_NAME).get(0);
+  if (!(table instanceof Y.XmlElement)) {
+    throw new Error("Expected a table element");
+  }
+  const row = table.get(0);
+  if (!(row instanceof Y.XmlElement)) {
+    throw new Error("Expected a row element");
+  }
+  const attributes = row.toArray().map((cell) => {
+    if (!(cell instanceof Y.XmlElement)) {
+      throw new Error("Expected a cell element");
+    }
+    return cell.getAttributes();
+  });
+  ydoc.destroy();
+  return attributes;
+};
+
 const fieldAttributes = (update: Uint8Array): Record<string, unknown> => {
   const ydoc = new Y.Doc();
   Y.applyUpdate(ydoc, update);
@@ -96,6 +190,41 @@ describe("migrateFolioYjsSnapshot carries a version-1 field forward", () => {
     expect(attributes["fldLock"]).toBeUndefined();
     expect(attributes["dirty"]).toBeUndefined();
     expect(attributes["fieldType"]).toBe("PAGE");
+  });
+});
+
+describe("migrateFolioYjsSnapshot carries a version-4 table forward", () => {
+  test("backfills a stated width only onto the cell that stated one", () => {
+    const migrated = migrateFolioYjsSnapshot(versionFourTableSnapshot());
+    if (migrated.isErr()) {
+      throw migrated.error;
+    }
+
+    expect(migrated.value.fromVersion).toBe(4);
+    expect(migrated.value.paragraphsRewritten).toBe(1);
+    const [stated, resolved] = cellAttributes(migrated.value.update);
+    expect(stated?.["_authoredWidth"]).toEqual({ value: 2400, type: "dxa" });
+    // The width this cell holds is the one the table's grid resolved, so a
+    // save must not hand it back as a `w:tcW` its author never wrote.
+    expect(resolved?.["_authoredWidth"]).toBeUndefined();
+    expect(resolved?.["width"]).toBe(2400);
+  });
+});
+
+describe("migrateFolioYjsSnapshot carries a version-5 row forward", () => {
+  test("drops the `hidden` version 5 could not have stated", () => {
+    const migrated = migrateFolioYjsSnapshot(versionFiveRowSnapshot());
+    if (migrated.isErr()) {
+      throw migrated.error;
+    }
+
+    expect(migrated.value.fromVersion).toBe(5);
+    expect(migrated.value.paragraphsRewritten).toBe(1);
+    const attributes = rowAttributes(migrated.value.update);
+    expect(attributes["hidden"]).toBeUndefined();
+    // `isHeader` still answers a permanent yes/no question, so its `false`
+    // means what it says and the step leaves it alone.
+    expect(attributes["isHeader"]).toBe(false);
   });
 });
 

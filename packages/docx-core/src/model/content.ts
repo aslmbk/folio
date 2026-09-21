@@ -15,6 +15,7 @@ import type {
   TextFormatting,
   ParagraphFormatting,
   TableFormatting,
+  TablePropertyExceptionFormatting,
   TableRowFormatting,
   TableCellFormatting,
   TextDirection,
@@ -1228,8 +1229,24 @@ export type TableRow = {
   type: "tableRow";
   /** Row formatting */
   formatting?: TableRowFormatting;
+  /**
+   * The table properties this row overrides (`w:tblPrEx`).
+   *
+   * `CT_TblPrEx` is the middle of `CT_TblPrBase` — width, justification, cell
+   * spacing, indent, borders, shading, layout, cell margins and the look — so
+   * it is the table's own property set narrowed to what a row may restate, and
+   * it travels in the same shape. Word writes one when a table is built by
+   * merging two, and a consumer reads it in place of the table's for this row
+   * alone, so losing it silently restyles the row.
+   *
+   * It is not `formatting`: that is `w:trPr`, the row's own geometry, and the
+   * two are different elements in different places in `CT_Row`.
+   */
+  tablePropertyExceptions?: TablePropertyExceptionFormatting;
   /** Row-level tracked property changes (w:trPrChange) */
   propertyChanges?: TableRowPropertyChange[];
+  /** Tracked changes to the property exceptions (w:tblPrExChange) */
+  tablePropertyExceptionChanges?: TablePropertyExceptionChange[];
   /** Tracked structural changes (row insert/delete) */
   structuralChange?: TableStructuralChangeInfo;
   /** Cells in this row */
@@ -1606,6 +1623,23 @@ export type TablePropertyChange = {
 };
 
 /**
+ * Table property exception change (w:tblPrExChange)
+ *
+ * Its own type rather than a `TablePropertyChange`: it carries the row-legal
+ * subset and is written as a different element in a different container. A
+ * shared discriminator would let one reach the other's serializer.
+ */
+export type TablePropertyExceptionChange = {
+  type: "tablePropertyExceptionChange";
+  /** Tracked change metadata */
+  info: PropertyChangeInfo;
+  /** Property exceptions before the tracked change */
+  previousFormatting?: TablePropertyExceptionFormatting;
+  /** Property exceptions after the tracked change (editor model convenience) */
+  currentFormatting?: TablePropertyExceptionFormatting;
+};
+
+/**
  * Table row property change (w:trPrChange)
  */
 export type TableRowPropertyChange = {
@@ -1629,6 +1663,16 @@ export type TableCellPropertyChange = {
   previousFormatting?: TableCellFormatting;
   /** Cell properties after the tracked change (editor model convenience) */
   currentFormatting?: TableCellFormatting;
+  /**
+   * The cell's own insertion, deletion or merge as the snapshot recorded it.
+   *
+   * `CT_TcPrInner` is `CT_TcPrBase` plus `EG_CellMarkupElements`, so the
+   * `w:tcPr` inside a `w:tcPrChange` may carry `w:cellIns`, `w:cellDel` or
+   * `w:cellMerge` — "before this property change, the cell stood inserted".
+   * It is not the cell's current revision, which is
+   * {@link TableCell.structuralChange}, so it rides the change that recorded it.
+   */
+  previousStructuralChange?: TableStructuralChangeInfo;
 };
 
 /**
@@ -1648,6 +1692,46 @@ export type SectionPropertyChange = {
   /** Section properties after the tracked change (editor model convenience) */
   currentProperties?: SectionProperties;
 };
+
+/**
+ * Every tracked property revision the model carries: a change element that
+ * stores the complete previous property set beside a {@link PropertyChangeInfo},
+ * so accepting it drops the record and rejecting it restores the set.
+ *
+ * Structural revisions ({@link TrackedRunChange}, {@link ParagraphMarkChange},
+ * {@link TableStructuralChangeInfo}) are deliberately outside it: they add or
+ * remove content rather than restate properties, and they resolve by moving
+ * content rather than by restoring a snapshot.
+ */
+export type PropertyChange =
+  | RunPropertyChange
+  | ParagraphPropertyChange
+  | SectionPropertyChange
+  | TablePropertyChange
+  | TablePropertyExceptionChange
+  | TableRowPropertyChange
+  | TableCellPropertyChange;
+
+/** One of {@link PROPERTY_REVISION_KINDS}. */
+export type PropertyRevisionKind = PropertyChange["type"];
+
+/**
+ * Runtime census of {@link PropertyChange}'s discriminators.
+ *
+ * It is the one place the set is written down. Every consumer that resolves,
+ * lists or compares a property revision is total over it
+ * (`satisfies Record<PropertyRevisionKind, …>`), so a revision the model gains
+ * is a compile error at each of those sites rather than a branch nobody wrote.
+ */
+export const PROPERTY_REVISION_KINDS = Object.freeze({
+  runPropertyChange: "runPropertyChange",
+  paragraphPropertyChange: "paragraphPropertyChange",
+  sectionPropertyChange: "sectionPropertyChange",
+  tablePropertyChange: "tablePropertyChange",
+  tablePropertyExceptionChange: "tablePropertyExceptionChange",
+  tableRowPropertyChange: "tableRowPropertyChange",
+  tableCellPropertyChange: "tableCellPropertyChange",
+} as const satisfies Record<PropertyRevisionKind, PropertyRevisionKind>);
 
 /**
  * Table structural tracked change metadata (row/cell insert/delete/merge)
@@ -2318,6 +2402,8 @@ export type SectionProperties = {
 
   /** Section-level tracked property changes (w:sectPrChange) */
   propertyChanges?: SectionPropertyChange[];
+  /** The `w:sectPr` children no reader took a typed value from. */
+  preserved?: PreservedMarkup;
   /**
    * Attributes `w:sectPr` carried that this record has no field for.
    *

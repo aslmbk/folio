@@ -12,6 +12,7 @@ import type {
   TabStopAlignment,
   TextDirection,
 } from "./ooxmlEnumerations.gen";
+import type { PreservedMarkup } from "./preservedMarkup";
 
 // ============================================================================
 // TEXT FORMATTING (Run Properties - rPr)
@@ -539,6 +540,16 @@ export type TableFormatting = {
   floating?: FloatingTableProperties;
   /** Right to left table */
   bidi?: boolean;
+  /** Accessibility caption (`w:tblCaption`), authored in Word's alt-text dialog. */
+  caption?: string;
+  /** Long description (`w:tblDescription`), the caption's companion. */
+  description?: string;
+  /** Rows per band of the table style's row banding (`w:tblStyleRowBandSize`). */
+  rowBandSize?: number;
+  /** Columns per band (`w:tblStyleColBandSize`). */
+  columnBandSize?: number;
+  /** The `w:tblPr` children no reader took a typed value from. */
+  preserved?: PreservedMarkup;
   /**
    * The table's `w:tblGrid`, verbatim.
    *
@@ -574,6 +585,22 @@ export type TableFormatting = {
   sourceXml?: string;
 };
 
+/** Table properties a row may override in `w:tblPrEx`. */
+export type TablePropertyExceptionFormatting = Pick<
+  TableFormatting,
+  | "width"
+  | "justification"
+  | "cellSpacing"
+  | "indent"
+  | "borders"
+  | "shading"
+  | "layout"
+  | "cellMargins"
+  | "look"
+  | "preserved"
+  | "sourceXml"
+>;
+
 /**
  * Table row formatting properties (w:trPr)
  */
@@ -600,6 +627,8 @@ export type TableRowFormatting = {
   hidden?: boolean;
   /** Conditional format style */
   conditionalFormat?: ConditionalFormatStyle;
+  /** The `w:trPr` children no reader took a typed value from. */
+  preserved?: PreservedMarkup;
   /**
    * The element this formatting was parsed from, verbatim.
    *
@@ -675,6 +704,8 @@ export type TableCellFormatting = {
   hideMark?: boolean;
   /** Conditional format style */
   conditionalFormat?: ConditionalFormatStyle;
+  /** The `w:tcPr` children no reader took a typed value from. */
+  preserved?: PreservedMarkup;
   /**
    * The element this formatting was parsed from, verbatim.
    *

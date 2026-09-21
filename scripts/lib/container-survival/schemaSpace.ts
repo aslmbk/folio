@@ -13,6 +13,7 @@
 import path from "node:path";
 
 import type { OoxmlSchemaGraph } from "../../generate-ooxml-schema-graph";
+import { orderedParticlesByOwner } from "../ooxml-schema-graph";
 
 export const WML_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -168,10 +169,10 @@ export const attributeSlotKey = (slot: AttributeSlot): string =>
   `${containerKey(slot.container)}@${qualify(slot.attribute)}`;
 
 type Index = {
-  attributesByOwner: ReadonlyMap<string, OoxmlSchemaGraph["attributes"]>;
+  attributesByOwner: ReadonlyMap<string, readonly OoxmlSchemaGraph["attributes"][number][]>;
   baseOf: ReadonlyMap<string, string>;
   byId: ReadonlyMap<string, OoxmlSchemaGraph["symbols"][number]>;
-  childrenByOwner: ReadonlyMap<string, OoxmlSchemaGraph["children"]>;
+  childrenByOwner: ReadonlyMap<string, readonly OoxmlSchemaGraph["children"][number][]>;
   compositorKinds: ReadonlyMap<string, string>;
   /** Compositors that need no member: `minOccurs="0"` on themselves or on an ancestor. */
   optionalCompositors: ReadonlySet<string>;
@@ -214,24 +215,14 @@ const optionalCompositorsOf = (graph: OoxmlSchemaGraph): Set<string> => {
   return optional;
 };
 
-const groupBy = <T extends { owner: string }>(items: readonly T[]): Map<string, T[]> => {
-  const grouped = new Map<string, T[]>();
-  for (const item of items) {
-    const list = grouped.get(item.owner);
-    if (list) {
-      list.push(item);
-      continue;
-    }
-    grouped.set(item.owner, [item]);
-  }
-  return grouped;
-};
-
 export const buildIndex = (graph: OoxmlSchemaGraph): Index => ({
-  attributesByOwner: groupBy(graph.attributes),
+  // Declaration order, from the one function that derives it; a fixture whose
+  // subject sat at an ordinal this file computed for itself was scored by the
+  // corpus validator against a different sequence.
+  attributesByOwner: orderedParticlesByOwner(graph.attributes),
   baseOf: new Map(graph.inheritance.map(({ derived, base }) => [derived, base])),
   byId: new Map(graph.symbols.map((symbol) => [symbol.id, symbol])),
-  childrenByOwner: groupBy(graph.children),
+  childrenByOwner: orderedParticlesByOwner(graph.children),
   compositorKinds: new Map(graph.compositors.map(({ id, kind }) => [id, kind])),
   optionalCompositors: optionalCompositorsOf(graph),
   globalAttributes: new Map(
