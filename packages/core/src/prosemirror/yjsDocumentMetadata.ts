@@ -41,6 +41,12 @@ type AttrSchemaMigrationStep = (fragment: Y.XmlFragment) => number;
  */
 const stampMarkerOnly: AttrSchemaMigrationStep = () => 0;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+/** A shared text node, identified structurally to keep Yjs a type-only import. */
+const isXmlText = (child: object): child is Y.XmlText => "toDelta" in child;
+
 /** The node types whose `fldLock` and `dirty` attrs version 2 rewrites. */
 const FIELD_ELEMENT_NAMES = new Set(["field", "structuredField"]);
 const STATED_FLAG_ATTRS = ["fldLock", "dirty"] as const;
@@ -544,8 +550,85 @@ const mintSectionPropertiesFromBreakType: AttrSchemaMigrationStep = (fragment) =
   return rewritten;
 };
 
+/** The node types whose `showingPlaceholder` attr version 10 rewrites. */
+const SDT_ELEMENT_NAMES = new Set(["sdt", "blockSdt"]);
+
+/**
+ * Version 9 stored `showingPlaceholder` as a boolean defaulting to `false`.
+ * A control that authored an explicit off and one that authored nothing were
+ * both stored as `false`, so the old false cannot become a newly authored
+ * `<w:showingPlcHdr w:val="0"/>` when the absence is now `null`.
+ */
+const dropUnstatedPlaceholderFlags: AttrSchemaMigrationStep = (fragment) => {
+  let rewritten = 0;
+  const visit = (node: Y.XmlElement | Y.XmlFragment): void => {
+    if ("nodeName" in node && SDT_ELEMENT_NAMES.has(node.nodeName)) {
+      const attributes: Record<string, unknown> = node.getAttributes();
+      if (attributes["showingPlaceholder"] === false) {
+        node.removeAttribute("showingPlaceholder");
+        rewritten += 1;
+      }
+    }
+    for (const child of node.toArray()) {
+      if (typeof child !== "string" && "toArray" in child) {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return rewritten;
+};
+
+/**
+ * Version 11 renames the persisted `pageBreakRunOwner` mark to `runIdentity`.
+ * Unknown mark names make y-prosemirror delete their covered text, so the
+ * Y.Text delta must be rewritten before the ProseMirror document is built.
+ */
+const renamePageBreakRunOwnerMarkAttr: AttrSchemaMigrationStep = (fragment) => {
+  const OLD_MARK_NAME = "pageBreakRunOwner";
+  const NEW_MARK_NAME = "runIdentity";
+  let rewritten = 0;
+
+  const rewriteText = (sharedText: Y.XmlText): void => {
+    let index = 0;
+    const ranges: { at: number; length: number; owner: unknown }[] = [];
+    for (const op of sharedText.toDelta()) {
+      const insert: unknown = op.insert;
+      const length = typeof insert === "string" ? insert.length : 1;
+      const attributes: unknown = op.attributes;
+      if (isRecord(attributes) && OLD_MARK_NAME in attributes) {
+        ranges.push({ at: index, length, owner: attributes[OLD_MARK_NAME] });
+      }
+      index += length;
+    }
+    for (const { at, length, owner } of ranges) {
+      const identity =
+        isRecord(owner) && typeof owner["id"] === "number" ? { id: owner["id"] } : {};
+      sharedText.format(at, length, { [OLD_MARK_NAME]: null, [NEW_MARK_NAME]: identity });
+      rewritten += 1;
+    }
+  };
+
+  const visit = (node: Y.XmlElement | Y.XmlFragment): void => {
+    for (const child of node.toArray()) {
+      if (typeof child === "string") {
+        continue;
+      }
+      if (isXmlText(child)) {
+        rewriteText(child);
+        continue;
+      }
+      if ("toArray" in child) {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return rewritten;
+};
+
 /** Every attr-schema version this build reads, oldest first, with no gaps. */
-const FOLIO_YJS_ATTR_SCHEMA_VERSIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+const FOLIO_YJS_ATTR_SCHEMA_VERSIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] as const;
 
 /** An attr-schema version this build can read. */
 export type FolioYjsAttrSchemaVersion = (typeof FOLIO_YJS_ATTR_SCHEMA_VERSIONS)[number];
@@ -570,7 +653,9 @@ const ATTR_SCHEMA_MIGRATIONS = {
   6: outlineLevelBecomesAUnion,
   7: numberingBecomesAUnion,
   8: mintSectionPropertiesFromBreakType,
-  9: "current",
+  9: dropUnstatedPlaceholderFlags,
+  10: renamePageBreakRunOwnerMarkAttr,
+  11: "current",
 } as const satisfies Record<FolioYjsAttrSchemaVersion, AttrSchemaMigrationStep | "current">;
 
 type CurrentAttrSchemaVersion = {
@@ -583,7 +668,7 @@ type CurrentAttrSchemaVersion = {
  * The attr-schema version this build writes. Derived against the migration map
  * so the constant and the map cannot disagree.
  */
-export const FOLIO_YJS_ATTR_SCHEMA_VERSION = 9 satisfies CurrentAttrSchemaVersion;
+export const FOLIO_YJS_ATTR_SCHEMA_VERSION = 11 satisfies CurrentAttrSchemaVersion;
 
 /**
  * The steps that carry a snapshot written under `fromVersion` up to

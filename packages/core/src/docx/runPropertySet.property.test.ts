@@ -31,6 +31,9 @@ import { parseRun, parseRunProperties, RUN_PROPERTY_OWNERS } from "./runParser";
 import { serializeParagraphFormatting } from "./serializer/paragraphSerializer";
 import { serializeRun } from "./serializer/runSerializer";
 import { serializeTextFormatting } from "./serializer/textFormattingSerializer";
+import { fromProseDoc } from "../prosemirror/conversion/fromProseDoc";
+import { toProseDoc } from "../prosemirror/conversion/toProseDoc";
+import type { Document, Paragraph, Run } from "../types/document";
 import { parseXmlDocument, type XmlElement } from "./xmlParser";
 
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -262,11 +265,10 @@ describe("a run property set survives a rebuild", () => {
     expect(rebuildRun(propertiesOf(saved))).toBe(saved);
   });
 
-  test("a run-in marker the paragraph's record cannot hold keeps its bytes", () => {
-    // `ParagraphFormatting.runInWithNext` is on-or-absent, so an explicit
-    // `<w:specVanish w:val="0"/>` cancelling a style's run-in has no field to
-    // land in. The handler answers with what the record took, so the element
-    // goes to the sink rather than being written by neither of them.
+  test("the paragraph record writes either stated run-in value", () => {
+    // `ParagraphFormatting.runInWithNext` is tri-state, so both an on and the
+    // explicit off that cancels a style's run-in land in the paragraph record
+    // and are written back from there.
     expect(rebuildParagraphMark("<w:specVanish/>")).toContain("<w:specVanish/>");
     expect(rebuildParagraphMark('<w:specVanish w:val="0"/>')).toContain(
       '<w:specVanish w:val="0"/>',
@@ -299,5 +301,61 @@ describe("a run property set survives a rebuild", () => {
     expect(mergeTextFormatting(inherited, undefined)?.preserved).toBeUndefined();
     expect(mergeTextFormatting(undefined, inherited)?.preserved).toBeUndefined();
     expect(serializeTextFormatting(mergeTextFormatting(inherited, direct))).not.toContain("w:bdr");
+  });
+});
+
+/**
+ * The sink rides the same mark as the run's attribute remainder, because both
+ * are facts about one `w:r` and the save leg asks that element one question:
+ * where does this run begin and end. A second carrier could answer it a second
+ * way.
+ */
+describe("a run property set survives the editor", () => {
+  const throughTheEditor = (properties: string): Run => {
+    const run = parseRun(
+      parseOne(`<w:r xmlns:w="${W}"><w:rPr>${properties}</w:rPr><w:t>x</w:t></w:r>`),
+      null,
+      null,
+    );
+    const source = {
+      package: {
+        document: { content: [{ type: "paragraph", content: [run] } satisfies Paragraph] },
+      },
+    } as unknown as Document;
+    const rebuilt = fromProseDoc(toProseDoc(source), source);
+    const paragraph = rebuilt.package.document.content.at(0);
+    if (paragraph?.type !== "paragraph") {
+      throw new Error("the projection produced no paragraph");
+    }
+    const saved = paragraph.content.find((item): item is Run => item.type === "run");
+    if (!saved) {
+      throw new Error("the projection produced no run");
+    }
+    return saved;
+  };
+
+  test("a child the reader took nothing from comes back off the identity mark", () => {
+    const saved = throughTheEditor(UNREAD_CHILDREN.join(""));
+
+    expect(serializeRun(saved)).toBe(
+      serializeRun(
+        parseRun(
+          parseOne(
+            `<w:r xmlns:w="${W}"><w:rPr>${UNREAD_CHILDREN.join("")}</w:rPr><w:t>x</w:t></w:r>`,
+          ),
+          null,
+          null,
+        ),
+      ),
+    );
+  });
+
+  test("a run whose properties the reader took whole mints no identity", () => {
+    // The mark is minted only when a run has something to carry, so a fully
+    // modelled run costs the editor nothing: no mark, no attrs, no delta.
+    const saved = throughTheEditor("<w:b/><w:i/>");
+
+    expect(saved.formatting?.preserved).toBeUndefined();
+    expect(saved.preservedAttributes).toBeUndefined();
   });
 });
