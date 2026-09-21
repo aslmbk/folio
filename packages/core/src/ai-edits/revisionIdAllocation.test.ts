@@ -21,6 +21,7 @@ import { applyFolioAIEditOperations } from "./apply";
 import { FolioDocxReviewer } from "./headless";
 import { getTrackedChangesFromDoc } from "./read";
 import { createFolioAIEditSnapshot, createFolioAITextRangeHandle } from "./snapshot";
+import { paragraphNumberingReferenceId } from "@stll/docx-core/model";
 
 const INSERTION_RESERVATION_CASES = [
   {
@@ -50,7 +51,8 @@ const INSERTION_RESERVATION_CASES = [
 
 const insertionView = (formatting: ParagraphFormatting, text = "Anchor paragraph.") => {
   const document = createEmptyDocument();
-  if (formatting.numPr?.numId !== undefined) {
+  const referencedNumId = paragraphNumberingReferenceId(formatting.numPr);
+  if (referencedNumId !== undefined) {
     document.package.numbering = {
       abstractNums: [
         {
@@ -61,7 +63,7 @@ const insertionView = (formatting: ParagraphFormatting, text = "Anchor paragraph
           ],
         },
       ],
-      nums: [{ numId: formatting.numPr.numId, abstractNumId: 0 }],
+      nums: [{ numId: referencedNumId, abstractNumId: 0 }],
     };
   }
   document.package.document.content = [
@@ -155,7 +157,7 @@ const SAME_ANCHOR_RESOLUTION_DECISIONS = [
 
 const EMPTY_CARRIER_FORMATTING = {
   styleId: "Heading2",
-  numPr: { numId: 1, ilvl: 1 },
+  numPr: { kind: "reference", numId: 1, ilvl: 1 },
   alignment: "both",
 } as const satisfies ParagraphFormatting;
 

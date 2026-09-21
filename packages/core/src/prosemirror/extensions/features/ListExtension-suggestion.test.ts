@@ -2,9 +2,20 @@ import { describe, test, expect } from "bun:test";
 import { Schema } from "prosemirror-model";
 import { EditorState, TextSelection } from "prosemirror-state";
 
+import { parseNumbering } from "../../../docx/numberingParser";
 import { acceptChange, rejectChange } from "../../commands/comments";
+import { createDocumentNumberingPlugin } from "../../plugins/documentNumbering";
 import { createSuggestionModePlugin } from "../../plugins/suggestionMode";
 import { toggleBulletList } from "./ListExtension";
+
+const BULLET_NUMBERING = parseNumbering(`
+  <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:abstractNum w:abstractNumId="1">
+      <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+    </w:abstractNum>
+    <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+  </w:numbering>
+`);
 
 const schema = new Schema({
   nodes: {
@@ -65,7 +76,7 @@ describe("ListExtension suggestion mode integration", () => {
 
     // Paragraph should now have numPr set, and also _propertyChanges set!
     const updatedPara = state.doc.child(0);
-    expect(updatedPara.attrs.numPr).toEqual({ numId: 1, ilvl: 0 });
+    expect(updatedPara.attrs.numPr).toEqual({ kind: "reference", numId: 1, ilvl: 0 });
 
     expect(updatedPara.attrs._propertyChanges).not.toBeNull();
     expect(updatedPara.attrs._propertyChanges.length).toBe(1);
@@ -125,7 +136,7 @@ describe("ListExtension suggestion mode integration", () => {
 
     // After accept, list properties should remain but _propertyChanges should be cleared
     para = state.doc.child(0);
-    expect(para.attrs.numPr).toEqual({ numId: 1, ilvl: 0 });
+    expect(para.attrs.numPr).toEqual({ kind: "reference", numId: 1, ilvl: 0 });
     expect(para.attrs._propertyChanges).toBeNull();
   });
 
@@ -172,14 +183,14 @@ describe("ListExtension suggestion mode integration", () => {
         schema.node(
           "paragraph",
           {
-            numPr: { numId: 1, ilvl: 0 },
+            numPr: { kind: "reference", numId: 1, ilvl: 0 },
             listIsBullet: true,
             listMarker: "bullet",
           },
           [schema.text("Hello")],
         ),
       ]),
-      plugins: [plugin],
+      plugins: [plugin, createDocumentNumberingPlugin(BULLET_NUMBERING.definitions)],
     });
 
     const sel = TextSelection.create(state.doc, 3);
@@ -202,7 +213,7 @@ describe("ListExtension suggestion mode integration", () => {
     expect(rejected).toBe(true);
 
     para = state.doc.child(0);
-    expect(para.attrs.numPr).toEqual({ numId: 1, ilvl: 0 });
+    expect(para.attrs.numPr).toEqual({ kind: "reference", numId: 1, ilvl: 0 });
     expect(para.attrs.listIsBullet).toBe(true);
     expect(para.attrs.listMarker).toBe("bullet");
     expect(para.attrs._propertyChanges).toBeNull();
@@ -219,7 +230,7 @@ describe("ListExtension suggestion mode integration", () => {
         schema.node(
           "paragraph",
           {
-            numPr: { numId: 1, ilvl: 0 },
+            numPr: { kind: "reference", numId: 1, ilvl: 0 },
             listIsBullet: true,
             _propertyChanges: [
               {

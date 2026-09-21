@@ -13,7 +13,7 @@ import { toProseDoc } from "../../conversion/toProseDoc";
 import { LIST_RENDERING_ATTR_KEYS } from "../../listMarker";
 import { createDocumentNumberingPlugin } from "../../plugins/documentNumbering";
 import { schema } from "../../schema";
-import { ListExtension, toggleNumberedList } from "./ListExtension";
+import { ListExtension, toggleBulletList, toggleNumberedList } from "./ListExtension";
 
 const syntheticNumberedDocument = (): Document => ({
   package: {
@@ -21,7 +21,7 @@ const syntheticNumberedDocument = (): Document => ({
       content: [
         {
           type: "paragraph",
-          formatting: { numPr: { numId: 23, ilvl: 3 } },
+          formatting: { numPr: { kind: "reference", numId: 23, ilvl: 3 } },
           content: [
             {
               type: "run",
@@ -66,6 +66,45 @@ const MULTILEVEL_NUMBERING = parseNumbering(`
   </w:numbering>
 `);
 
+const SWAPPED_TOOLBAR_NUMBERING = parseNumbering(`
+  <w:numbering ${W}>
+    <w:abstractNum w:abstractNumId="1">
+      <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+    </w:abstractNum>
+    <w:abstractNum w:abstractNumId="2">
+      <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>
+    </w:abstractNum>
+    <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+    <w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num>
+  </w:numbering>
+`);
+
+const swappedToolbarState = (numId: number): EditorState => {
+  const listRendering = computeListRendering({ numId, ilvl: 0 }, SWAPPED_TOOLBAR_NUMBERING);
+  if (!listRendering) {
+    return panic("Synthetic toolbar numbering did not contain its target level");
+  }
+  const document: Document = {
+    package: {
+      numbering: SWAPPED_TOOLBAR_NUMBERING.definitions,
+      document: {
+        content: [
+          {
+            type: "paragraph",
+            formatting: { numPr: { kind: "reference", numId, ilvl: 0 } },
+            listRendering,
+            content: [{ type: "run", content: [{ type: "text", text: "Imported list" }] }],
+          },
+        ],
+      },
+    },
+  };
+  return EditorState.create({
+    doc: toProseDoc(document),
+    plugins: [createDocumentNumberingPlugin(SWAPPED_TOOLBAR_NUMBERING.definitions)],
+  });
+};
+
 const multilevelDocument = (level: number): Document => {
   const listRendering = computeListRendering({ numId: 23, ilvl: level }, MULTILEVEL_NUMBERING);
   if (!listRendering) {
@@ -78,7 +117,7 @@ const multilevelDocument = (level: number): Document => {
         content: [
           {
             type: "paragraph",
-            formatting: { numPr: { numId: 23, ilvl: level } },
+            formatting: { numPr: { kind: "reference", numId: 23, ilvl: level } },
             content: [
               {
                 type: "run",
@@ -107,7 +146,7 @@ const styleNumberedDocument = (): Document => ({
         {
           styleId: "SyntheticClause",
           type: "paragraph",
-          pPr: { numPr: { numId: 23, ilvl: 1 } },
+          pPr: { numPr: { kind: "reference", numId: 23, ilvl: 1 } },
         },
       ],
     },
@@ -134,6 +173,40 @@ const listMarkers = (state: EditorState): string[] =>
   );
 
 describe("ListExtension Enter numbering", () => {
+  test("toolbar intent, not a conventional id, selects and toggles imported list kinds", () => {
+    let numbered = swappedToolbarState(1);
+    expect(
+      toggleBulletList(numbered, (transaction) => {
+        numbered = numbered.apply(transaction);
+      }),
+    ).toBe(true);
+    expect(numbered.doc.firstChild?.attrs["numPr"]).toEqual({
+      kind: "reference",
+      numId: 2,
+      ilvl: 0,
+    });
+
+    let bullet = swappedToolbarState(2);
+    expect(
+      toggleNumberedList(bullet, (transaction) => {
+        bullet = bullet.apply(transaction);
+      }),
+    ).toBe(true);
+    expect(bullet.doc.firstChild?.attrs["numPr"]).toEqual({
+      kind: "reference",
+      numId: 1,
+      ilvl: 0,
+    });
+
+    let sameBullet = swappedToolbarState(2);
+    expect(
+      toggleBulletList(sameBullet, (transaction) => {
+        sameBullet = sameBullet.apply(transaction);
+      }),
+    ).toBe(true);
+    expect(sameBullet.doc.firstChild?.attrs["numPr"]).toBeNull();
+  });
+
   test("advances an imported marker from its source template", () => {
     let state = EditorState.create({ doc: toProseDoc(syntheticNumberedDocument()) });
     const paragraph = state.doc.firstChild;
@@ -191,7 +264,9 @@ describe("ListExtension Enter numbering", () => {
     });
 
     expect(listMarkers(refreshedState)).toHaveLength(1);
-    expect(refreshedState.doc.lastChild?.attrs["numPr"]).toEqual({ numId: 0, ilvl: 1 });
+    // A cancellation states no level: `w:numId 0` names no definition to be at
+    // a level of, and the union has no field to keep one in.
+    expect(refreshedState.doc.lastChild?.attrs["numPr"]).toEqual({ kind: "none" });
     const lastParagraphStart = refreshedState.doc.firstChild?.nodeSize;
     if (lastParagraphStart === undefined) {
       return panic("Synthetic document lost its first paragraph");
@@ -266,7 +341,7 @@ describe("ListExtension Enter numbering", () => {
             content: [
               {
                 ...syntheticNumberedDocument().package.document.content[0],
-                formatting: { numPr: { numId: 23, ilvl: 0 } },
+                formatting: { numPr: { kind: "reference", numId: 23, ilvl: 0 } },
               },
             ],
           },
@@ -321,7 +396,7 @@ describe("ListExtension Enter numbering", () => {
     if (!attrs) {
       return panic("Synthetic document did not contain its paragraph");
     }
-    expect(attrs["numPr"]).toEqual({ numId: 23, ilvl: target });
+    expect(attrs["numPr"]).toEqual({ kind: "reference", numId: 23, ilvl: target });
     if (target === 1) {
       expect(attrs).toMatchObject({
         listMarkerTemplate: "(%2)",
@@ -403,7 +478,7 @@ describe("ListExtension Enter numbering", () => {
 
     expect(result.skipped).toEqual([]);
     expect(view.state.doc.firstChild?.attrs).toMatchObject({
-      numPr: { numId: 23, ilvl: 1 },
+      numPr: { kind: "reference", numId: 23, ilvl: 1 },
       listMarkerTemplate: "(%2)",
       listNumFmt: "lowerLetter",
       listStartOverride: 3,
@@ -489,7 +564,7 @@ describe("ListExtension Enter numbering", () => {
 
     expect(result.skipped).toEqual([]);
     expect(view.state.doc.firstChild?.attrs).toMatchObject({
-      numPr: { numId: 23, ilvl: 0 },
+      numPr: { kind: "reference", numId: 23, ilvl: 0 },
       listMarker: "%1.",
       listMarkerTemplate: "%1.",
       listNumFmt: "decimal",
@@ -524,7 +599,7 @@ describe("ListExtension Enter numbering", () => {
 
     expect(result.skipped).toEqual([]);
     expect(view.state.doc.child(1).attrs).toMatchObject({
-      numPr: { numId: 23, ilvl: 1 },
+      numPr: { kind: "reference", numId: 23, ilvl: 1 },
       listMarkerTemplate: "(%2)",
       listNumFmt: "lowerLetter",
       listStartOverride: 3,

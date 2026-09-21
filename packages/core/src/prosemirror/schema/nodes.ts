@@ -8,6 +8,7 @@
 
 import type { FloatingTableProperties, TableLook } from "../../types";
 import type {
+  OutlineLevel,
   ParagraphAlignment,
   ParagraphFormatting,
   ParagraphMarkChange,
@@ -56,6 +57,7 @@ import type {
 } from "../../types/document";
 import type { OutlineStyleAttr } from "../../types/documentEnumValues";
 import type { SpacingExplicit } from "../../types/formatting";
+import type { ParagraphNumberingAttr } from "../numberingAttr";
 import type { ParagraphDirection } from "../paragraphDirection";
 import type { TrackedChangeProvenance } from "./marks";
 
@@ -178,10 +180,11 @@ export type ParagraphAttrs = {
   hangingIndent?: boolean;
 
   // List properties
-  numPr?: {
-    numId?: number;
-    ilvl?: number;
-  };
+  /**
+   * The stated `w:numPr` (17.3.1.19), as the model carries it. Minted by
+   * `paragraphNumberingAttr`, so a model value cannot land here unconverted.
+   */
+  numPr?: ParagraphNumberingAttr;
   /**
    * The style-sourced numPr value when `numPr` came from the paragraph
    * style rather than direct formatting. While `numPr` still equals this,
@@ -190,10 +193,7 @@ export type ParagraphAttrs = {
    * commands that change `numPr` make the values diverge, which re-enables
    * direct serialization — no explicit clearing needed.
    */
-  numPrFromStyle?: {
-    numId?: number;
-    ilvl?: number;
-  };
+  numPrFromStyle?: ParagraphNumberingAttr;
   /** List number format (decimal, lowerRoman, upperRoman, etc.) for CSS counter styling */
   listNumFmt?: CounterFormat;
   /** Whether this is a bullet list */
@@ -291,8 +291,8 @@ export type ParagraphAttrs = {
    */
   direction?: ParagraphDirection | null;
 
-  // Outline level for TOC (0-9)
-  outlineLevel?: number;
+  /** The stated `w:outlineLvl`, style-resolved: a heading level or body text. */
+  outlineLevel?: OutlineLevel;
 
   // Bookmarks on this paragraph (for TOC anchors, cross-references)
   bookmarks?: { id: number; name: string }[];
@@ -381,6 +381,23 @@ export type ParagraphAttrs = {
 };
 
 /**
+ * A partial write over a paragraph's attrs: every key carries its own attr
+ * type, or the attr's absent state. Which spelling that is belongs to the
+ * node spec's per-attr `default` (`null` for most, `undefined` for a few,
+ * `alignmentFromStyle` among them), so both are admitted here.
+ *
+ * Derived from {@link ParagraphAttrs} rather than hand-listed, so an attr
+ * added to the node spec is writable without a second edit, and a producer
+ * that assembles a patch is held to each attr's type. `numPr` is the reason
+ * it exists: a patch typed `Record<string, unknown>` can store a raw
+ * `ParagraphNumberingOverride` there, which is exactly what the
+ * {@link ParagraphNumberingAttr} brand makes impossible.
+ */
+export type ParagraphAttrsPatch = {
+  [K in keyof ParagraphAttrs]?: ParagraphAttrs[K] | null | undefined;
+};
+
+/**
  * ProseMirror property-change attrs may also carry the editor's list-marker
  * snapshot fields alongside the canonical paragraph formatting fields.
  * Keeping that shape typed here lets layout consume validated attrs directly.
@@ -395,7 +412,10 @@ export type ParagraphPropertyChangeAttrs = Omit<
     suggestionId?: string | null;
   };
   previousFormatting?: Omit<ParagraphFormatting, "numPr"> & {
-    numPr?: ParagraphFormatting["numPr"] | null;
+    // The attr, not the model field: what a list command records here is the
+    // attr it replaced. `null` is the third state and means the paragraph
+    // carried no numbering before the change.
+    numPr?: ParagraphAttrs["numPr"] | null;
   } & Partial<
       Pick<
         ParagraphAttrs,

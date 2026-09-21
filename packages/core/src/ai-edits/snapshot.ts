@@ -15,6 +15,12 @@ import {
   expectRunFormattingOverrideMarkAttrs,
 } from "../prosemirror/attrs";
 import { marksToTextFormatting } from "../prosemirror/conversion/fromProseDoc";
+import {
+  type ResolvedParagraphNumbering,
+  resolveParagraphNumbering,
+} from "../docx/numberingReference";
+import { paragraphNumberingAttr, readParagraphNumberingAttr } from "../prosemirror/numberingAttr";
+import { readOutlineLevelAttr } from "../prosemirror/outlineLevelAttr";
 import { directParagraphAlignment } from "../prosemirror/paragraphAlignment";
 import { directParagraphIndentation } from "../prosemirror/paragraphIndentation";
 import { directParagraphSpacing } from "../prosemirror/paragraphSpacing";
@@ -84,20 +90,19 @@ export const remapFolioAIEditSnapshotNumberingReferences = (
   }
   const metadata = metadataOf(snapshot);
   const remapNode = (node: PMNode): PMNode => {
-    const numPr: unknown = node.attrs["numPr"];
-    if (typeof numPr !== "object" || numPr === null || !("numId" in numPr)) {
+    const numPr = readParagraphNumberingAttr(node.attrs["numPr"]);
+    if (numPr?.kind !== "reference") {
       return node;
     }
-    const numId = numPr.numId;
-    if (typeof numId !== "number") {
-      return node;
-    }
-    const remappedNumId = numIdMap.get(numId);
+    const remappedNumId = numIdMap.get(numPr.numId);
     if (remappedNumId === undefined) {
       return node;
     }
     return recreateProseNodeWithParagraphPropertySource(node, {
-      attrs: { ...node.attrs, numPr: { ...numPr, numId: remappedNumId } },
+      attrs: {
+        ...node.attrs,
+        numPr: paragraphNumberingAttr({ ...numPr, numId: remappedNumId }),
+      },
     });
   };
   const remapped = remapDocument(metadata.sourceDocument, remapNode);
@@ -762,11 +767,10 @@ const getBlockKind = (node: PMNode, headingLevel: number | undefined): FolioAIBl
 
 /** The block's 1-based heading level, as {@link resolveHeadingLevel} classifies it. */
 const getHeadingLevel = (node: PMNode, styles: BuiltInStyleIndex): number | undefined => {
-  const outlineLevel: unknown = node.attrs["outlineLevel"];
   const styleId: unknown = node.attrs["styleId"];
   const level = resolveHeadingLevel(
     {
-      outlineLevel: typeof outlineLevel === "number" ? outlineLevel : null,
+      outlineLevel: readOutlineLevelAttr(node.attrs["outlineLevel"]),
       styleId: typeof styleId === "string" ? styleId : null,
     },
     styles,
@@ -792,44 +796,40 @@ const getDisplayLabel = (node: PMNode, isHeading: boolean): string | undefined =
   return undefined;
 };
 
+/**
+ * The level the paragraph's `<w:numPr>` states, and only that. An absent
+ * `w:ilvl` renders as level zero but is not a stated zero, and a caller that
+ * writes it back would turn an untouched paragraph into one stating a level
+ * its source never did.
+ */
 const getListLevel = (node: PMNode): number | undefined => {
-  const numPr: unknown = node.attrs["numPr"];
-  if (typeof numPr !== "object" || numPr === null || !("ilvl" in numPr)) {
-    return undefined;
-  }
-  const { ilvl } = numPr;
-  return typeof ilvl === "number" && Number.isInteger(ilvl) && ilvl >= 0 ? ilvl : undefined;
+  const numPr = readParagraphNumberingAttr(node.attrs["numPr"]);
+  return numPr === null || numPr.kind === "none" ? undefined : numPr.ilvl;
 };
 
+/**
+ * The numbering a paragraph attr states, read through the model's own reader.
+ *
+ * The two functions below used to test the reserved id relationally
+ * (`numId > 0`, `numId <= 0`), which is the one spelling that disagreed with
+ * the other four: a malformed package's negative id is a dangling reference
+ * everywhere else and "not numbered" here.
+ */
+const statedNumbering = (node: PMNode): ResolvedParagraphNumbering =>
+  resolveParagraphNumbering(readParagraphNumberingAttr(node.attrs["numPr"]) ?? undefined);
+
 const getListReference = (node: PMNode): FolioAIBlock["listReference"] | undefined => {
-  const numPr: unknown = node.attrs["numPr"];
-  if (typeof numPr !== "object" || numPr === null || !("numId" in numPr)) return undefined;
-  const { numId } = numPr;
-  const level = "ilvl" in numPr ? numPr.ilvl : 0;
-  return typeof numId === "number" &&
-    Number.isInteger(numId) &&
-    numId > 0 &&
-    typeof level === "number" &&
-    Number.isInteger(level) &&
-    level >= 0
-    ? { numId, level }
+  const numbering = statedNumbering(node);
+  return numbering.kind === "reference"
+    ? { numId: numbering.numId, level: numbering.ilvl }
     : undefined;
 };
 
 const getNumberingReferenceKey = (node: PMNode): string | null => {
-  const numPr: unknown = node.attrs["numPr"];
-  if (typeof numPr !== "object" || numPr === null || !("numId" in numPr)) {
-    return null;
-  }
-  const { numId } = numPr;
-  if (typeof numId !== "number" || !Number.isInteger(numId) || numId <= 0) {
-    return null;
-  }
-  const level = "ilvl" in numPr ? numPr.ilvl : undefined;
-  if (level !== undefined && (typeof level !== "number" || !Number.isInteger(level) || level < 0)) {
-    return null;
-  }
-  return `${String(numId)}:${String(level ?? 0)}`;
+  const numbering = statedNumbering(node);
+  return numbering.kind === "reference"
+    ? `${String(numbering.numId)}:${String(numbering.ilvl)}`
+    : null;
 };
 
 const getStyleId = (node: PMNode): string | undefined => {

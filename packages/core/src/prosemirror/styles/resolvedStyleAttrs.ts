@@ -14,13 +14,14 @@ import {
   numberingLevelHasMarkerSlot,
   type NumberingMap,
 } from "../../docx/numberingParser";
-import { isNumberingReference } from "../../docx/numberingReference";
 import { tableOfContentsStyleLevel } from "../../utils/tableOfContentsStyle";
+import { paragraphNumberingReference } from "../../docx/numberingReference";
 import { setAutospacingBaseValue } from "../autospacingBase";
 import { CLEARED_LIST_RENDERING_ATTRS } from "../listMarker";
 import { styleResolvedParagraphFormatting } from "../paragraphFormattingProvenance";
 import { listRenderingAttrPatch } from "../listRenderingAttrs";
-import type { ParagraphAttrs } from "../schema/nodes";
+import { paragraphNumberingAttr } from "../numberingAttr";
+import type { ParagraphAttrs, ParagraphAttrsPatch } from "../schema/nodes";
 import type { ResolvedParagraphStyle } from "./styleResolver";
 
 type ResolvedStyleIdentity = {
@@ -37,7 +38,7 @@ type ResolvedStyleIdentity = {
 export function paragraphAttrsFromResolvedStyle(
   resolved: ResolvedParagraphStyle,
   identity: ResolvedStyleIdentity,
-): Record<string, unknown> {
+): ParagraphAttrsPatch {
   const ppr = resolved.paragraphFormatting;
   const runFormatting = resolved.runFormatting;
   const hasRunFormatting = !!runFormatting && Object.keys(runFormatting).length > 0;
@@ -111,17 +112,18 @@ function autospacingBaseFromResolvedParagraphFormatting(
 export function listAttrsFromResolvedStyle(
   resolved: ResolvedParagraphStyle,
   numbering: NumberingMap | null | undefined,
-): Record<string, unknown> | null {
+): ParagraphAttrsPatch | null {
   const numPr = resolved.paragraphFormatting?.numPr;
-  if (!numPr || !isNumberingReference(numPr.numId)) {
+  if (numPr?.kind !== "reference") {
     return null;
   }
 
-  const attrs = listAttrsFromNumbering({ numId: numPr.numId, ilvl: numPr.ilvl ?? 0 }, numbering);
-  const level = numbering?.getLevel(numPr.numId, numPr.ilvl ?? 0);
+  const { numId, ilvl = 0 } = numPr;
+  const attrs = listAttrsFromNumbering({ numId, ilvl }, numbering);
+  const level = numbering?.getLevel(numId, ilvl);
   // The numbering belongs to the style — mark it so a save doesn't
   // materialize a direct <w:numPr> (see ParagraphAttrs.numPrFromStyle).
-  attrs["numPrFromStyle"] = { numId: numPr.numId, ilvl: numPr.ilvl ?? 0 };
+  attrs.numPrFromStyle = paragraphNumberingAttr(paragraphNumberingReference({ numId, ilvl }));
 
   // The numbering level's own indents apply beneath the style's (ECMA-376
   // numbering pPr sits below the style in the cascade) — use them only where
@@ -129,16 +131,16 @@ export function listAttrsFromResolvedStyle(
   const ppr = resolved.paragraphFormatting;
   if (level?.pPr) {
     if (ppr?.indentLeft === undefined && level.pPr.indentLeft !== undefined) {
-      attrs["indentLeft"] = level.pPr.indentLeft;
+      attrs.indentLeft = level.pPr.indentLeft;
     }
     const styleHasFirstLine =
       ppr?.indentFirstLine !== undefined || ppr?.hangingIndent !== undefined;
     if (!styleHasFirstLine && numberingLevelHasMarkerSlot(level)) {
       if (level.pPr.indentFirstLine !== undefined) {
-        attrs["indentFirstLine"] = level.pPr.indentFirstLine;
+        attrs.indentFirstLine = level.pPr.indentFirstLine;
       }
       if (level.pPr.hangingIndent !== undefined) {
-        attrs["hangingIndent"] = level.pPr.hangingIndent;
+        attrs.hangingIndent = level.pPr.hangingIndent;
       }
     }
   }
@@ -150,12 +152,12 @@ export function listAttrsFromResolvedStyle(
 export function listAttrsFromNumbering(
   numPr: { numId: number; ilvl: number },
   numbering: NumberingMap | null | undefined,
-): Record<string, unknown> {
+): ParagraphAttrsPatch {
   const targetNumPr = { numId: numPr.numId, ilvl: numPr.ilvl };
   const rendering = numbering ? computeListRendering(targetNumPr, numbering) : null;
   return {
     ...CLEARED_LIST_RENDERING_ATTRS,
-    numPr: targetNumPr,
+    numPr: paragraphNumberingAttr(paragraphNumberingReference(targetNumPr)),
     ...(rendering && listRenderingAttrPatch(rendering)),
   };
 }
@@ -165,7 +167,7 @@ export function listLevelAttrPatch(
   attrs: { listImplicitChildLevelAdvances?: number | null },
   numPr: { numId: number; ilvl: number },
   numbering: NumberingMap | null | undefined,
-): Record<string, unknown> {
+): ParagraphAttrsPatch {
   const level = numbering?.getLevel(numPr.numId, numPr.ilvl);
   const hasMarkerSlot = level ? numberingLevelHasMarkerSlot(level) : false;
   return {

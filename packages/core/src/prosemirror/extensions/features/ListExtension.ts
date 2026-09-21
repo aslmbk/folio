@@ -16,14 +16,26 @@ import {
 } from "../../commands/propertyChangeScope";
 import { makeRevisionInfo, SUGGESTION_META } from "../../plugins/suggestionMode";
 import { CLEARED_LIST_RENDERING_ATTRS, LIST_RENDERING_ATTR_KEYS } from "../../listMarker";
+import { isBulletLevel } from "../../../docx/numberingParser";
 import { getDocumentNumbering } from "../../plugins/documentNumbering";
-import { isNumberingReference, NO_NUMBERING_NUM_ID } from "../../../docx/numberingReference";
+import {
+  NO_PARAGRAPH_NUMBERING,
+  paragraphNumberingLevel,
+  paragraphNumberingReference,
+  paragraphNumberingReferenceId,
+} from "../../../docx/numberingReference";
+import { resolveListState, type ListType } from "../../listState";
+import { paragraphNumberingAttr, type ParagraphNumberingAttr } from "../../numberingAttr";
 import { listLevelAttrPatch } from "../../styles/resolvedStyleAttrs";
 import { createExtension } from "../create";
 import { goToNextCell, goToPrevCell } from "../nodes/TableExtension";
 import { Priority } from "../types";
 import type { ExtensionRuntime } from "../types";
-import type { ParagraphAttrs, ParagraphPropertyChangeAttrs } from "../../schema/nodes";
+import type {
+  ParagraphAttrs,
+  ParagraphAttrsPatch,
+  ParagraphPropertyChangeAttrs,
+} from "../../schema/nodes";
 
 // ============================================================================
 // CHAIN COMMANDS HELPER
@@ -85,10 +97,14 @@ function getPreviousListFormatting(attrs: Record<string, unknown>): Record<strin
 }
 
 function clearListAttrs(attrs: ParagraphAttrs): Record<string, unknown> {
-  const styleNumPr = attrs.numPrFromStyle;
-  const numPr = isNumberingReference(styleNumPr?.numId)
-    ? { numId: NO_NUMBERING_NUM_ID, ilvl: attrs.numPr?.ilvl ?? styleNumPr?.ilvl ?? 0 }
-    : null;
+  // A style supplies the numbering this paragraph is leaving, so the paragraph
+  // has to state the cancellation itself — deleting the attr would uncover the
+  // style tier and hand the numbering straight back. A cancellation states no
+  // level (17.9.18: there is no id left for a level to belong to).
+  const numPr =
+    paragraphNumberingReferenceId(attrs.numPrFromStyle) === undefined
+      ? null
+      : paragraphNumberingAttr(NO_PARAGRAPH_NUMBERING);
 
   return {
     ...attrs,
@@ -98,18 +114,47 @@ function clearListAttrs(attrs: ParagraphAttrs): Record<string, unknown> {
 }
 
 type ActiveListParagraphAttrs = ParagraphAttrs & {
-  numPr: NonNullable<ParagraphAttrs["numPr"]> & { numId: number };
+  numPr: Extract<ParagraphNumberingAttr, { kind: "reference" }>;
 };
 
 function hasActiveListNumbering(attrs: ParagraphAttrs): attrs is ActiveListParagraphAttrs {
-  return isNumberingReference(attrs.numPr?.numId);
+  return attrs.numPr?.kind === "reference";
 }
 
 // ============================================================================
 // LIST COMMANDS
 // ============================================================================
 
-function toggleList(numId: number): Command {
+/**
+ * The numbering instances Folio mints for its own toolbar lists. They are the
+ * ids the autoformat rules and the list buttons create; a document Folio did
+ * not create numbers its lists however its author did, which is why nothing
+ * reads a list's kind off its id any more.
+ */
+const FOLIO_BULLET_NUM_ID = 1;
+const FOLIO_NUMBERED_NUM_ID = 2;
+
+type ActiveListType = Exclude<ListType, "none">;
+
+const targetNumIdForIntent = (
+  numbering: ReturnType<typeof getDocumentNumbering>,
+  preferredNumId: number,
+  ilvl: number,
+  intent: ActiveListType,
+): number => {
+  const matchesIntent = (numId: number): boolean => {
+    const level = numbering?.getLevel(numId, ilvl) ?? null;
+    return level !== null && (isBulletLevel(level) ? "bullet" : "numbered") === intent;
+  };
+  if (matchesIntent(preferredNumId)) {
+    return preferredNumId;
+  }
+  return (
+    numbering?.definitions.nums.find(({ numId }) => matchesIntent(numId))?.numId ?? preferredNumId
+  );
+};
+
+function toggleList(numId: number, intent: ActiveListType): Command {
   return (state, dispatch) => {
     const { $from, $to } = state.selection;
 
@@ -118,8 +163,9 @@ function toggleList(numId: number): Command {
       return false;
     }
 
-    const currentNumPr = paragraph.attrs["numPr"];
-    const isInSameList = currentNumPr?.numId === numId;
+    const numbering = getDocumentNumbering(state);
+    const isInSameList =
+      resolveListState(numbering, expectParagraphAttrs(paragraph).numPr).type === intent;
 
     const rev = makeRevisionInfo(state);
     if (rev) {
@@ -143,6 +189,10 @@ function toggleList(numId: number): Command {
       return true;
     }
 
+    // Which kind of list this id names comes from the numbering definitions,
+    // not from the id: `numId === 1` meant bullets only in a document Folio
+    // had created itself. A document that defines no such level has nothing to
+    // read, and the command is then the only statement of what it is creating.
     let tr = state.tr;
     const seen = new Set<number>();
 
@@ -155,13 +205,18 @@ function toggleList(numId: number): Command {
         if (isInSameList) {
           nextAttrs = clearListAttrs(expectParagraphAttrs(node));
         } else {
-          const isBullet = numId === 1;
+          const ilvl = paragraphNumberingLevel(expectParagraphAttrs(node).numPr) ?? 0;
+          const targetNumId = targetNumIdForIntent(numbering, numId, ilvl, intent);
+          const definition = numbering?.getLevel(targetNumId, ilvl) ?? null;
+          const isBullet = definition === null ? intent === "bullet" : isBulletLevel(definition);
           nextAttrs = {
             ...node.attrs,
             ...CLEARED_LIST_RENDERING_ATTRS,
-            numPr: { numId, ilvl: node.attrs["numPr"]?.ilvl || 0 },
+            numPr: paragraphNumberingAttr(
+              paragraphNumberingReference({ numId: targetNumId, ilvl }),
+            ),
             listIsBullet: isBullet,
-            listNumFmt: isBullet ? null : "decimal",
+            listNumFmt: isBullet ? null : (definition?.numFmt ?? "decimal"),
           };
         }
 
@@ -188,15 +243,17 @@ function toggleList(numId: number): Command {
   };
 }
 
-export const toggleBulletList: Command = (state, dispatch) => toggleList(1)(state, dispatch);
+export const toggleBulletList: Command = (state, dispatch) =>
+  toggleList(FOLIO_BULLET_NUM_ID, "bullet")(state, dispatch);
 
-export const toggleNumberedList: Command = (state, dispatch) => toggleList(2)(state, dispatch);
+export const toggleNumberedList: Command = (state, dispatch) =>
+  toggleList(FOLIO_NUMBERED_NUM_ID, "numbered")(state, dispatch);
 
 const attrsForListLevel = (
   state: EditorState,
   attrs: ParagraphAttrs,
   level: number,
-): Record<string, unknown> => {
+): ParagraphAttrsPatch => {
   if (!hasActiveListNumbering(attrs)) {
     panic("Cannot change the level of a list without a numbering id");
   }
@@ -222,7 +279,7 @@ const increaseListLevel: Command = (state, dispatch) => {
     return false;
   }
 
-  const currentLevel = attrs.numPr.ilvl || 0;
+  const currentLevel = attrs.numPr.ilvl ?? 0;
   if (currentLevel >= 8) {
     return false;
   }
@@ -256,7 +313,7 @@ const decreaseListLevel: Command = (state, dispatch) => {
     return false;
   }
 
-  const currentLevel = attrs.numPr.ilvl || 0;
+  const currentLevel = attrs.numPr.ilvl ?? 0;
 
   if (!dispatch) {
     return true;
@@ -341,7 +398,7 @@ export function getListInfo(state: EditorState): { numId: number; ilvl: number }
 
   return {
     numId: attrs.numPr.numId,
-    ilvl: attrs.numPr.ilvl || 0,
+    ilvl: attrs.numPr.ilvl ?? 0,
   };
 }
 
@@ -446,14 +503,14 @@ function increaseListIndent(): Command {
     const { $from, $to } = state.selection;
 
     // Collect all list paragraphs in the selection range
-    const positions: { pos: number; attrs: ParagraphAttrs }[] = [];
+    const positions: { pos: number; attrs: ActiveListParagraphAttrs }[] = [];
     state.doc.nodesBetween($from.pos, $to.pos, (node, pos) => {
       if (node.type.name === "paragraph") {
         const attrs = expectParagraphAttrs(node);
         if (!hasActiveListNumbering(attrs)) {
           return;
         }
-        const currentLevel = attrs.numPr?.ilvl ?? 0;
+        const currentLevel = attrs.numPr.ilvl ?? 0;
         if (currentLevel < 8) {
           positions.push({ pos, attrs });
         }
@@ -470,7 +527,7 @@ function increaseListIndent(): Command {
         tr = tr.setNodeMarkup(
           pos,
           undefined,
-          attrsForListLevel(state, attrs, (attrs.numPr?.ilvl ?? 0) + 1),
+          attrsForListLevel(state, attrs, (attrs.numPr.ilvl ?? 0) + 1),
         );
       }
       dispatch(tr);
@@ -484,7 +541,7 @@ function decreaseListIndent(): Command {
     const { $from, $to } = state.selection;
 
     // Collect all list paragraphs in the selection range
-    const positions: { pos: number; attrs: ParagraphAttrs }[] = [];
+    const positions: { pos: number; attrs: ActiveListParagraphAttrs }[] = [];
     state.doc.nodesBetween($from.pos, $to.pos, (node, pos) => {
       if (node.type.name === "paragraph") {
         const attrs = expectParagraphAttrs(node);
@@ -501,7 +558,7 @@ function decreaseListIndent(): Command {
     if (dispatch) {
       let tr = state.tr;
       for (const { pos, attrs } of positions) {
-        const currentLevel = attrs.numPr?.ilvl ?? 0;
+        const currentLevel = attrs.numPr.ilvl ?? 0;
         if (currentLevel <= 0) {
           tr = tr.setNodeMarkup(pos, undefined, {
             ...clearListAttrs(attrs),
@@ -577,7 +634,7 @@ const listAutoformat = (marker: RegExp, toggleCommand: Command): InputRule =>
       return null;
     }
     // Toggling a list that already carries this numbering would remove it.
-    if (expectParagraphAttrs($from.parent).numPr?.numId) {
+    if (paragraphNumberingReferenceId(expectParagraphAttrs($from.parent).numPr) !== undefined) {
       return null;
     }
     // Suggesting mode rewrites typed text as a tracked insertion before any

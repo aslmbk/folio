@@ -7,7 +7,14 @@
 
 import type { Node as PMNode, Mark } from "prosemirror-model";
 import { panic } from "better-result";
-import { statesNoBorder, type UnderlineStyle } from "@stll/docx-core/model";
+import {
+  headingLevelOf,
+  paragraphNumberingLevel,
+  paragraphNumberingReferenceId,
+  sameStatedParagraphNumbering,
+  statesNoBorder,
+  type UnderlineStyle,
+} from "@stll/docx-core/model";
 
 import { convertBulletToUnicode } from "../../docx/bulletMarkers";
 import { resolveDocumentGridLinePitch } from "../../docx/documentGrid";
@@ -43,7 +50,11 @@ import { createStyleEngine } from "../../style-engine";
 import { setHyperlinkInstanceIndex } from "../../layout-engine/measure/hyperlinkInstance";
 import { setTextBoxGroupId } from "../../layout-engine/textBoxGroup";
 import { setParagraphFrame } from "../../layout-engine/paragraphFrame";
-import { DEFAULT_TEXTBOX_MARGINS, DEFAULT_TEXTBOX_WIDTH } from "../../layout-engine/types";
+import {
+  DEFAULT_TEXTBOX_MARGINS,
+  DEFAULT_TEXTBOX_WIDTH,
+  isListNumPr,
+} from "../../layout-engine/types";
 import { normalizeHorizontalScalePercent } from "../../utils/horizontalScale";
 import { STYLE_TOGGLE_KEYS } from "../../utils/textFormattingMerge";
 import { getColumns } from "../sectionColumns";
@@ -1773,21 +1784,8 @@ function isChangedNumberingChange(
     previousFormatting != null &&
     Object.hasOwn(previousFormatting, "numPr") &&
     isListNumPr(previousFormatting.numPr) &&
-    !areListNumPrEqual(previousFormatting.numPr, currentNumPr)
+    !sameStatedParagraphNumbering(previousFormatting.numPr, currentNumPr)
   );
-}
-
-function areListNumPrEqual(
-  left: NonNullable<PMParagraphAttrs["numPr"]>,
-  right: NonNullable<PMParagraphAttrs["numPr"]>,
-): boolean {
-  return left.numId === right.numId && left.ilvl === right.ilvl;
-}
-
-function isListNumPr(
-  value: PMParagraphAttrs["numPr"] | null | undefined,
-): value is NonNullable<PMParagraphAttrs["numPr"]> {
-  return value !== undefined && value !== null;
 }
 
 function toPreviousListAttrs(previousFormatting: ListPropertyFormatting): PMParagraphAttrs {
@@ -2004,7 +2002,7 @@ function convertParagraphAttrs(
     attrs.alignment = resolveFlowAlignment(pmAttrs.alignment, directionIsRtl(pmAttrs.direction));
   }
 
-  if (typeof pmAttrs.outlineLevel === "number") {
+  if (pmAttrs.outlineLevel !== undefined) {
     attrs.outlineLevel = pmAttrs.outlineLevel;
   }
 
@@ -2103,13 +2101,17 @@ function convertParagraphAttrs(
   let indentFirstLine =
     typeof pmAttrs.indentFirstLine === "number" ? pmAttrs.indentFirstLine : undefined;
   let hangingIndent = pmAttrs.hangingIndent;
-  if (pmAttrs.numPr?.numId && indentLeft === undefined && indentFirstLine === undefined) {
+  if (
+    paragraphNumberingReferenceId(pmAttrs.numPr) !== undefined &&
+    indentLeft === undefined &&
+    indentFirstLine === undefined
+  ) {
     // Fallback: calculate indentation based on level
     // An authored first-line or hanging position is already a complete list
     // marker anchor. Adding a synthetic left indent would shift that anchor a
     // second time, while tab stops still resolve from the paragraph margin.
     // Each level indents 0.5 inch (720 twips) more
-    const level = pmAttrs.numPr.ilvl ?? 0;
+    const level = paragraphNumberingLevel(pmAttrs.numPr) ?? 0;
     // Base indentation: 0.5 inch (720 twips) per level
     // Level 0 = 720 twips, Level 1 = 1440 twips, etc.
     indentLeft = (level + 1) * 720;
@@ -2265,14 +2267,7 @@ function convertParagraphAttrs(
     | (ListPropertyChange & { previousFormatting: ListPropertyFormatting })
     | undefined;
   if (pmAttrs.numPr) {
-    const numPr: ParagraphAttrs["numPr"] & object = {};
-    if (pmAttrs.numPr.numId !== undefined) {
-      numPr.numId = pmAttrs.numPr.numId;
-    }
-    if (pmAttrs.numPr.ilvl !== undefined) {
-      numPr.ilvl = pmAttrs.numPr.ilvl;
-    }
-    attrs.numPr = numPr;
+    attrs.numPr = pmAttrs.numPr;
 
     if (pmAttrs.pPrMark?.kind === "del") {
       attrs.listMarkerRevision = toListMarkerRevision("del", pmAttrs.pPrMark.info);
@@ -2820,7 +2815,7 @@ function reserveLeadingEmptyOutlineHeight(blocks: FlowBlock[]): void {
   if (
     firstBlock?.kind !== "paragraph" ||
     firstBlock.runs.length !== 0 ||
-    firstBlock.attrs?.outlineLevel !== 0
+    headingLevelOf(firstBlock.attrs?.outlineLevel) !== 0
   ) {
     return;
   }

@@ -36,7 +36,12 @@ import type {
   InlineWrapper,
   RunContent,
 } from "../types/document";
-import { BIDI_CONTROLS, PARAGRAPH_MARK_CHANGE_KINDS, REVIEW_CARRIERS } from "@stll/docx-core/model";
+import {
+  BIDI_CONTROLS,
+  outlineLevelFromStatedValue,
+  PARAGRAPH_MARK_CHANGE_KINDS,
+  REVIEW_CARRIERS,
+} from "@stll/docx-core/model";
 import { panic } from "better-result";
 import { isValidHexId } from "../utils/hexId";
 import { attributeRemainder } from "./attributeRemainder";
@@ -60,7 +65,12 @@ import {
   numberingLevelHasMarkerSlot,
 } from "./numberingParser";
 import type { NumberingMap } from "./numberingParser";
-import { isNumberingReference } from "./numberingReference";
+import {
+  mergeParagraphNumbering,
+  paragraphNumberingReferenceId,
+  readParagraphNumbering,
+  resolveParagraphNumbering,
+} from "./numberingReference";
 import {
   FrameWrapSchema,
   FrameXAlignSchema,
@@ -108,7 +118,6 @@ import {
   getNamespaceUri,
   mergeXmlnsDeclarations,
   parseBooleanElement,
-  parseNumberingLevelAttribute,
   parseNumericAttribute,
   selectAlternateContentBranch,
   WORDPROCESSINGML_NAMESPACE_URIS,
@@ -612,25 +621,9 @@ export function parseParagraphProperties(
   // === Numbering Properties (List Info) ===
   const numPr = propertyChildren.numPr;
   if (numPr) {
-    const numIdEl = findChild(numPr, "w", "numId");
-    const ilvlEl = findChild(numPr, "w", "ilvl");
-
-    if (numIdEl || ilvlEl) {
-      formatting.numPr = {};
-
-      if (numIdEl) {
-        const val = parseNumericAttribute(numIdEl, "w", "val");
-        if (val !== undefined) {
-          formatting.numPr.numId = val;
-        }
-      }
-
-      if (ilvlEl) {
-        const val = parseNumberingLevelAttribute(ilvlEl);
-        if (val !== undefined) {
-          formatting.numPr.ilvl = val;
-        }
-      }
+    const stated = readParagraphNumbering(numPr);
+    if (stated !== undefined) {
+      formatting.numPr = stated;
     }
 
     // `w:numberingChange` records the numbering the paragraph carried before a
@@ -646,8 +639,9 @@ export function parseParagraphProperties(
   const outlineLvl = propertyChildren.outlineLvl;
   if (outlineLvl) {
     const val = parseNumericAttribute(outlineLvl, "w", "val");
-    if (val !== undefined) {
-      formatting.outlineLevel = val;
+    const level = val === undefined ? undefined : outlineLevelFromStatedValue(val);
+    if (level !== undefined) {
+      formatting.outlineLevel = level;
     }
   }
 
@@ -2216,24 +2210,29 @@ export function parseParagraph(
     paragraphFormatting?.styleId && styles
       ? styles.get(paragraphFormatting.styleId)?.pPr?.numPr
       : undefined;
-  let effectiveNumPr = directNumPr;
   // Drives indent precedence below: true when the numbering REFERENCE came from
-  // the style chain, whether or not the paragraph stated its own level.
-  let numPrFromStyle = false;
-  if (paragraphFormatting && styleNumPr && directNumPr?.numId === undefined) {
-    effectiveNumPr = { ...styleNumPr, ...directNumPr };
-    numPrFromStyle = true;
+  // the style chain, whether or not the paragraph stated its own level. A
+  // paragraph that states an id of its own, the reserved cancellation
+  // included, owns the reference and keeps its own indents.
+  const numPrFromStyle =
+    styleNumPr !== undefined && (directNumPr === undefined || directNumPr.kind === "levelOnly");
+  let effectiveNumPr = directNumPr;
+  if (paragraphFormatting && numPrFromStyle) {
+    effectiveNumPr = mergeParagraphNumbering(styleNumPr, directNumPr);
     // Store it on the paragraph formatting so downstream code sees it, and
     // record the style tier so the serializer can drop a numPr the paragraph
     // never stated — materializing style numbering as direct <w:numPr> flips
     // Word's level-indent precedence on the saved file.
-    paragraphFormatting.numPr = effectiveNumPr;
+    if (effectiveNumPr !== undefined) {
+      paragraphFormatting.numPr = effectiveNumPr;
+    }
     paragraphFormatting.numPrFromStyle = styleNumPr;
   }
 
-  if (effectiveNumPr && numbering) {
-    const { numId, ilvl = 0 } = effectiveNumPr;
-    if (isNumberingReference(numId)) {
+  const resolvedNumbering = resolveParagraphNumbering(effectiveNumPr);
+  if (numbering) {
+    if (resolvedNumbering.kind === "reference") {
+      const { numId, ilvl } = resolvedNumbering;
       const level = numbering.getLevel(numId, ilvl);
       if (level) {
         const levelNumFmts: NonNullable<typeof paragraph.listRendering>["levelNumFmts"] = [];
@@ -2603,7 +2602,7 @@ export function isEmptyParagraph(paragraph: Paragraph): boolean {
  * @returns true if paragraph has numbering properties
  */
 export function isListItem(paragraph: Paragraph): boolean {
-  return isNumberingReference(paragraph.formatting?.numPr?.numId);
+  return paragraphNumberingReferenceId(paragraph.formatting?.numPr) !== undefined;
 }
 
 /**
@@ -2613,10 +2612,8 @@ export function isListItem(paragraph: Paragraph): boolean {
  * @returns List level or undefined if not a list item
  */
 export function getListLevel(paragraph: Paragraph): number | undefined {
-  if (!isListItem(paragraph)) {
-    return undefined;
-  }
-  return paragraph.formatting?.numPr?.ilvl ?? 0;
+  const resolved = resolveParagraphNumbering(paragraph.formatting?.numPr);
+  return resolved.kind === "reference" ? resolved.ilvl : undefined;
 }
 
 /**

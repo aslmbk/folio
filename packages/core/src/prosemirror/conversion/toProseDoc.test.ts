@@ -54,7 +54,7 @@ describe("toProseDoc", () => {
             {
               styleId: "SectionStyle",
               type: "paragraph",
-              pPr: { numPr: { numId: 23, ilvl: 0 } },
+              pPr: { numPr: { kind: "reference", numId: 23, ilvl: 0 } },
             },
           ],
         },
@@ -64,7 +64,7 @@ describe("toProseDoc", () => {
               type: "paragraph",
               formatting: {
                 styleId: "SectionStyle",
-                numPr: { ilvl: 1 },
+                numPr: { kind: "levelOnly", ilvl: 1 },
               },
               content: [{ type: "run", content: [{ type: "text", text: "Section" }] }],
             },
@@ -73,7 +73,11 @@ describe("toProseDoc", () => {
       },
     };
 
-    expect(toProseDoc(document).firstChild?.attrs.numPr).toEqual({ numId: 23, ilvl: 1 });
+    expect(toProseDoc(document).firstChild?.attrs.numPr).toEqual({
+      kind: "reference",
+      numId: 23,
+      ilvl: 1,
+    });
   });
 
   test("keeps a direct numbering identity ahead of the style identity", () => {
@@ -84,7 +88,7 @@ describe("toProseDoc", () => {
             {
               styleId: "SectionStyle",
               type: "paragraph",
-              pPr: { numPr: { numId: 23, ilvl: 0 } },
+              pPr: { numPr: { kind: "reference", numId: 23, ilvl: 0 } },
             },
           ],
         },
@@ -94,7 +98,7 @@ describe("toProseDoc", () => {
               type: "paragraph",
               formatting: {
                 styleId: "SectionStyle",
-                numPr: { numId: 7 },
+                numPr: { kind: "reference", numId: 7 },
               },
               content: [{ type: "run", content: [{ type: "text", text: "Section" }] }],
             },
@@ -104,7 +108,7 @@ describe("toProseDoc", () => {
     };
 
     const attrs = toProseDoc(document).firstChild?.attrs;
-    expect(attrs?.numPr).toEqual({ numId: 7 });
+    expect(attrs?.numPr).toEqual({ kind: "reference", numId: 7 });
     expect(attrs?.numPrFromStyle).toBeNull();
   });
 

@@ -18,13 +18,15 @@ import { Fragment } from "prosemirror-model";
 import {
   isStyleSourcedParagraphNumbering,
   modelParagraphFormattingEmission,
-  sameAuthoredParagraphNumberingReference,
 } from "../../internal/paragraphFormattingSerialization";
 import { joinCommentRangesAcrossParagraphs } from "../../docx/commentRangeJoin";
 import { completeCommentReferences } from "../../docx/commentReferenceCompletion";
 import { isInlineSdtContent } from "../../docx/inlineWrapperContent";
 import { visitDocxParagraphs } from "../../docx/paragraphTraversal";
-import { isNumberingReference } from "../../docx/numberingReference";
+import {
+  paragraphNumberingReferenceId,
+  sameStatedParagraphNumbering,
+} from "../../docx/numberingReference";
 import { DATE_UTC_ATTRIBUTE } from "../../docx/trackedChangeInfo";
 import { createStyleEngine, type StyleEngine } from "../../style-engine";
 import {
@@ -1579,8 +1581,8 @@ function removeTextBoxAnchorFromBlocks(blocks: BlockContent[], marker: Run): boo
  * list markers on the way out of the editor.
  */
 function listRenderingFromAttrs(attrs: ParagraphAttrs): Paragraph["listRendering"] {
-  const numId = attrs.numPr?.numId;
-  if (!isNumberingReference(numId)) {
+  const numId = paragraphNumberingReferenceId(attrs.numPr);
+  if (numId === undefined) {
     return undefined;
   }
   const hasRenderingInfo =
@@ -1731,11 +1733,11 @@ const propertyChangeFromAttrs = (change: ParagraphPropertyChangeAttrs): Paragrap
       ? normalizedChangeInfo
       : { ...normalizedChangeInfo, currentFormatting };
   }
+  // `null` is the attr's tombstone — the paragraph carried no numbering before
+  // the change — and the model spells that as the field being absent.
   const { numPr, ...previousWithoutNumPr } = previousFormatting;
   const normalizedPrevious =
-    numPr === null || numPr === undefined
-      ? previousWithoutNumPr
-      : { ...previousWithoutNumPr, numPr };
+    numPr == null ? previousWithoutNumPr : { ...previousWithoutNumPr, numPr };
   return {
     ...normalizedChangeInfo,
     previousFormatting: normalizedPrevious,
@@ -1922,17 +1924,15 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
     } else {
       result.alignment = directAlignment;
     }
-    if (isStyleSourcedParagraphNumbering(attrs.numPr, attrs.numPrFromStyle)) {
+    const statedNumbering = attrs.numPr;
+    if (isStyleSourcedParagraphNumbering(statedNumbering, attrs.numPrFromStyle)) {
       // The numbering still comes verbatim from the paragraph style — don't
       // materialize it as direct formatting (see ParagraphAttrs.numPrFromStyle).
       delete result.numPr;
       delete result.numPrFromStyle;
-    } else if (
-      attrs.numPr !== orig.numPr &&
-      !sameAuthoredParagraphNumberingReference(attrs.numPr, orig.numPr)
-    ) {
-      if (attrs.numPr) {
-        result.numPr = attrs.numPr;
+    } else if (!sameStatedParagraphNumbering(statedNumbering, orig.numPr)) {
+      if (statedNumbering !== undefined) {
+        result.numPr = statedNumbering;
       } else {
         delete result.numPr;
       }
@@ -2031,7 +2031,7 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
     borders ||
     shading ||
     tabs ||
-    typeof outlineLevel === "number" ||
+    outlineLevel !== undefined ||
     contextualSpacing ||
     attrs.spacingExplicit ||
     // Tri-state toggles: an explicit `false` is meaningful formatting and must
@@ -2090,7 +2090,10 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
   if (attrs.hangingIndent && indentFirstLine) {
     f.hangingIndent = attrs.hangingIndent;
   }
-  if (attrs.numPr && !isStyleSourcedParagraphNumbering(attrs.numPr, attrs.numPrFromStyle)) {
+  if (
+    attrs.numPr !== undefined &&
+    !isStyleSourcedParagraphNumbering(attrs.numPr, attrs.numPrFromStyle)
+  ) {
     f.numPr = attrs.numPr;
   }
   if (attrs.styleId) {
@@ -2105,7 +2108,7 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
   if (tabs) {
     f.tabs = tabs;
   }
-  if (typeof outlineLevel === "number") {
+  if (outlineLevel !== undefined) {
     f.outlineLevel = outlineLevel;
   }
   if (contextualSpacing) {

@@ -1,3 +1,7 @@
+import {
+  paragraphNumberingReference,
+  type ParagraphNumberingOverride,
+} from "../model/paragraphNumbering";
 import type {
   BlockContent,
   Document,
@@ -175,30 +179,30 @@ const appendBlock = (
 const clauseNumbering = (
   block: Extract<LegalDraftBlock, { type: "clause" }>,
   profile: LegalNumberingProfile,
-): { numId: number; ilvl: number } | undefined => {
+): ParagraphNumberingOverride | undefined => {
   if (profile !== "legal") {
     return undefined;
   }
-  return {
+  return paragraphNumberingReference({
     numId: LEGAL_NUMBERING_ID,
     ilvl: Math.max(0, block.level - 1),
-  };
+  });
 };
 
 const listNumbering = (
   block: Extract<LegalDraftBlock, { type: "list" }>,
   profile: LegalNumberingProfile,
-): { numId: number; ilvl: number } | undefined => {
+): ParagraphNumberingOverride | undefined => {
   if (profile === "none") {
     return undefined;
   }
   if (profile === "checklist") {
-    return { numId: CHECKLIST_NUMBERING_ID, ilvl: 0 };
+    return paragraphNumberingReference({ numId: CHECKLIST_NUMBERING_ID, ilvl: 0 });
   }
-  return {
+  return paragraphNumberingReference({
     numId: block.ordered ? LEGAL_NUMBERING_ID : BULLET_NUMBERING_ID,
     ilvl: block.ordered ? 2 : 0,
-  };
+  });
 };
 
 const appendParagraphs = (content: BlockContent[], paragraphs: string[], styleId: string) => {
@@ -217,7 +221,7 @@ const paragraph = (
   text: string,
   styleId: string,
   runOptions: RunOptions = {},
-  numPr?: { numId: number; ilvl: number },
+  numPr?: ParagraphNumberingOverride,
   pageBreakBefore = false,
 ): Paragraph => ({
   type: "paragraph",
@@ -398,7 +402,12 @@ const createStyleDefinitions = (): StyleDefinitions => ({
       // Outline levels, so the clause hierarchy reaches Word's navigation
       // pane, a `TOC \u` field and folio's own outline. Without them a
       // compiled agreement has no outline at all.
-      pPr: { keepNext: true, spaceBefore: 360, spaceAfter: 160, outlineLevel: 0 },
+      pPr: {
+        keepNext: true,
+        spaceBefore: 360,
+        spaceAfter: 160,
+        outlineLevel: { kind: "heading", level: 0 },
+      },
     },
     {
       styleId: "ClauseHeading2",
@@ -408,7 +417,12 @@ const createStyleDefinitions = (): StyleDefinitions => ({
       next: "BodyText",
       qFormat: true,
       rPr: { bold: true, fontSize: 22 },
-      pPr: { keepNext: true, spaceBefore: 240, spaceAfter: 120, outlineLevel: 1 },
+      pPr: {
+        keepNext: true,
+        spaceBefore: 240,
+        spaceAfter: 120,
+        outlineLevel: { kind: "heading", level: 1 },
+      },
     },
     {
       styleId: "ClauseHeading3",
@@ -418,7 +432,12 @@ const createStyleDefinitions = (): StyleDefinitions => ({
       next: "BodyText",
       qFormat: true,
       rPr: { italic: true },
-      pPr: { keepNext: true, spaceBefore: 160, spaceAfter: 120, outlineLevel: 2 },
+      pPr: {
+        keepNext: true,
+        spaceBefore: 160,
+        spaceAfter: 120,
+        outlineLevel: { kind: "heading", level: 2 },
+      },
     },
     {
       styleId: "ListParagraph",

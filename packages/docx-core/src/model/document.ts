@@ -29,6 +29,39 @@ export {
 // registry.
 export type { ExhaustiveFields } from "./exhaustiveFields";
 
+// `w:numPr`: the stated and resolved unions, the cascade fold, and the one
+// mapping between the element's two slots and an arm.
+export {
+  isNumberingReference,
+  mergeParagraphNumbering,
+  NO_NUMBERING_NUM_ID,
+  NO_PARAGRAPH_NUMBERING,
+  paragraphNumberingFromSlots,
+  paragraphNumberingLevel,
+  paragraphNumberingReference,
+  paragraphNumberingReferenceId,
+  paragraphNumberingSlots,
+  resolveParagraphNumbering,
+  sameEffectiveParagraphNumbering,
+  sameStatedParagraphNumbering,
+  type ParagraphNumberingOverride,
+  type ParagraphNumberingReference,
+  type ParagraphNumberingSlots,
+  type ResolvedParagraphNumbering,
+} from "./paragraphNumbering";
+
+// `w:outlineLvl`: the union, its constructors, and the one reader over a
+// stated value.
+export {
+  BODY_TEXT_OUTLINE_LEVEL,
+  headingLevelOf,
+  headingOutlineLevel,
+  outlineLevelFromStatedValue,
+  outlineLevelStatedValue,
+  type HeadingOutlineLevel,
+  type OutlineLevel,
+} from "./outlineLevel";
+
 // The ordered verbatim sink every dispatched container carries.
 export type { PreservedAttribute, PreservedChild, PreservedMarkup } from "./preservedMarkup";
 

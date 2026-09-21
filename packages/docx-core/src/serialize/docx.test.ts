@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import JSZip from "jszip";
 
-import type { Document, Table } from "../model/document";
+import type { Document, ParagraphNumberingOverride, Table } from "../model/document";
 import { serializeDocumentToDocx } from "./docx";
 
 const docWithBorder = (style: string, rgb: string): Document => {
@@ -179,5 +179,39 @@ describe("DOCX border serialization keeps ST_Border members distinct", () => {
       await serializeDocumentToDocx(docWithBorder("nil", "FF0000")),
     );
     expect(xml).toContain('w:val="nil"');
+  });
+});
+
+describe("DOCX numbering serialization states only what the paragraph carries", () => {
+  const docWithNumbering = (numPr: ParagraphNumberingOverride): Document => ({
+    package: {
+      document: {
+        content: [
+          {
+            type: "paragraph",
+            formatting: { numPr },
+            content: [{ type: "run", content: [{ type: "text", text: "x" }] }],
+          },
+        ],
+      },
+    },
+  });
+
+  // An absent `w:ilvl` is level zero and is not the same bytes as a stated
+  // `w:val="0"`. Writing the field unconditionally put `w:val="undefined"` in
+  // the file, which `CT_DecimalNumber` does not accept.
+  test("an absent ilvl writes no w:ilvl at all", async () => {
+    const xml = await readDocumentXml(
+      await serializeDocumentToDocx(docWithNumbering({ kind: "reference", numId: 7 })),
+    );
+    expect(xml).toContain('<w:numPr><w:numId w:val="7"/></w:numPr>');
+    expect(xml).not.toContain("w:ilvl");
+  });
+
+  test("a stated ilvl is written", async () => {
+    const xml = await readDocumentXml(
+      await serializeDocumentToDocx(docWithNumbering({ kind: "reference", numId: 7, ilvl: 2 })),
+    );
+    expect(xml).toContain('<w:numPr><w:ilvl w:val="2"/><w:numId w:val="7"/></w:numPr>');
   });
 });

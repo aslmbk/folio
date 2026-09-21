@@ -14,6 +14,8 @@ import { MarkSpec } from 'prosemirror-model';
 import { MarkType } from 'prosemirror-model';
 import { Node as Node_2 } from 'prosemirror-model';
 import { NodeSpec } from 'prosemirror-model';
+import { OutlineLevel } from '@stll/docx-core/model';
+import { ParagraphNumberingOverride } from '@stll/docx-core/model';
 import { ParseWarningCode } from '@stll/docx-core/model';
 import { Plugin as Plugin_2 } from 'prosemirror-state';
 import { PluginKey } from 'prosemirror-state';
@@ -21,6 +23,11 @@ import { Schema } from 'prosemirror-model';
 import { SpacingExplicit } from '@stll/docx-core/model';
 import { TextSelection } from 'prosemirror-state';
 import { Transaction } from 'prosemirror-state';
+
+// @public
+export type ActiveListState = Exclude<ListState, {
+    type: "none";
+}>;
 
 // @public (undocumented)
 export function addColumnLeft(state: EditorState, dispatch?: (tr: Transaction) => void): boolean;
@@ -302,14 +309,41 @@ export function isHyperlinkActive(state: EditorState): boolean;
 // @public (undocumented)
 export function isInList(state: EditorState): boolean;
 
+// @public
+export const isInListState: (state: ListState | undefined) => state is ActiveListState;
+
 // @public (undocumented)
 export function isInTable(state: EditorState): boolean;
 
 // @public
 export function isMarkActive(state: EditorState, markType: MarkType, attrs?: Record<string, unknown>): boolean;
 
+// @public
+export type ListState = {
+    readonly type: "none";
+} | {
+    readonly type: "bullet";
+    readonly level: number;
+    readonly numId?: number;
+} | {
+    readonly type: "numbered";
+    readonly level: number;
+    readonly numId?: number;
+};
+
+// @public
+export const listStateLevel: (state: ListState | undefined) => number;
+
+// @public
+export type ListType = ListState["type"];
+
 // @public (undocumented)
 export function mergeCells(state: EditorState, dispatch?: (tr: Transaction) => void): boolean;
+
+// @public
+export const NO_LIST_STATE: {
+    readonly type: "none";
+};
 
 // @public
 export const PAINTABLE_MARK_NAMES: ReadonlySet<string>;
@@ -337,14 +371,8 @@ export type ParagraphAttrs = {
     indentRight?: number;
     indentFirstLine?: number;
     hangingIndent?: boolean;
-    numPr?: {
-        numId?: number;
-        ilvl?: number;
-    };
-    numPrFromStyle?: {
-        numId?: number;
-        ilvl?: number;
-    };
+    numPr?: ParagraphNumberingAttr;
+    numPrFromStyle?: ParagraphNumberingAttr;
     listNumFmt?: import__stll_docx_core_model.CounterFormat;
     listIsBullet?: boolean;
     listIsLegal?: boolean;
@@ -385,7 +413,7 @@ export type ParagraphAttrs = {
     _tableRunFormatting?: import__stll_docx_core_model.TextFormatting;
     sectionBreakType?: "nextPage" | "continuous" | "oddPage" | "evenPage";
     direction?: ParagraphDirection | null;
-    outlineLevel?: number;
+    outlineLevel?: import__stll_docx_core_model.OutlineLevel;
     bookmarks?: {
         id: number;
         name: string;
@@ -435,6 +463,12 @@ export type ResolvedParagraphStyle = {
     runFormatting?: import__stll_docx_core_model.TextFormatting;
 };
 
+// @public
+export const resolveListState: (numbering: NumberingMap | null | undefined, numPr: ParagraphNumberingOverride | undefined) => ListState;
+
+// @public
+export const sameListState: (left: ListState | undefined, right: ListState | undefined) => boolean;
+
 // @public (undocumented)
 export const schema: Schema<any, any>;
 
@@ -452,9 +486,7 @@ export type SelectionContext = {
     paragraphFormatting: import__stll_docx_core_model.ParagraphFormatting;
     startParagraphIndex: number;
     endParagraphIndex: number;
-    inList: boolean;
-    listType?: "bullet" | "numbered";
-    listLevel?: number;
+    listState: ListState;
     activeCommentIds: number[];
     inInsertion: boolean;
     inDeletion: boolean;

@@ -18,16 +18,19 @@
 // Safe examples:
 //   const hasParaId = (b: Paragraph): b is Paragraph & { paraId: string } => ...;  // type-guard narrowing
 //   paragraph.listRendering?.levelStarts;                                          // direct typed read
+//   type Attr = ParagraphNumberingOverride & { readonly [BRAND]: true };           // phantom brand, no data
 
 type AstNode = Record<string, unknown> & { type: string };
 
 type WideningContext = {
   filename: string;
+  getSourceCode?: () => { text?: unknown };
   report: (descriptor: {
     node: unknown;
     messageId: "intersectionWidening";
     data: { name: string };
   }) => void;
+  sourceCode?: { text?: unknown };
 };
 
 type InCheckContext = {
@@ -201,9 +204,45 @@ const isTypePredicateAnnotation = (node: AstNode): boolean => {
   return isAstNode(ancestor) && ancestor.type === "TSTypePredicate";
 };
 
+/** The locally declared `unique symbol` names that can key phantom brands. */
+const uniqueSymbolNames = (context: WideningContext): Set<string> => {
+  const source = sourceTextForContext(context);
+  return new Set(
+    [
+      ...source.matchAll(/\b(?:declare\s+)?const\s+(?<name>[$\w]+)\s*:\s*unique\s+symbol\b/gu),
+    ].flatMap(({ groups }) => (groups?.["name"] === undefined ? [] : [groups["name"]])),
+  );
+};
+
+/** True when every member is keyed by a declared `unique symbol`: a phantom
+ * brand. A computed string-literal constant is real data and must not pass. */
+const isPhantomBrandLiteral = (node: AstNode, brands: Set<string>): boolean => {
+  const members = node["members"];
+  if (!Array.isArray(members) || members.length === 0) {
+    return false;
+  }
+  return members.every((member) => {
+    if (
+      !isAstNode(member) ||
+      member.type !== "TSPropertySignature" ||
+      member["computed"] !== true
+    ) {
+      return false;
+    }
+    const key = member["key"];
+    return (
+      isAstNode(key) &&
+      key.type === "Identifier" &&
+      typeof key["name"] === "string" &&
+      brands.has(key["name"])
+    );
+  });
+};
+
 const checkIntersectionWidening = (
   node: AstNode,
   modelTypeNames: Set<string>,
+  brands: Set<string>,
   context: WideningContext,
 ): void => {
   const members = node["types"];
@@ -211,14 +250,18 @@ const checkIntersectionWidening = (
     return;
   }
   let modelName: string | null = null;
-  let hasTypeLiteral = false;
+  let hasDataLiteral = false;
   for (const member of members) {
     modelName ??= modelReferenceName(member, modelTypeNames);
-    if (isAstNode(member) && member.type === "TSTypeLiteral") {
-      hasTypeLiteral = true;
+    if (
+      isAstNode(member) &&
+      member.type === "TSTypeLiteral" &&
+      !isPhantomBrandLiteral(member, brands)
+    ) {
+      hasDataLiteral = true;
     }
   }
-  if (modelName === null || !hasTypeLiteral || isTypePredicateAnnotation(node)) {
+  if (modelName === null || !hasDataLiteral || isTypePredicateAnnotation(node)) {
     return;
   }
   context.report({ node, messageId: "intersectionWidening", data: { name: modelName } });
@@ -374,7 +417,9 @@ export default {
             "Declare the field on the model type instead of widening `{{name}}` with a local " +
             "intersection. A field the type does not declare is invisible to every other " +
             "projection of the model, so the inverse conversion drops it. Narrow an existing " +
-            "optional field with a type predicate instead.",
+            "optional field with a type predicate instead. A literal whose members are all " +
+            "`unique symbol` keys is a phantom brand, declares no data, and is allowed; adding " +
+            "a real field to it is not.",
         },
       },
       create(context: WideningContext) {
@@ -387,9 +432,10 @@ export default {
             if (modelTypeNames.size === 0) {
               return;
             }
+            const brands = uniqueSymbolNames(context);
             const visit = (child: AstNode): void => {
               if (child.type === "TSIntersectionType") {
-                checkIntersectionWidening(child, modelTypeNames, context);
+                checkIntersectionWidening(child, modelTypeNames, brands, context);
               }
               forEachChild(child, visit);
             };

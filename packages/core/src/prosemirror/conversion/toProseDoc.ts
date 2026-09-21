@@ -72,7 +72,11 @@ import { rangedCommentIds } from "../../docx/commentAnchorIndex";
 import { isInlineSdtContent, isTrackedChangeWrapperChild } from "../../docx/inlineWrapperContent";
 import { resolveColorValueToHex } from "../../docx/drawingUtils";
 import { copiedWrapPolygon } from "../../docx/wrapPolygon";
-import { isNumberingReference, NO_NUMBERING_NUM_ID } from "../../docx/numberingReference";
+import {
+  mergeParagraphNumbering,
+  paragraphNumberingReferenceId,
+} from "../../docx/numberingReference";
+import { paragraphNumberingAttr } from "../numberingAttr";
 import { isCellMergeContinuation } from "../../docx/tableParser";
 import { isBaselineVertAlign } from "../../docx/runParser";
 import {
@@ -1196,10 +1200,10 @@ function paragraphFormattingToAttrs(
     attrs._tableOfContentsLevel = tableOfContentsLevel;
   }
   if (formatting?.numPr) {
-    attrs.numPr = formatting.numPr;
+    attrs.numPr = paragraphNumberingAttr(formatting.numPr);
   }
   if (formatting?.numPrFromStyle) {
-    attrs.numPrFromStyle = formatting.numPrFromStyle;
+    attrs.numPrFromStyle = paragraphNumberingAttr(formatting.numPrFromStyle);
   }
   // List rendering info from parsed numbering definitions
   if (paragraph.listRendering) {
@@ -1216,7 +1220,20 @@ function paragraphFormattingToAttrs(
   // reference — mutating the Folio document later must not poke
   // through into PM attrs.
   if (paragraph.propertyChanges && paragraph.propertyChanges.length > 0) {
-    attrs._propertyChanges = [...paragraph.propertyChanges];
+    attrs._propertyChanges = paragraph.propertyChanges.map(({ previousFormatting, ...change }) => {
+      // Attr and model carry the same union now; the numbering still crosses
+      // through the codec, which is what keeps the two slots from trading
+      // shapes the next time one of them moves.
+      if (previousFormatting === undefined) {
+        return change;
+      }
+      const { numPr, ...rest } = previousFormatting;
+      return {
+        ...change,
+        previousFormatting:
+          numPr === undefined ? rest : { ...rest, numPr: paragraphNumberingAttr(numPr) },
+      };
+    });
   }
   // The attributes the authored `w:p` carried and the model has no field for.
   // The array instance is what `fromProseDoc` recognises on the way back: PM
@@ -1310,8 +1327,8 @@ function paragraphFormattingToAttrs(
     // merges per attribute: a direct left-only indent keeps the style's
     // firstLine.
     const numberingRemoved =
-      formatting?.numPr?.numId === NO_NUMBERING_NUM_ID &&
-      isNumberingReference(stylePpr?.numPr?.numId);
+      formatting?.numPr?.kind === "none" &&
+      paragraphNumberingReferenceId(stylePpr?.numPr) !== undefined;
     const numberingStyleIndent = numberingRemoved ? undefined : stylePpr;
     const effectiveIndent = mergeParagraphFormatting(numberingStyleIndent, formatting);
     set("indentLeft", effectiveIndent?.indentLeft);
@@ -1354,13 +1371,16 @@ function paragraphFormattingToAttrs(
     // A direct numPr may carry only ilvl while the style supplies numId.
     // Merge the two fields so the effective list keeps the style's numbering
     // identity. A direct numId (including 0) is authoritative.
+    const styleNumbering = stylePpr?.numPr;
     if (
-      stylePpr?.numPr &&
-      formatting?.numPr?.numId === undefined &&
-      isNumberingReference(stylePpr.numPr.numId)
+      styleNumbering?.kind === "reference" &&
+      (formatting?.numPr === undefined || formatting.numPr.kind === "levelOnly")
     ) {
-      attrs.numPr = { ...stylePpr.numPr, ...formatting?.numPr };
-      attrs.numPrFromStyle = stylePpr.numPr;
+      const merged = mergeParagraphNumbering(styleNumbering, formatting?.numPr);
+      if (merged !== undefined) {
+        attrs.numPr = paragraphNumberingAttr(merged);
+      }
+      attrs.numPrFromStyle = paragraphNumberingAttr(styleNumbering);
     }
   } else {
     // No style resolver - use inline formatting only

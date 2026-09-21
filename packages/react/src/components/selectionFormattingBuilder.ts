@@ -2,28 +2,6 @@ import type { SelectionState } from "@stll/folio-core/prosemirror";
 import type { SelectionFormatting } from "./toolbarPrimitives";
 import type { ListState } from "./ui/ListButtons";
 
-type ParagraphNumPr = NonNullable<SelectionState["paragraphFormatting"]["numPr"]>;
-
-/**
- * Compute the toolbar list state from a paragraph's `numPr`. The legacy
- * convention treats `numId === 1` as bullets and any other `numId` as
- * numbered. Returns `undefined` when the paragraph is not in a list.
- */
-export function extractListState(numPr: ParagraphNumPr | undefined): ListState | undefined {
-  if (!numPr) {
-    return undefined;
-  }
-  const ls: ListState = {
-    type: numPr.numId === 1 ? "bullet" : "numbered",
-    level: numPr.ilvl ?? 0,
-    isInList: true,
-  };
-  if (numPr.numId !== undefined) {
-    ls.numId = numPr.numId;
-  }
-  return ls;
-}
-
 export type BuildSelectionFormattingInput = {
   selectionState: SelectionState;
   fontFamily: string | undefined;

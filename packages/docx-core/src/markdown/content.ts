@@ -32,6 +32,8 @@ import type {
   TableCell,
   TableRow,
 } from "../model/document";
+import { headingOutlineLevel } from "../model/outlineLevel";
+import { paragraphNumberingReference } from "../model/paragraphNumbering";
 import { sanitizeXmlCharacters } from "../serialize/xmlEscape";
 import { inlineTokensToRuns, textRun } from "./inline";
 import { isTokenType, lexMarkdown } from "./lexer";
@@ -54,7 +56,9 @@ const listPara = (runs: ParagraphContent[], rendering: ListRendering): Paragraph
   // Real numbering properties, not just display metadata: an editor's list
   // commands (Enter continues the list, Tab indents, toggle) and the live
   // marker counters all key off `numPr`.
-  formatting: { numPr: { numId: rendering.numId, ilvl: rendering.level } },
+  formatting: {
+    numPr: paragraphNumberingReference({ numId: rendering.numId, ilvl: rendering.level }),
+  },
   listRendering: rendering,
   content: runs.length > 0 ? runs : [textRun("")],
 });
@@ -211,7 +215,10 @@ const MAX_HEADING_LEVEL = 4;
 const headingParagraph = (runs: ParagraphContent[], depth: number): Paragraph => {
   const level = Math.min(Math.max(depth, 1), MAX_HEADING_LEVEL);
   const paragraph = para(runs, `Heading${level}`);
-  paragraph.formatting = { ...paragraph.formatting, outlineLevel: level - 1 };
+  const outlineLevel = headingOutlineLevel(level - 1);
+  if (outlineLevel !== undefined) {
+    paragraph.formatting = { ...paragraph.formatting, outlineLevel };
+  }
   return paragraph;
 };
 

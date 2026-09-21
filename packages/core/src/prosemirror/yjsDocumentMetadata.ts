@@ -1,5 +1,11 @@
 import { Result, TaggedError, panic } from "better-result";
-import { DRAWING_RAW_XML_MODES } from "@stll/docx-core/model";
+import {
+  DRAWING_RAW_XML_MODES,
+  outlineLevelFromStatedValue,
+  type OutlineLevel,
+  type ParagraphNumberingOverride,
+  paragraphNumberingFromSlots,
+} from "@stll/docx-core/model";
 import type { Node as PMNode } from "prosemirror-model";
 import type * as Y from "yjs";
 
@@ -58,6 +64,116 @@ const dropUnstatedFieldFlags: AttrSchemaMigrationStep = (fragment) => {
           node.removeAttribute(attr);
           changed = true;
         }
+      }
+      if (changed) {
+        rewritten += 1;
+      }
+    }
+    for (const child of node.toArray()) {
+      if (typeof child !== "string" && "toArray" in child) {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return rewritten;
+};
+
+/** The node type whose `outlineLevel` attrs version 7 rewrites. */
+const PARAGRAPH_ELEMENT_NAME = "paragraph";
+
+/** A stored outline level, or the absence of one in this carrier. */
+const versionSixOutlineLevel = (value: unknown): OutlineLevel | null | undefined => {
+  if (typeof value !== "number") {
+    return undefined;
+  }
+  return outlineLevelFromStatedValue(value) ?? null;
+};
+
+/** Rewrite one persisted paragraph-formatting carrier when it stores a v6 number. */
+const versionSixFormatting = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const outlineLevel = versionSixOutlineLevel(Reflect.get(value, "outlineLevel"));
+  if (outlineLevel === undefined) {
+    return null;
+  }
+  const migrated: Record<string, unknown> = { ...value };
+  if (outlineLevel === null) {
+    Reflect.deleteProperty(migrated, "outlineLevel");
+  } else {
+    migrated["outlineLevel"] = outlineLevel;
+  }
+  return migrated;
+};
+
+/** Rewrite outline levels in paragraph-property-change formatting carriers. */
+const versionSixPropertyChanges = (value: unknown): Record<string, unknown>[] | null => {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const changes: Record<string, unknown>[] = [];
+  let changed = false;
+  for (const change of value) {
+    if (typeof change !== "object" || change === null || Array.isArray(change)) {
+      return null;
+    }
+    const migrated: Record<string, unknown> = { ...change };
+    for (const tier of ["previousFormatting", "currentFormatting"] as const) {
+      const formatting = versionSixFormatting(change[tier]);
+      if (formatting !== null) {
+        migrated[tier] = formatting;
+        changed = true;
+      }
+    }
+    changes.push(migrated);
+  }
+  return changed ? changes : null;
+};
+
+/**
+ * Version 6 stored `outlineLevel` as the `w:outlineLvl w:val` number, with 9
+ * meaning body text and every consumer deciding that for itself. Version 7
+ * stores `OutlineLevel`, so the number has to be mapped: 0..8 become the
+ * heading arm, 9 becomes the body-text arm, and anything else is dropped,
+ * matching the parse boundary. It cannot be left alone and read lazily,
+ * because ProseMirror copies a stored attr into the node without validating
+ * and the strict validator would then panic on the first read of an untouched
+ * room.
+ */
+const outlineLevelBecomesAUnion: AttrSchemaMigrationStep = (fragment) => {
+  let rewritten = 0;
+  const visit = (node: Y.XmlElement | Y.XmlFragment): void => {
+    if ("nodeName" in node && node.nodeName === PARAGRAPH_ELEMENT_NAME) {
+      // A Yjs attribute holds JSON, not a string; the typings say otherwise.
+      const attributes: Record<string, unknown> = node.getAttributes();
+      let changed = false;
+      const outlineLevel = versionSixOutlineLevel(attributes["outlineLevel"]);
+      if (outlineLevel !== undefined) {
+        if (outlineLevel === null) {
+          node.removeAttribute("outlineLevel");
+        } else {
+          // @ts-expect-error — a Yjs attribute holds JSON; the typings narrow
+          // to string, and the union is what this step exists to store.
+          node.setAttribute("outlineLevel", outlineLevel);
+        }
+        changed = true;
+      }
+      for (const attr of ["_originalFormatting", "_resolvedFormatting"] as const) {
+        const formatting = versionSixFormatting(attributes[attr]);
+        if (formatting !== null) {
+          // @ts-expect-error — a Yjs attribute holds JSON; the typings narrow
+          // to string, and the migrated record is what this step stores.
+          node.setAttribute(attr, formatting);
+          changed = true;
+        }
+      }
+      const propertyChanges = versionSixPropertyChanges(attributes["_propertyChanges"]);
+      if (propertyChanges !== null) {
+        // @ts-expect-error — as above.
+        node.setAttribute("_propertyChanges", propertyChanges);
+        changed = true;
       }
       if (changed) {
         rewritten += 1;
@@ -234,8 +350,161 @@ const dropUnstatedRowHidden: AttrSchemaMigrationStep = (fragment) => {
   return rewritten;
 };
 
+/**
+ * The `_propertyChanges` entries a paragraph carries, as a version-7 snapshot
+ * stored them: an array of records whose `previousFormatting` may carry the
+ * numbering the paragraph had before a `w:pPrChange`.
+ */
+const versionSevenPropertyChanges = (value: unknown): Record<string, unknown>[] | null => {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const changes: Record<string, unknown>[] = [];
+  for (const change of value) {
+    if (typeof change !== "object" || change === null || Array.isArray(change)) {
+      return null;
+    }
+    changes.push(change as Record<string, unknown>);
+  }
+  return changes;
+};
+
+/** The two paragraph attrs, and the two formatting fields, that state numbering. */
+const NUMBERING_ATTR_KEYS = ["numPr", "numPrFromStyle"] as const;
+
+/**
+ * One stored two-slot value, as the union. `null` is an object that stated
+ * neither slot, which stated nothing; `undefined` is a value this step must
+ * leave exactly as it found it.
+ *
+ * A value that already carries a `kind` is one of those. Version 7 wrote the
+ * model's union into `_originalFormatting` and into a recorded
+ * `currentFormatting` while the `numPr` attr beside them still held the two
+ * slots, so a version-7 paragraph can hold both spellings at once: that
+ * divergence is what version 8 exists to end.
+ */
+const versionSevenNumbering = (value: unknown): ParagraphNumberingOverride | null | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  if (typeof Reflect.get(value, "kind") === "string") {
+    return undefined;
+  }
+  const numId: unknown = Reflect.get(value, "numId");
+  const ilvl: unknown = Reflect.get(value, "ilvl");
+  return (
+    paragraphNumberingFromSlots({
+      ilvl: typeof ilvl === "number" ? ilvl : undefined,
+      numId: typeof numId === "number" ? numId : undefined,
+    }) ?? null
+  );
+};
+
+/**
+ * A stored formatting record with its numbering keys carried forward, or
+ * `null` when it holds nothing this step rewrites. `null` inside the record
+ * survives: in `previousFormatting` it is the tombstone for "the paragraph
+ * carried no numbering before the change".
+ */
+const versionSevenFormatting = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const stored: Record<string, unknown> = { ...value };
+  let changed = false;
+  for (const key of NUMBERING_ATTR_KEYS) {
+    const migrated = versionSevenNumbering(stored[key]);
+    if (migrated === undefined) {
+      continue;
+    }
+    changed = true;
+    if (migrated === null) {
+      Reflect.deleteProperty(stored, key);
+    } else {
+      stored[key] = migrated;
+    }
+  }
+  return changed ? stored : null;
+};
+
+/**
+ * Version 7 stored `numPr` as the two `<w:numPr>` slots, with the reserved
+ * `numId` 0 for a cancellation and a bare `ilvl` for a level stated without an
+ * id. Version 8 stores the model's union, so the pair has to be mapped:
+ * `numId` 0 becomes `none` whatever level sat beside it (a cancellation names
+ * no id for a level to belong to), an `ilvl` without a `numId` becomes
+ * `levelOnly`, the two together become `reference`, and an object stating
+ * neither slot stated nothing is dropped. An absent attr stays absent.
+ *
+ * Like the version-7 step it cannot be left to a lazy read: ProseMirror copies
+ * a stored attr into the node without validating, and
+ * `optionalParagraphNumbering` would then refuse the first read of an
+ * untouched room.
+ */
+const numberingBecomesAUnion: AttrSchemaMigrationStep = (fragment) => {
+  let rewritten = 0;
+  const visit = (node: Y.XmlElement | Y.XmlFragment): void => {
+    if ("nodeName" in node && node.nodeName === PARAGRAPH_ELEMENT_NAME) {
+      // A Yjs attribute holds JSON, not a string; the typings say otherwise.
+      const attributes: Record<string, unknown> = node.getAttributes();
+      let changed = false;
+      for (const attr of NUMBERING_ATTR_KEYS) {
+        const migrated = versionSevenNumbering(attributes[attr]);
+        if (migrated === undefined) {
+          continue;
+        }
+        changed = true;
+        if (migrated === null) {
+          node.removeAttribute(attr);
+        } else {
+          // @ts-expect-error — a Yjs attribute holds JSON; the typings narrow
+          // to string, and the union is what this step exists to store.
+          node.setAttribute(attr, migrated);
+        }
+      }
+      const originalFormatting = versionSevenFormatting(attributes["_originalFormatting"]);
+      if (originalFormatting !== null) {
+        changed = true;
+        // @ts-expect-error — as above.
+        node.setAttribute("_originalFormatting", originalFormatting);
+      }
+      const changes = versionSevenPropertyChanges(attributes["_propertyChanges"]);
+      if (changes !== null) {
+        let changesChanged = false;
+        const migratedChanges: Record<string, unknown>[] = [];
+        for (const change of changes) {
+          const migrated = Object.assign({}, change);
+          for (const tier of ["previousFormatting", "currentFormatting"] as const) {
+            const formatting = versionSevenFormatting(change[tier]);
+            if (formatting !== null) {
+              migrated[tier] = formatting;
+              changesChanged = true;
+            }
+          }
+          migratedChanges.push(migrated);
+        }
+        if (changesChanged) {
+          changed = true;
+          // @ts-expect-error — as above.
+          node.setAttribute("_propertyChanges", migratedChanges);
+        }
+      }
+      if (changed) {
+        rewritten += 1;
+      }
+    }
+    for (const child of node.toArray()) {
+      if (typeof child !== "string" && "toArray" in child) {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return rewritten;
+};
+
 /** Every attr-schema version this build reads, oldest first, with no gaps. */
-const FOLIO_YJS_ATTR_SCHEMA_VERSIONS = [0, 1, 2, 3, 4, 5, 6] as const;
+const FOLIO_YJS_ATTR_SCHEMA_VERSIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 /** An attr-schema version this build can read. */
 export type FolioYjsAttrSchemaVersion = (typeof FOLIO_YJS_ATTR_SCHEMA_VERSIONS)[number];
@@ -257,7 +526,9 @@ const ATTR_SCHEMA_MIGRATIONS = {
   3: classifyUnrelatedCapturedDrawings,
   4: backfillStatedCellWidths,
   5: dropUnstatedRowHidden,
-  6: "current",
+  6: outlineLevelBecomesAUnion,
+  7: numberingBecomesAUnion,
+  8: "current",
 } as const satisfies Record<FolioYjsAttrSchemaVersion, AttrSchemaMigrationStep | "current">;
 
 type CurrentAttrSchemaVersion = {
@@ -270,7 +541,7 @@ type CurrentAttrSchemaVersion = {
  * The attr-schema version this build writes. Derived against the migration map
  * so the constant and the map cannot disagree.
  */
-export const FOLIO_YJS_ATTR_SCHEMA_VERSION = 6 satisfies CurrentAttrSchemaVersion;
+export const FOLIO_YJS_ATTR_SCHEMA_VERSION = 8 satisfies CurrentAttrSchemaVersion;
 
 /**
  * The steps that carry a snapshot written under `fromVersion` up to

@@ -22,7 +22,12 @@
 
 import { TaggedError } from "better-result";
 
-import { isNumberingReference } from "../numberingReference";
+import {
+  mergeParagraphNumbering,
+  paragraphNumberingReference,
+  paragraphNumberingReferenceId,
+  type ParagraphNumberingOverride,
+} from "../numberingReference";
 import { getParagraphText } from "../paragraphParser";
 import { getRunText } from "../runParser";
 import type {
@@ -412,30 +417,41 @@ const classifyParagraph = (
   return "paragraph";
 };
 
-type NumPr = NonNullable<ParagraphFormatting["numPr"]>;
+/**
+ * The one arm that names a numbering definition after the cascade is folded.
+ */
+type NumberingReference = Extract<ParagraphNumberingOverride, { kind: "reference" }>;
 
-/** The numbering a paragraph renders with: direct `numPr`, else the style chain's. */
-const effectiveNumPr = (paragraph: Paragraph, styleById: Map<string, Style>): NumPr | undefined => {
-  const direct = paragraph.formatting?.numPr;
-  if (direct?.numId !== undefined) {
-    return isNumberingReference(direct.numId) ? direct : undefined;
-  }
+/** The numbering a paragraph renders with after style and direct tiers fold. */
+const effectiveNumPr = (
+  paragraph: Paragraph,
+  styleById: Map<string, Style>,
+): NumberingReference | undefined => {
   const styleId = paragraph.formatting?.styleId;
-  return styleId ? styleNumPr(styleById.get(styleId), styleById) : undefined;
+  const inherited = styleId ? styleNumPr(styleById.get(styleId), styleById) : undefined;
+  const effective = mergeParagraphNumbering(inherited, paragraph.formatting?.numPr);
+  return effective?.kind === "reference" ? effective : undefined;
 };
 
-const styleNumPr = (style: Style | undefined, styleById: Map<string, Style>): NumPr | undefined => {
+const styleNumPr = (
+  style: Style | undefined,
+  styleById: Map<string, Style>,
+): NumberingReference | undefined => {
   const seen = new Set<string>();
+  const chain: ParagraphNumberingOverride[] = [];
   let current = style;
   while (current && !seen.has(current.styleId)) {
     seen.add(current.styleId);
-    const numPr = current.pPr?.numPr;
-    if (numPr?.numId !== undefined) {
-      return isNumberingReference(numPr.numId) ? numPr : undefined;
+    if (current.pPr?.numPr !== undefined) {
+      chain.push(current.pPr.numPr);
     }
     current = current.basedOn ? styleById.get(current.basedOn) : undefined;
   }
-  return undefined;
+  let effective: ParagraphNumberingOverride | undefined;
+  for (const stated of chain.toReversed()) {
+    effective = mergeParagraphNumbering(effective, stated);
+  }
+  return effective?.kind === "reference" ? effective : undefined;
 };
 
 // ----------------------------------------------------------------------------
@@ -506,7 +522,7 @@ const createNumberingCloner = ({
     while (current.numStyleLink && !seen.has(current.abstractNumId)) {
       seen.add(current.abstractNumId);
       const linkedStyle = styleById.get(current.numStyleLink);
-      const linkedNumId = linkedStyle?.pPr?.numPr?.numId;
+      const linkedNumId = paragraphNumberingReferenceId(linkedStyle?.pPr?.numPr);
       const linkedNum = linkedNumId === undefined ? undefined : numById.get(linkedNumId);
       const linkedAbstract = linkedNum ? abstractById.get(linkedNum.abstractNumId) : undefined;
       if (!linkedAbstract) {
@@ -599,7 +615,7 @@ const createStyleCloner = ({
       return styleId;
     }
     const numPr = styleNumPr(style, styleById);
-    if (numPr?.numId === undefined) {
+    if (numPr === undefined) {
       return styleId;
     }
     const cloneId = `${styleId}-${suffix}`;
@@ -612,7 +628,13 @@ const createStyleCloner = ({
       name: `${style.name ?? style.styleId} (${suffix})`,
       ...(style.next !== undefined && { next: style.next === styleId ? cloneId : style.next }),
       default: false,
-      pPr: { ...style.pPr, numPr: { ...numPr, numId: cloner.cloneNumId(numPr.numId) } },
+      pPr: {
+        ...style.pPr,
+        numPr: paragraphNumberingReference({
+          numId: cloner.cloneNumId(numPr.numId),
+          ilvl: numPr.ilvl,
+        }),
+      },
     };
     clones.set(styleId, clone);
     return cloneId;
@@ -642,17 +664,15 @@ const cloneParagraphForTarget = (
     ...(formatting.styleId !== undefined && {
       styleId: styleCloner.styleIdFor(formatting.styleId),
     }),
-    ...(formatting.numPr !== undefined &&
-      isNumberingReference(formatting.numPr.numId) && {
-        numPr: { ...formatting.numPr, numId: cloner.cloneNumId(formatting.numPr.numId) },
-      }),
-    ...(formatting.numPrFromStyle !== undefined &&
-      isNumberingReference(formatting.numPrFromStyle.numId) && {
-        numPrFromStyle: {
-          ...formatting.numPrFromStyle,
-          numId: cloner.cloneNumId(formatting.numPrFromStyle.numId),
-        },
-      }),
+    ...(formatting.numPr?.kind === "reference" && {
+      numPr: { ...formatting.numPr, numId: cloner.cloneNumId(formatting.numPr.numId) },
+    }),
+    ...(formatting.numPrFromStyle?.kind === "reference" && {
+      numPrFromStyle: {
+        ...formatting.numPrFromStyle,
+        numId: cloner.cloneNumId(formatting.numPrFromStyle.numId),
+      },
+    }),
   };
   const cloned = cloneParagraphWithoutPropertySource(paragraph, {
     // Own content nodes: repacking assigns rIds to images and hyperlinks in

@@ -11,6 +11,8 @@ import type {
   InlineWrapper,
   NumberFormat,
   PreviewDescriptor,
+  OutlineLevel,
+  ParagraphNumberingOverride,
   ShapeTextBody,
   SdtProperties,
   SdtType,
@@ -466,12 +468,21 @@ export type ParagraphBorders = {
 };
 
 /**
- * List numbering properties for a paragraph.
+ * Whether a paragraph states numbering at all.
+ *
+ * `null` is the ProseMirror attr's absent state and `undefined` the model's,
+ * so both mean the same thing here. It says nothing about what the statement
+ * resolves to: a cancellation is a statement, and which arm it is belongs to
+ * a `switch`, not to this one.
+ *
+ * Stated equality has one owner too, and it is
+ * {@link sameStatedParagraphNumbering}: the marker tier and the layout tier
+ * used to hold byte-identical copies under different names, and an equality
+ * that drifts is how a list silently renumbers.
  */
-export type ListNumPr = {
-  numId?: number;
-  ilvl?: number;
-};
+export const isListNumPr = (
+  value: ParagraphNumberingOverride | null | undefined,
+): value is ParagraphNumberingOverride => value !== undefined && value !== null;
 
 /**
  * Paragraph block attributes.
@@ -500,8 +511,8 @@ export type ParagraphAttrs = {
     noLineBreaksAfter?: { language?: string; characters: string };
     useLegacyEthiopicAmharicRules?: boolean;
   };
-  /** OOXML outline level (`w:outlineLvl`), where zero is the top level. */
-  outlineLevel?: number;
+  /** The stated OOXML outline level (`w:outlineLvl`), heading or body text. */
+  outlineLevel?: OutlineLevel;
   spacing?: ParagraphSpacing;
   /** Whether this paragraph participates in the active section line grid. */
   snapToGrid?: boolean;
@@ -552,7 +563,7 @@ export type ParagraphAttrs = {
   /** Reserve the reference extra line advance for a story-leading empty level-0 outline paragraph. */
   reserveEmptyOutlineHeight?: boolean;
   // List properties
-  numPr?: ListNumPr;
+  numPr?: ParagraphNumberingOverride;
   listMarker?: string; // Pre-computed marker text (e.g., "1.", "•", "a)")
   listIsBullet?: boolean;
   listMarkerHidden?: boolean; // w:vanish on numbering level rPr

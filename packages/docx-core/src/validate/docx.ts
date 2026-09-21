@@ -23,6 +23,10 @@ import {
   type TableRow,
   type TrackedRunChange,
 } from "../model/document";
+import {
+  paragraphNumberingLevel,
+  paragraphNumberingReferenceId,
+} from "../model/paragraphNumbering";
 import { hasIllegalXmlCharacters } from "../serialize/xmlEscape";
 
 export const DOCX_PACKAGE_ISSUE_CODES = {
@@ -778,26 +782,33 @@ const validateNumbering = (paragraph: Paragraph, path: string, ctx: ValidationCo
     return;
   }
 
-  const ilvl = numPr.ilvl ?? 0;
-  if (ilvl < 0) {
-    addError(ctx, `${path}.formatting.numPr.ilvl`, "List level must be zero or greater.");
-  } else if (ilvl > 8) {
-    addWarning(
-      ctx,
-      `${path}.formatting.numPr.ilvl`,
-      "List level is outside Word's standard 0-8 range.",
-    );
+  const ilvl = paragraphNumberingLevel(numPr);
+  if (ilvl !== undefined) {
+    if (ilvl < 0) {
+      addError(ctx, `${path}.formatting.numPr.ilvl`, "List level must be zero or greater.");
+    } else if (ilvl > 8) {
+      addWarning(
+        ctx,
+        `${path}.formatting.numPr.ilvl`,
+        "List level is outside Word's standard 0-8 range.",
+      );
+    }
   }
 
-  if (numPr.numId === undefined || numPr.numId === 0) {
+  // A cancellation and a level stated without an id name no definition to be
+  // missing. This used to be a hand-inlined copy of folio-core's reader,
+  // because the model lives here and the reader lived there; the union removed
+  // the question, and only the `reference` arm names an id at all.
+  const referenceId = paragraphNumberingReferenceId(numPr);
+  if (referenceId === undefined) {
     return;
   }
 
-  if (!ctx.numberingNums.has(numPr.numId)) {
+  if (!ctx.numberingNums.has(referenceId)) {
     addError(
       ctx,
       `${path}.formatting.numPr.numId`,
-      `Numbering definition ${numPr.numId} is missing.`,
+      `Numbering definition ${referenceId} is missing.`,
     );
   }
 };

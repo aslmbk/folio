@@ -10,6 +10,12 @@ import { Fragment } from "prosemirror-model";
 import type { Mark, Node as PMNode, NodeSpec, Schema } from "prosemirror-model";
 import type { Command, EditorState, Transaction } from "prosemirror-state";
 
+import {
+  headingOutlineLevel,
+  paragraphNumberingLevel,
+  paragraphNumberingReferenceId,
+} from "@stll/docx-core/model";
+
 import { PROSE_PARAGRAPH_SOURCE_TOKEN_ATTR } from "../../../docx/paragraphPropertySource";
 
 import type { NumberingMap } from "../../../docx/numberingParser";
@@ -50,9 +56,11 @@ import type { ExtensionContext, ExtensionRuntime } from "../types";
 function paragraphAttrsToDOMStyle(attrs: ParagraphAttrs): string {
   const rawIndentLeft: unknown = Reflect.get(attrs, "indentLeft");
   let indentLeft = typeof rawIndentLeft === "number" ? rawIndentLeft : undefined;
-  if (attrs.numPr?.numId && (rawIndentLeft === null || rawIndentLeft === undefined)) {
-    const level = attrs.numPr.ilvl ?? 0;
-    indentLeft = (level + 1) * 720;
+  if (
+    paragraphNumberingReferenceId(attrs.numPr) !== undefined &&
+    (rawIndentLeft === null || rawIndentLeft === undefined)
+  ) {
+    indentLeft = ((paragraphNumberingLevel(attrs.numPr) ?? 0) + 1) * 720;
   }
 
   const formatting: ParagraphFormatting = {
@@ -118,11 +126,11 @@ function getListClass(
   listIsBullet?: boolean,
   listNumFmt?: CounterFormat,
 ): string {
-  if (!numPr?.numId) {
+  if (paragraphNumberingReferenceId(numPr) === undefined) {
     return "";
   }
 
-  const level = numPr.ilvl ?? 0;
+  const level = paragraphNumberingLevel(numPr) ?? 0;
 
   if (listIsBullet) {
     return `docx-list-bullet docx-list-level-${level}`;
@@ -475,6 +483,7 @@ const paragraphNodeSpec: NodeSpec = {
       getAttrs(dom: HTMLElement): ParagraphAttrs {
         const level = Number.parseInt(tag.charAt(1), 10);
         const styleAttrs = extractParagraphAttrsFromStyle(dom);
+        const outlineLevel = headingOutlineLevel(level - 1);
 
         return {
           ...styleAttrs,
@@ -482,7 +491,7 @@ const paragraphNodeSpec: NodeSpec = {
             ? { _originalFormatting: { alignment: styleAttrs.alignment } }
             : {}),
           styleId: `Heading${level}`,
-          outlineLevel: level - 1,
+          ...(outlineLevel === undefined ? {} : { outlineLevel }),
         };
       },
     })),
