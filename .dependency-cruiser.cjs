@@ -1,6 +1,19 @@
 const WORKSPACE_DEPENDENCIES = require("./scripts/workspace-dependency-policy.json");
 
 const PHYSICAL_DEPENDENCY_TYPES = ["local"];
+// A cross-package import that uses the target's package name is legitimate
+// however dependency-cruiser's resolver reached the file on disk: through the
+// workspace's node_modules symlink ("aliased-workspace") or through the
+// tsconfig "paths" entry that maps that same package name ("aliased-tsconfig-
+// paths", e.g. "@stll/folio-core/*" -> "packages/core/src/*"). dependency-
+// cruiser tags "aliased-tsconfig-paths" purely because the specifier matched
+// some `paths` key, with no check that the key is a package name; treating it
+// as equivalent to "aliased-workspace" is only sound because
+// check-tsconfig-package-aliases.ts (run as part of check:dependencies)
+// separately proves every `paths` entry in tsconfig.depcruise.json is a real
+// workspace package name pointing into that package's own src. A relative
+// path carries neither tag and stays caught by "*-uses-package-contracts".
+const PACKAGE_NAME_DEPENDENCY_TYPES = ["aliased-workspace", "aliased-tsconfig-paths"];
 
 const workspaceNames = Object.keys(WORKSPACE_DEPENDENCIES);
 const workspaceModules = Object.fromEntries(
@@ -35,7 +48,7 @@ const closedWorkspaceRules = Object.entries(WORKSPACE_DEPENDENCIES).flatMap(
         to: {
           path: `^packages/(?:${otherWorkspaces.join("|")})(?:/|$)`,
           dependencyTypes: PHYSICAL_DEPENDENCY_TYPES,
-          dependencyTypesNot: ["aliased-workspace"],
+          dependencyTypesNot: PACKAGE_NAME_DEPENDENCY_TYPES,
         },
       },
     ];
@@ -98,8 +111,37 @@ const paintBackendRules = [
   },
 ];
 
+/**
+ * Type-only edges are excluded on both ends of a cycle (the closing edge via
+ * `dependencyTypesNot`, the rest of the loop via `viaOnly.dependencyTypesNot`)
+ * because a type-only import is erased at build time and can never close a
+ * runtime cycle: a loop with even one type-only edge only exists in the type
+ * graph. This exclusion needs dependency-cruiser's tsc-backed extractor to tag
+ * edges "type-only", which in turn needs a working `import("typescript")`
+ * from inside dependency-cruiser's own install location; under this repo's
+ * isolated node_modules layout that resolution fails on its own (the package
+ * resolves through a store symlink whose real path has no ancestor
+ * "typescript"). `scripts/lib/depcruise-typescript-preload.mjs`, loaded via
+ * `NODE_OPTIONS` in the `check:dependencies` script, repairs that resolution
+ * for both the CommonJS and ESM path so the extractor activates.
+ */
+const noCircularRuntimeImportsRule = {
+  name: "no-circular",
+  comment:
+    "Runtime import cycles create load-order hazards and defeat tree-shaking. " +
+    "Type-only edges are excluded because they disappear at build time and never " +
+    "cause a runtime cycle; break the remaining cycle by extracting the shared piece.",
+  severity: "error",
+  from: { path: "^packages/[^/]+/src/" },
+  to: {
+    circular: true,
+    dependencyTypesNot: ["type-only"],
+    viaOnly: { dependencyTypesNot: ["type-only"] },
+  },
+};
+
 module.exports = {
-  forbidden: [...closedWorkspaceRules, ...paintBackendRules],
+  forbidden: [...closedWorkspaceRules, ...paintBackendRules, noCircularRuntimeImportsRule],
   options: {
     combinedDependencies: true,
     doNotFollow: {

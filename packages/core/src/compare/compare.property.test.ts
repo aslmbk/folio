@@ -16,7 +16,11 @@ import JSZip from "jszip";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { propertyConfig, propertyTestTimeout } from "../../../../test/property-testing";
+import {
+  propertyConfig,
+  propertyTestSeed,
+  propertyTestTimeout,
+} from "../../../../test/property-testing";
 
 import { FolioDocxReviewer } from "../ai-edits/headless";
 import type { FolioAIBlock } from "../ai-edits/types";
@@ -580,6 +584,53 @@ const touchedBlockBudget = async ({
   return budget;
 };
 
+/** What a change says apart from its kind and where it sits. */
+const changePayload = (change: CompareChange): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(change).filter(([key]) => key !== "kind" && key !== "location"),
+  );
+
+type BudgetOverrunOptions = {
+  fixture: string;
+  seed: number;
+  script: EditScript;
+  applied: readonly EditScriptStep[];
+  budget: number;
+  changes: readonly CompareChange[];
+};
+
+/**
+ * What an overrun has to say to be actionable without a second run.
+ *
+ * A budget overrun is a pairing the comparison lost, and the failure is often
+ * rare enough that reproducing it costs a seed sweep. So the report carries
+ * the seed that produced it, the script as a literal that pastes straight into
+ * a pinned example, and every change with the block ids it named: the pair
+ * that failed to pair is the one appearing as an unrelated deletion and
+ * insertion instead of a single entry.
+ */
+const budgetOverrunReport = ({
+  fixture,
+  seed,
+  script,
+  applied,
+  budget,
+  changes,
+}: BudgetOverrunOptions): string =>
+  [
+    `${fixture}: the comparison reported ${String(changes.length)} changes for a script whose steps touch ${String(budget)}.`,
+    `Replay: PROPERTY_TEST_SEED=${String(seed)} bun test packages/core/src/compare/compare.property.test.ts`,
+    "Pin it as an example with:",
+    `const script: EditScript = ${JSON.stringify(script, null, 2)};`,
+    ...(applied.length === script.length
+      ? []
+      : [`Applied steps (the rest went unresolved): ${JSON.stringify(applied)}`]),
+    "Changes:",
+    ...changes.map((change, index) =>
+      [`  ${String(index)}.`, change.kind, JSON.stringify(changePayload(change))].join(" "),
+    ),
+  ].join("\n");
+
 describe("compareDocx", () => {
   test("base documents are present", () => {
     expect(BASE_DOCUMENTS.length).toBeGreaterThan(1);
@@ -692,6 +743,10 @@ describe("compareDocx", () => {
     test(
       `the change count never exceeds the blocks the script touched (${name})`,
       async () => {
+        // Pinned rather than left to fast-check so an overrun report can name
+        // the seed that replays it: this property has caught pairings that a
+        // later run did not reproduce.
+        const seed = propertyTestSeed() ?? Date.now();
         await fc.assert(
           fc.asyncProperty(editScriptArb(baseBlocks), async (script) => {
             const scripted = await applyEditScript(base, script);
@@ -699,11 +754,25 @@ describe("compareDocx", () => {
               throw scripted.error;
             }
             const { changes } = await compareOrThrow(base, scripted.value.buffer);
-            expect(changes.length).toBeLessThanOrEqual(
-              await touchedBlockBudget({ base, applied: scripted.value.applied, baseBlocks }),
-            );
+            const budget = await touchedBlockBudget({
+              base,
+              applied: scripted.value.applied,
+              baseBlocks,
+            });
+            if (changes.length > budget) {
+              throw new Error(
+                budgetOverrunReport({
+                  fixture: name,
+                  seed,
+                  script,
+                  applied: scripted.value.applied,
+                  budget,
+                  changes,
+                }),
+              );
+            }
           }),
-          propertyConfig({ numRuns: 12 }),
+          propertyConfig({ numRuns: 12, seed }),
         );
       },
       propertyTestTimeout(120_000),
@@ -773,6 +842,73 @@ describe("compareDocx", () => {
       baseBlockId: baseBlocks[1]?.id,
       text: baseBlocks[1]?.text,
     });
+  });
+
+  test("two relocations that cross are not fused into a rewrite", async () => {
+    // The counterexample the change-count property found at PROPERTY_TEST_SEED=9.
+    // Each relocation swaps a paragraph with its neighbour, so each contributes
+    // a pair of exact-text correspondences that cross, and monotone anchoring
+    // has to leave one end of each out. Pairing what is left over by position
+    // reported the heading as a rewrite of the paragraph below it, which is one
+    // change more than the script's two relocations can account for and a
+    // redline neither document supports.
+    const base = readFixture("upstream-complex-styles.docx");
+    const baseBlocks = await blocksOf(base);
+    const script: EditScript = [
+      { type: "moveParagraph", blockIndex: 5, beforeBlockIndex: 4 },
+      { type: "moveParagraph", blockIndex: 3, beforeBlockIndex: 2 },
+    ];
+
+    // The scenario reads the fixture by index, so pin the shape it relies on:
+    // the two relocated paragraphs each swap with exactly one neighbour.
+    expect(baseBlocks.map(({ text }) => text)).toEqual([
+      "Heading 1",
+      "This is a paragraph under heading 1. It contains normal text.",
+      "Heading 2",
+      "Another paragraph with Times New Roman font and Arial font.",
+      "Red text. Blue text. Green text.",
+      "Highlighted text and normal text.",
+    ]);
+
+    const scripted = await applyEditScript(base, script);
+    if (scripted.isErr()) {
+      throw scripted.error;
+    }
+    expect(scripted.value.unresolved).toEqual([]);
+
+    const { changes } = await compareOrThrow(base, scripted.value.buffer);
+    expect(changes.filter(({ kind }) => kind === "replace")).toEqual([]);
+    expect(changes.length).toBeLessThanOrEqual(
+      await touchedBlockBudget({ base, applied: scripted.value.applied, baseBlocks }),
+    );
+  });
+
+  test("a story whose last paragraph leaves and is written over round-trips", async () => {
+    // The counterexample the change-count property found at PROPERTY_TEST_SEED=2.
+    // One relocation takes the story's last paragraph away and the other puts a
+    // different paragraph where it stood, so the mark that ends the story is
+    // deleted and added at once: the rotation that gives an added terminal mark
+    // somewhere to go turns on a paragraph this script removes.
+    const base = readFixture("upstream-styled-content.docx");
+    const script: EditScript = [
+      { type: "moveParagraph", blockIndex: 4, beforeBlockIndex: 0 },
+      { type: "moveParagraph", blockIndex: 3, beforeBlockIndex: 2 },
+    ];
+    const scripted = await applyEditScript(base, script);
+    if (scripted.isErr()) {
+      throw scripted.error;
+    }
+    expect(scripted.value.unresolved).toEqual([]);
+
+    const { buffer } = await compareOrThrow(base, scripted.value.buffer);
+    const [accepted, rejected, targetProjection, baseProjection] = await Promise.all([
+      projectView(buffer, "final"),
+      projectView(buffer, "original"),
+      projectView(scripted.value.buffer, "final"),
+      projectView(base, "final"),
+    ]);
+    expect(accepted).toEqual(targetProjection);
+    expect(rejected).toEqual(baseProjection);
   });
 
   test("a paragraph inserted on a cell anchor lands beside the table it grew", async () => {
@@ -860,6 +996,35 @@ describe("compareDocx", () => {
     expect(kindsOf(changes).toSorted()).toEqual([
       "table-row-delete",
       "table-row-delete",
+      "table-row-insert",
+    ]);
+    expect(changes).toHaveLength(scripted.value.applied.length);
+  });
+
+  test("as many rows arriving as leaving still keeps the surviving row paired", async () => {
+    // The counterexample the change-count property found at PROPERTY_TEST_SEED=4.
+    // Two rows leave and two arrive, so the table ends the same height it
+    // started: the row count, which is what the residue rule read as evidence
+    // that a shifted match survived, says nothing here. The row that did
+    // survive carries the same cells and the same block ids on both sides.
+    const base = readFixture("upstream-with-tables.docx");
+    const script: EditScript = [
+      { type: "deleteTableRow", blockIndex: 2 },
+      { type: "insertTableRow", blockIndex: 1, cellTexts: ["aaa", "aAa", "aAa"] },
+      { type: "insertTableRow", blockIndex: 9, cellTexts: ["AAA", "aaA", "AAa"] },
+      { type: "deleteTableRow", blockIndex: 5 },
+    ];
+    const scripted = await applyEditScript(base, script);
+    if (scripted.isErr()) {
+      throw scripted.error;
+    }
+    expect(scripted.value.unresolved).toEqual([]);
+
+    const { changes } = await compareOrThrow(base, scripted.value.buffer);
+    expect(kindsOf(changes).toSorted()).toEqual([
+      "table-row-delete",
+      "table-row-delete",
+      "table-row-insert",
       "table-row-insert",
     ]);
     expect(changes).toHaveLength(scripted.value.applied.length);

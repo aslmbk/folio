@@ -578,6 +578,75 @@ const pairsInAnchorGaps = ({
   return pairs;
 };
 
+type CrossedExactTextBlocksOptions<Block extends FolioContentBlock> = {
+  base: readonly PreparedAlignmentBlock<Block>[];
+  revised: readonly PreparedAlignmentBlock<Block>[];
+  anchors: readonly FolioContentBlockPair[];
+  canPair: (
+    baseBlock: PreparedAlignmentBlock<Block>,
+    revisedBlock: PreparedAlignmentBlock<Block>,
+  ) => boolean;
+};
+
+/**
+ * Blocks the anchor passes left unpaired whose exact text stands, also
+ * unpaired, on the other side.
+ *
+ * Anchoring is monotone, so content that moved past other content leaves one
+ * of its two correspondences unanchored by construction: two paragraphs that
+ * swap places produce two exact candidates that cross, and only one survives
+ * the increasing subsequence. What is left over is both ends of that crossing.
+ * It is not a paragraph rewritten into another, so the positional fallback
+ * must not fuse them: a relocation would come back as a replacement neither
+ * document contains, and the move pass would never see the removal and the
+ * arrival it is there to pair.
+ */
+const crossedExactTextBlocks = <Block extends FolioContentBlock>({
+  base,
+  revised,
+  anchors,
+  canPair,
+}: CrossedExactTextBlocksOptions<Block>): {
+  base: ReadonlySet<number>;
+  revised: ReadonlySet<number>;
+} => {
+  const uniqueUnanchoredByText = (
+    blocks: readonly PreparedAlignmentBlock<Block>[],
+    anchored: ReadonlySet<number>,
+  ): ReadonlyMap<string, PreparedAlignmentBlock<Block> | null> => {
+    const blocksByText = new Map<string, PreparedAlignmentBlock<Block> | null>();
+    for (const block of blocks) {
+      // Repeated or blank text is not identity evidence, exactly as it is not
+      // for the exact-text anchors.
+      if (anchored.has(block.index) || !NON_WHITESPACE.test(block.block.text)) {
+        continue;
+      }
+      const { text } = block.block;
+      blocksByText.set(text, blocksByText.has(text) ? null : block);
+    }
+    return blocksByText;
+  };
+  const baseByText = uniqueUnanchoredByText(
+    base,
+    new Set(anchors.map(({ baseIndex }) => baseIndex)),
+  );
+  const revisedByText = uniqueUnanchoredByText(
+    revised,
+    new Set(anchors.map(({ revisedIndex }) => revisedIndex)),
+  );
+  const crossedBase = new Set<number>();
+  const crossedRevised = new Set<number>();
+  for (const [text, baseBlock] of baseByText) {
+    const revisedBlock = revisedByText.get(text);
+    if (!baseBlock || !revisedBlock || !canPair(baseBlock, revisedBlock)) {
+      continue;
+    }
+    crossedBase.add(baseBlock.index);
+    crossedRevised.add(revisedBlock.index);
+  }
+  return { base: crossedBase, revised: crossedRevised };
+};
+
 export type FolioContentAlignedBlockEvent<Block extends FolioContentBlock = FolioContentBlock> =
   | { type: "pair"; baseBlock: Block; revisedBlock: Block }
   | { type: "baseOnly"; block: Block }
@@ -655,6 +724,12 @@ const alignFolioContentBlocksInScope = <Block extends FolioContentBlock>(
   const anchors = [...exactAndStableAnchors, ...continuityAnchors].toSorted(
     (left, right) => left.baseIndex - right.baseIndex || left.revisedIndex - right.revisedIndex,
   );
+  const crossed = crossedExactTextBlocks({
+    base: prepared.base,
+    revised: prepared.revised,
+    anchors,
+    canPair,
+  });
   const events: FolioContentAlignedBlockEvent<Block>[] = [];
 
   const emitPositionalGap = (
@@ -668,7 +743,11 @@ const alignFolioContentBlocksInScope = <Block extends FolioContentBlock>(
       const baseBlock = prepared.base[baseFrom + offset];
       const revisedBlock = prepared.revised[revisedFrom + offset];
       if (baseBlock && revisedBlock) {
-        if (!canPair(baseBlock, revisedBlock)) {
+        const fusesACrossing =
+          baseBlock.block.text !== revisedBlock.block.text &&
+          crossed.base.has(baseBlock.index) &&
+          crossed.revised.has(revisedBlock.index);
+        if (fusesACrossing || !canPair(baseBlock, revisedBlock)) {
           events.push({ type: "baseOnly", block: baseBlock.block });
           events.push({ type: "revisedOnly", block: revisedBlock.block });
         } else {
@@ -1233,6 +1312,28 @@ const contentContainersShareIdentity = (
   return alignment.consistent && alignment.sharedOrdinals * 2 > base.blockIds.length;
 };
 
+/**
+ * Whether two containers carry the same block ids in the same order, over
+ * their whole length.
+ *
+ * Stricter than {@link contentContainersShareIdentity}, which answers which
+ * container this is while blocks come and go. This answers whether there is
+ * anything left to decide: nothing moved within either container, so paired
+ * with equal content they are one container seen twice. An identity a cap
+ * withheld is unknown, never equal.
+ */
+const contentContainerIdsAreEqual = (
+  base: ContentContainerIdentityProfile | null,
+  revised: ContentContainerIdentityProfile | null,
+): boolean =>
+  base !== null &&
+  revised !== null &&
+  base.status === "available" &&
+  revised.status === "available" &&
+  base.blockIds.length > 0 &&
+  base.blockIds.length === revised.blockIds.length &&
+  base.blockIds.every((id, index) => id === revised.blockIds[index]);
+
 type UniqueExactContentSequencePairsOptions = {
   baseKeys: readonly number[];
   revisedKeys: readonly number[];
@@ -1625,6 +1726,7 @@ const alignProfiledContentSequence = <Item>({
   let revisedIndex = 0;
   let pairCount = 0;
   let solePairIsShifted = false;
+  let solePairIsIdentity = false;
   let hasBaseOnly = false;
   let hasRevisedOnly = false;
   while (baseIndex < base.length && revisedIndex < revised.length) {
@@ -1639,6 +1741,12 @@ const alignProfiledContentSequence = <Item>({
       aligned.push({ type: "pair", base: baseItem, revised: revisedItem });
       pairCount += 1;
       solePairIsShifted = baseIndex !== revisedIndex;
+      solePairIsIdentity =
+        baseExactSignatureKeys[baseIndex] === revisedExactSignatureKeys[revisedIndex] &&
+        contentContainerIdsAreEqual(
+          base[baseIndex]?.profile.containerIdentity ?? null,
+          revised[revisedIndex]?.profile.containerIdentity ?? null,
+        );
       baseIndex += 1;
       revisedIndex += 1;
     } else if (direction === ALIGNMENT_DIRECTION.revisedOnly && revisedItem !== undefined) {
@@ -1660,16 +1768,27 @@ const alignProfiledContentSequence = <Item>({
     hasRevisedOnly = true;
   }
   if (
+    !solePairIsIdentity &&
     (soleShiftedPairResiduePolicy === "conservative" || base.length === revised.length) &&
     pairCount === 1 &&
     solePairIsShifted &&
     hasBaseOnly &&
     hasRevisedOnly
   ) {
-    // One content match cannot establish a shifted container mapping when it also
-    // strands containers on both sides. Row-count evidence is the sole exception:
-    // a changed count supports retaining a surviving row between a row insertion
-    // and deletion.
+    // One content MATCH cannot establish a shifted container mapping when it
+    // also strands containers on both sides: that shape reads equally as
+    // content moving between a deletion and an insertion. A changed container
+    // count is one exception, since it supports retaining a surviving row
+    // between a row insertion and a deletion.
+    //
+    // Identity is the other, and it is not a match at all. A pair whose
+    // content digests are equal AND whose blocks carry the same ids in the
+    // same order is the same container, so there is no mapping left to infer.
+    // Both halves are needed: equal digests alone are two containers that read
+    // alike, which a table of boilerplate rows has many of, and equal ids
+    // alone are ids that agree after a reorder without the content backing it,
+    // which is exactly what a positional id minted from text and position does
+    // when rows move. Only a similarity-scored pair is split here.
     return aligned.flatMap((entry): ContentSequenceAlignment<Item>[] =>
       entry.type === "pair"
         ? [

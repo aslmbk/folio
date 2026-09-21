@@ -1,1 +1,48 @@
-[]
+[
+  {
+    "type": "cycle",
+    "from": "packages/core/src/docx/serializer/paragraphSerializer.ts",
+    "to": "packages/core/src/docx/serializer/runSerializer.ts",
+    "unresolvedTo": "./runSerializer",
+    "dependencyTypes": ["local", "import"],
+    "rule": {
+      "severity": "error",
+      "name": "no-circular"
+    },
+    "cycle": [
+      {
+        "name": "packages/core/src/docx/serializer/runSerializer.ts",
+        "dependencyTypes": ["local", "import"]
+      },
+      {
+        "name": "packages/core/src/docx/serializer/paragraphSerializer.ts",
+        "dependencyTypes": ["local", "import"]
+      }
+    ]
+  },
+  {
+    "type": "cycle",
+    "from": "packages/core/src/prosemirror/extensions/features/BidiShortcutExtension.ts",
+    "to": "packages/core/src/prosemirror/schema/index.ts",
+    "unresolvedTo": "../../schema",
+    "dependencyTypes": ["local", "import"],
+    "rule": {
+      "severity": "error",
+      "name": "no-circular"
+    },
+    "cycle": [
+      {
+        "name": "packages/core/src/prosemirror/schema/index.ts",
+        "dependencyTypes": ["local", "import"]
+      },
+      {
+        "name": "packages/core/src/prosemirror/extensions/StarterKit.ts",
+        "dependencyTypes": ["local", "import"]
+      },
+      {
+        "name": "packages/core/src/prosemirror/extensions/features/BidiShortcutExtension.ts",
+        "dependencyTypes": ["local", "import"]
+      }
+    ]
+  }
+]
