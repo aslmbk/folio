@@ -10,9 +10,10 @@
  * - `sdtType` / `alias` / `tag` / `lock` / `placeholder` /
  *   `showingPlaceholder` / `dateFormat` / `listItems` / `checked` — modeled
  *   projection of `w:sdtPr`; drives addressing and widget UX.
- * - `rawPropertiesXml` / `rawEndPropertiesXml` — verbatim original strings
- *   so unmodeled OOXML features (`w:dataBinding`, `w15:repeatingSection`,
- *   etc.) round-trip without being enumerated here.
+ * - `_preserved` — the `w:sdtPr` children folio does not model, at their
+ *   schema ordinal, so `w:dataBinding`, `w15:repeatingSection` and the
+ *   control-kind element round-trip without being enumerated here.
+ * - `rawEndPropertiesXml` — the verbatim `<w:sdtEndPr>`.
  */
 
 import { createNodeExtension } from "../create";
@@ -53,8 +54,13 @@ export const BlockSdtExtension = createNodeExtension({
        * `<w:sdtContent><w:p/></w:sdtContent>` empty-paragraph content too.
        */
       _originallyEmpty: { default: false },
-      rawPropertiesXml: { default: null },
+      _preserved: { default: null },
       rawEndPropertiesXml: { default: null },
+      /**
+       * `w:sdtEndPr` as a record, so a control the editor rebuilds still
+       * writes its end mark once the captured bytes are gone.
+       */
+      endProperties: { default: null },
       /**
        * Verbatim XML for direct sdt siblings of sdtContent (range markers
        * per MS-OE376 §2.5.2.30). Two slots so position is preserved.
@@ -94,8 +100,9 @@ export const BlockSdtExtension = createNodeExtension({
             _originallyEmpty: dom.dataset["originallyEmpty"] === "true",
             // Raw XML is preserved on the model, not the DOM; consumers that
             // round-trip through PM must re-attach it from the source.
-            rawPropertiesXml: null,
+            _preserved: null,
             rawEndPropertiesXml: null,
+            endProperties: null,
             rawSdtChildrenBeforeContent: null,
             rawSdtChildrenAfterContent: null,
           };

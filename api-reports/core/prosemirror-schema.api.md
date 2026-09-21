@@ -29,8 +29,9 @@ export type BlockSdtAttrs = {
     dropdownLastValue?: string;
     checked?: boolean;
     _originallyEmpty?: boolean;
-    rawPropertiesXml?: string;
+    _preserved?: import__stll_docx_core_model.PreservedMarkup;
     rawEndPropertiesXml?: string;
+    endProperties?: import__stll_docx_core_model.SdtEndProperties;
     rawSdtChildrenBeforeContent?: string;
     rawSdtChildrenAfterContent?: string;
 };
@@ -430,8 +431,9 @@ export type SdtAttrs = {
     listItems?: string;
     dropdownLastValue?: string;
     checked?: boolean;
-    rawPropertiesXml?: string;
+    _preserved?: import__stll_docx_core_model.PreservedMarkup;
     rawEndPropertiesXml?: string;
+    endProperties?: import__stll_docx_core_model.SdtEndProperties;
 };
 
 // @public
@@ -527,6 +529,7 @@ export type TableAttrs = {
     _originalFormatting?: import__stll_docx_core_model.TableFormatting;
     tblPrChange?: import__stll_docx_core_model.TablePropertyChange[];
     _bookmarks?: import__stll_docx_core_model.PositionedBookmarkMarker[];
+    _preserved?: import__stll_docx_core_model.TablePreservedMarkup;
     _suggestedInsert?: SuggestedStructuralMarker | null;
 };
 
@@ -587,6 +590,7 @@ export type TableCellAttrs = {
         verticalMerge?: "continue" | "rest";
         verticalMergeOriginal?: "continue" | "rest";
     };
+    contentControls?: import__stll_docx_core_model.SdtProperties[];
     _preserveVMergeRestart?: boolean;
     _docxVMergeContinuationCells?: unknown;
 };
@@ -604,6 +608,8 @@ export type TableRowAttrs = {
     tblPrExChange?: import__stll_docx_core_model.TablePropertyExceptionChange[];
     _preservedAttributes?: import__stll_docx_core_model.PreservedAttribute[];
     _bookmarks?: import__stll_docx_core_model.PositionedBookmarkMarker[];
+    contentControls?: import__stll_docx_core_model.SdtProperties[];
+    _preserved?: import__stll_docx_core_model.TablePreservedMarkup;
 } & ({
     trIns: {
         revisionId: number;

@@ -367,7 +367,7 @@ export type Table = {
     propertyChanges?: TablePropertyChange[];
     columnWidths?: number[];
     rows: TableRow[];
-    preserved?: PreservedMarkup;
+    preserved?: TablePreservedMarkup;
     bookmarks?: PositionedBookmarkMarker[];
 };
 
@@ -378,6 +378,7 @@ export type TableCell = {
     propertyChanges?: TableCellPropertyChange[];
     structuralChange?: TableStructuralChangeInfo;
     content: TableCellBlock[];
+    contentControls?: SdtProperties[];
 };
 
 // @public
@@ -389,9 +390,10 @@ export type TableRow = {
     tablePropertyExceptionChanges?: TablePropertyExceptionChange[];
     structuralChange?: TableStructuralChangeInfo;
     cells: TableCell[];
-    preserved?: PreservedMarkup;
+    preserved?: TablePreservedMarkup;
     preservedAttributes?: PreservedAttribute[];
     bookmarks?: PositionedBookmarkMarker[];
+    contentControls?: SdtProperties[];
 };
 
 // @public

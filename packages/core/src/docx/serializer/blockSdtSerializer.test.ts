@@ -126,7 +126,7 @@ describe("serializeBlockSdt — raw sdtPr replay", () => {
   });
 
   test("fallback sdtPr emits dropdown type marker + listItems for programmatic controls", () => {
-    // A BlockSdt constructed without rawPropertiesXml (e.g. a template
+    // A BlockSdt built in code rather than parsed (e.g. a template
     // engine that builds the control programmatically) must still encode
     // its type so Word reopens it as the right control kind.
     const sdt: BlockSdt = {
@@ -168,14 +168,13 @@ describe("serializeBlockSdt — raw sdtPr replay", () => {
       if (!first || first.type !== "blockSdt") {
         throw new Error(`expected blockSdt, got ${String(first?.type)}`);
       }
-      const rawPropertiesXml = first.properties.rawPropertiesXml;
-      if (rawPropertiesXml === undefined) {
-        throw new Error("expected captured sdtPr XML");
+      const preserved = first.properties.preserved;
+      if (preserved === undefined) {
+        throw new Error("expected the list element to be kept as bytes");
       }
 
       const xml = serializeBlockSdt(first, noChildSerializer);
 
-      expect(xml).toContain(rawPropertiesXml);
       expect(xml).not.toContain("lastValue");
 
       const reopened = parseBlocks(`<w:body ${NS}>${xml}</w:body>`).at(0);
@@ -183,7 +182,7 @@ describe("serializeBlockSdt — raw sdtPr replay", () => {
         throw new Error(`expected reopened blockSdt, got ${String(reopened?.type)}`);
       }
       expect(reopened.properties.dropdownLastValue).toBeUndefined();
-      expect(reopened.properties.rawPropertiesXml).toBe(rawPropertiesXml);
+      expect(reopened.properties.preserved).toEqual(preserved);
     },
   );
 

@@ -22,6 +22,7 @@
 
 import type {
   Table,
+  TablePreservedMarkup,
   TableRow,
   TableCell,
   TableFormatting,
@@ -47,6 +48,7 @@ import type {
   TableCellBlock,
   PreservedBlock,
   PreservedChild,
+  SdtProperties,
   Theme,
   RelationshipMap,
   MediaFile,
@@ -65,6 +67,7 @@ import {
 } from "./containerChildren";
 import type { NumberingMap } from "./numberingParser";
 import { parseParagraph } from "./paragraphParser";
+import { captureSdtSiblingMarkers, parseSdtProperties } from "./sdtProperties";
 import { enrichParagraphTextBoxes } from "./paragraphTextBoxEnrichment";
 import {
   FloatingTableXSpecSchema,
@@ -80,8 +83,8 @@ import { parseShading } from "./shadingParser";
 import {
   cloneElement,
   findChild,
-  findChildByLocalName,
   findChildren,
+  findWordprocessingChild,
   getAttribute,
   getLocalName,
   mergeXmlnsDeclarations,
@@ -1347,6 +1350,49 @@ export function parseTableCellProperties(
 }
 
 // ============================================================================
+// ROW- AND CELL-LEVEL CONTENT CONTROLS
+// ============================================================================
+
+/**
+ * Record a `CT_SdtRow` / `CT_SdtCell` on the rows or cells it wrapped.
+ *
+ * Both are transparent: what they hold is ordinary rows and cells, and the
+ * control adds properties and an end mark. folio keeps the children modelled
+ * and puts the control on each of them rather than modelling a wrapper
+ * between them, because a table's children are rows and a row's are cells,
+ * and neither has a node to spare for something that is not one.
+ *
+ * Outermost first, so a control inside a control — a bound row inside a
+ * repeating section — comes back nested the way it was written. The
+ * recursion reads the inner one first, so the outer prepends.
+ */
+type TablePreservedChild = NonNullable<TablePreservedMarkup["children"]>[number];
+
+const recordContentControl = <Wrapped extends { contentControls?: SdtProperties[] }>(
+  wrapped: readonly Wrapped[],
+  carriers: readonly { contentControls?: SdtProperties[] }[],
+  sdtElement: XmlElement,
+): void => {
+  const properties = parseSdtProperties(
+    findWordprocessingChild(sdtElement, "sdtPr"),
+    findWordprocessingChild(sdtElement, "sdtEndPr"),
+  );
+  const siblings = captureSdtSiblingMarkers(sdtElement);
+  if (siblings.before.length > 0) {
+    properties.rawSdtChildrenBeforeContent = siblings.before;
+  }
+  if (siblings.after.length > 0) {
+    properties.rawSdtChildrenAfterContent = siblings.after;
+  }
+  for (const item of wrapped) {
+    item.contentControls = [properties, ...(item.contentControls ?? [])];
+  }
+  for (const item of carriers) {
+    item.contentControls = [properties, ...(item.contentControls ?? [])];
+  }
+};
+
+// ============================================================================
 // CELL CONTENT PARSING
 // ============================================================================
 
@@ -1431,7 +1477,7 @@ function parseCellContent(
           // A block-level content control inside a cell: its content lives in
           // `w:sdtContent`, so descend so controlled paragraphs and tables
           // (common for bound fields in legal tables) are not dropped.
-          const sdtContent = findChildByLocalName(child, "sdtContent");
+          const sdtContent = findWordprocessingChild(child, "sdtContent");
           if (!sdtContent) {
             return;
           }
@@ -1616,14 +1662,15 @@ export function parseTableRow(
   // Parse cells, threading the row's own xmlns down the in-scope set.
   const rowOptions = withContainerXmlns(options, trElement);
   const bookmarks: PositionedBookmarkMarker[] = [];
-  const preservedChildren: PreservedChild[] = [];
+  const preservedChildren: TablePreservedChild[] = [];
 
   /**
-   * One row's children, or a row-level content control's.
+   * One row's children, or a cell-level content control's.
    *
-   * folio unwraps `w:sdt` here and splices its rows' content into the row, so
-   * the recursion walks the control's content with the same map; the sink is
-   * the row's either way, because the control keeps no wrapper to hold one.
+   * folio keeps the cells `w:sdt` holds as the row's own and records the
+   * control on each of them, so the recursion walks the control's content
+   * with the same map; the sink is the row's either way, because the control
+   * holds no capture of its own.
    */
   const dispatchRowChildren = (
     element: XmlElement,
@@ -1641,12 +1688,27 @@ export function parseTableRow(
         },
 
         sdt: (child) => {
-          const sdtContent = findChildByLocalName(child, "sdtContent");
+          const sdtContent = findWordprocessingChild(child, "sdtContent");
           if (!sdtContent) {
-            return;
+            return CAPTURE;
           }
+          const firstWrapped = row.cells.length;
+          const firstCaptured = preservedChildren.length;
+          const firstBookmark = bookmarks.length;
           const sdtOptions = withContainerXmlns(childOptions, child);
           dispatchRowChildren(sdtContent, withContainerXmlns(sdtOptions, sdtContent));
+          const wrapped = row.cells.slice(firstWrapped);
+          if (wrapped.length === 0) {
+            preservedChildren.splice(firstCaptured);
+            bookmarks.splice(firstBookmark);
+            return CAPTURE;
+          }
+          recordContentControl(
+            wrapped,
+            [...preservedChildren.slice(firstCaptured), ...bookmarks.slice(firstBookmark)],
+            child,
+          );
+          return undefined;
         },
 
         // A bookmark that selects whole rows opens and closes here, between
@@ -1911,15 +1973,16 @@ export function parseTable(
   // Parse rows, threading the table's own xmlns down the in-scope set.
   const tableOptions = withContainerXmlns(options, tblElement);
   const rowsWithGridOffsets = new Set<number>();
-  const preservedChildren: PreservedChild[] = [];
+  const preservedChildren: TablePreservedChild[] = [];
   const bookmarks: PositionedBookmarkMarker[] = [];
 
   /**
    * One table's children, or a row-level content control's.
    *
-   * folio unwraps `w:sdt` here and splices its rows into the table, so the
-   * recursion walks the control's content with the same map; the sink is the
-   * table's either way, because the control keeps no wrapper to hold one.
+   * folio keeps the rows `w:sdt` holds as the table's own and records the
+   * control on each of them, so the recursion walks the control's content
+   * with the same map; the sink is the table's either way, because the
+   * control holds no capture of its own.
    */
   const dispatchTableChildren = (
     element: XmlElement,
@@ -1941,12 +2004,27 @@ export function parseTable(
         },
 
         sdt: (child) => {
-          const sdtContent = findChildByLocalName(child, "sdtContent");
+          const sdtContent = findWordprocessingChild(child, "sdtContent");
           if (!sdtContent) {
-            return;
+            return CAPTURE;
           }
+          const firstWrapped = table.rows.length;
+          const firstCaptured = preservedChildren.length;
+          const firstBookmark = bookmarks.length;
           const sdtOptions = withContainerXmlns(childOptions, child);
           dispatchTableChildren(sdtContent, withContainerXmlns(sdtOptions, sdtContent));
+          const wrapped = table.rows.slice(firstWrapped);
+          if (wrapped.length === 0) {
+            preservedChildren.splice(firstCaptured);
+            bookmarks.splice(firstBookmark);
+            return CAPTURE;
+          }
+          recordContentControl(
+            wrapped,
+            [...preservedChildren.slice(firstCaptured), ...bookmarks.slice(firstBookmark)],
+            child,
+          );
+          return undefined;
         },
 
         ...TABLE_CHILD_OWNERS,

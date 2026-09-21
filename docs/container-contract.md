@@ -462,24 +462,26 @@ each of them is a decision and not a consequence:
   `serializeTable` writes them from the model ahead of the sink, and the grid
   travels as a capture of its own on the table's formatting. An index that
   counted them would push every capture one place to the right.
-- **Three types, one map.** `w:sdt` is unwrapped and its rows spliced into the
-  table, so the recursion walks `CT_SdtContentRow` with the same handler map.
-  `w:customXml` is not unwrapped: it is captured whole, exactly as the row
-  captures a `w:customXml` cell wrapper, which keeps `CT_CustomXmlRow`'s 29
-  pairs at the price of the wrapper's content being opaque. `CT_CustomXmlRow`
-  is a member of the generated set anyway, so its one extra name —
-  `w:customXmlPr` — carries a decision rather than falling to a default.
+- **Three types, one map.** `w:sdt`'s rows are the table's own, so the
+  recursion walks `CT_SdtContentRow` with the same handler map; what the
+  control itself says is recorded on those rows, which the content-control
+  section below sets out. `w:customXml` is not unwrapped: it is captured
+  whole, exactly as the row captures a `w:customXml` cell wrapper, which keeps
+  `CT_CustomXmlRow`'s 29 pairs at the price of the wrapper's content being
+  opaque — and with it the `w:sdt` inside, which is why
+  `customXml|CT_CustomXmlRow/sdt` stays `dropped (editorProjection)` while its
+  `w:tbl` twin does not. `CT_CustomXmlRow` is a member of the generated set
+  anyway, so its one extra name — `w:customXmlPr` — carries a decision rather
+  than falling to a default.
 - **A `w:tbl` under a `w:tbl` is captured whole.** The Transitional content
   model does not declare it, so the sink's default already keeps it; that is
   the branch a hand-written `default` gets wrong, and flattening it would move
   its rows into a table nobody wrote.
 
-The editor leg stops at the save law for the reason the row section gives, one
-level up: the table node's children are rows, and a zero-width atom between two
-of them is not a row. So `tbl|CT_Tbl`'s 26 child pairs, and the 55 that were
-lost with the two row wrappers, move to `dropped (editorProjection)` — all but
-the two bookmark pairs, which `Table.bookmarks` carries on the table node's
-attrs for the reason the row section now gives.
+The editor leg carries the sink on `TableAttrs._preserved`, by reference, for
+the same reason and with the same trade-off as the row section below. Bookmark
+markers remain typed in `Table.bookmarks`; they must stay visible to the range
+pairing and integrity passes rather than becoming opaque sink entries.
 
 ### A container nested in one of its own kind
 
@@ -551,7 +553,7 @@ no longer reaches the editor as an atom showing nothing.
 about the inner element's _parent_ rather than about the part containing a
 name, because the flattening failure passes every probe that only counts.
 
-### A row: the sink, and where it stops
+### A row: the sink, and what carries it through the editor
 
 `CT_Row` declares a permission range, a proofing error, the row-level comment
 and move ranges and the eight custom-XML revision ranges beside its cells.
@@ -564,27 +566,110 @@ capturing them as well would write each twice. For `w:tblPrEx` that claim was
 false until the property-set section below gave it an owner, which is why an
 owner claim now has to name the reader it claims.
 
-**The editor leg stops here, and the reason is structural.** The block level
-carries its captures as a zero-width `preservedBlock` node, so ProseMirror's
-own mapping keeps the position honest. The table schema has no row-level node
-to do that with: a row's children are cells, and a zero-width atom between two
-of them is not a cell. Giving the row one means either a cell-shaped node that
-renders nothing — which every command that walks a row would have to learn to
-skip — or an attribute on the row node, which is an index and drifts the
-moment a column is inserted or deleted.
+**The editor leg is the node's own attrs, and the index is the honest cost.**
+The block level carries captures as zero-width `preservedBlock` nodes, so
+ProseMirror maintains their positions. A row has no such node: its children
+must be cells. A cell-shaped placeholder would force every table command to
+skip it, so the sink rides `TableRowAttrs._preserved`; the table's sink rides
+`TableAttrs._preserved` one level up.
 
-So a row's captures survive a save and are lost by the editor projection, and
-the contract records exactly that: the 24 child pairs move from
-`dropped (neverParsed)` to `dropped (editorProjection)`. The two bookmark pairs
-are the exception, and they show what the rest would cost: a marker folio can
-read does not need a node, because `TableRow.bookmarks` rides the row node's
-attrs by reference. That only works for markup the model holds — bytes on an
-attribute are bytes the editor still cannot place — which is why the bookmark
-is typed and the sink is not. That is not a lateral move. `neverParsed` says folio never read the markup and a document that is
-merely opened and saved loses it; `editorProjection` says the markup is in the
-model and in the saved part, and only a round trip through the editor drops
-it. The fix for what remains is one decision about the table schema, not a
-parser.
+The index can drift when a row or column is inserted, and a capture beyond the
+new end clamps there. That is preferable to losing the capture on every open,
+and the trade is explicit. The carriers are by reference, so a record created
+by the editor has no sink and a copied table or row does not duplicate the
+author's markup. `visitBlockTreeRecords` walks paragraphs, tables and rows in
+every block container, including text boxes, and
+`keepOneRecordCarriedByIdentity` applies the same rule to sinks, bookmark
+markers and attribute remainders.
+
+Bookmark markers remain typed in `TableRow.bookmarks`, not in the sink. Their
+start and end may live at different structural levels, so the pairing and
+integrity passes must be able to read them.
+
+### A row- or cell-level content control: on the children, not between them
+
+`CT_SdtRow` and `CT_SdtCell` are the one thing in a table that is neither a
+capture nor a row. Both are transparent — what they hold is ordinary rows and
+ordinary cells — and the wrapper carries a tag, an alias, a lock, a data
+binding and a `w:sdtEndPr`, which is what binds a template's repeating section
+or its bound cell. folio used to prove the transparency by throwing the
+wrapper away: the rows were spliced into the table, the cells into the row,
+and the control went on the floor. `tbl|CT_Tbl/sdt` and `tr|CT_Row/sdt` read
+`never-parsed`, and the nine pairs under `CT_SdtRow`, `CT_SdtCell`,
+`CT_SdtContentRow` and `CT_SdtContentCell` read `the-container-itself-is-lost`
+behind them.
+
+The record is **on the children**, as `TableRow.contentControls` and
+`TableCell.contentControls`, and three things about that are decisions rather
+than consequences:
+
+- **It is not the sink and it is not a member.** The sink's `index` is for
+  markup that sits _between_ two children; a control sits _around_ several, so
+  the `preservedWrapper` argument above applies one level up. And a member
+  would need a node of its own in a table whose children are rows and a row
+  whose children are cells, which is the same node the row section says does
+  not exist. So the wrapper is recorded on each child it held and rebuilt by
+  grouping consecutive children that name the same control.
+- **Equality is the record's canonical spelling, not object identity.** The
+  editor carries these records through JSON — a Yjs sync, a snapshot, a
+  structured clone — and hands back an equal record rather than the same one; a
+  wrapper that split in two there would mint a second `w:id` for a control the
+  author wrote once. The cost runs the other way: two adjacent rows the author
+  put in two separate but identically spelled controls come back as one. Word
+  mints a distinct `w:id` per control, so that needs a producer that writes
+  none, and the inline wrapper stack makes the same trade for the same reason.
+- **The schema's multi-row case is measured, not assumed.** `CT_SdtContentRow`
+  admits `w:tr*`. Across 5299 public packages every one of the 23 row-level
+  controls held exactly one row, and every one of the 329 cell-level controls
+  exactly one cell. That is what makes a record on the child cheap enough to
+  prefer over a `TableRowGroup` member: the grouping is the schema's case
+  carried by the common one.
+
+The list is a stack because a control may hold a control — a repeating section
+whose row is itself bound — which is `sdtContent|CT_SdtContentRow/sdt` and its
+cell twin. Outermost first, as the source wrote them.
+
+The editor leg comes with it: the stack is an attr on the row or cell node, so
+splitting or moving one takes its control along, and no index has to be kept
+honest. That is why these pairs reach `modelled` rather than stopping at
+`dropped (editorProjection)`.
+
+`w:sdtEndPr` is the half that is not a wrapper. `CT_SdtEndPr` declares `w:rPr`
+and nothing else, and folio held it only as captured bytes, so every control it
+_rebuilt_ — one an edit touched, one a full repack wrote — lost the end mark.
+`SdtProperties.endProperties` is the record: its presence is the element's,
+because `<w:sdtEndPr/>` with no `w:rPr` is what Word writes for most controls
+and says something an absent element does not. That moves
+`sdt|CT_SdtRun/sdtEndPr` and `sdt|CT_SdtBlock/sdtEndPr` off
+`serialized-only-via-verbatim-replay`; `sdtEndPr|CT_SdtEndPr/rPr` stays there,
+because the run properties inside are still only as good as folio's `w:rPr`
+model.
+
+#### The content-control property set: schema ordinals, not sibling counts
+
+`CT_SdtPr` is a sequence of optional singletons closed by a choice of control
+kinds, so each declared child's position is a property of its name. The sink
+records that schema ordinal rather than counting whichever siblings folio
+models today. `sequencePositions` reads the ordinal from the generated
+`SEQUENCE_CHILDREN` row and `serializeSequenceChildren` merges modelled and
+preserved children by the same source of truth.
+
+Three decisions complete the rule:
+
+- A handler returns `CAPTURE` when it recognizes a child name but refuses its
+  value. An unknown `ST_Lock` spelling therefore keeps its bytes instead of
+  silently becoming `unlocked`.
+- The control-kind element is preserved whole because it may carry unmodelled
+  locale, calendar, gallery, multiline, or checkbox-glyph data. The model wins
+  only for the interactive state it owns: checkbox state, bound date, display
+  format, and selected list value.
+- Extension elements such as `w14:checkbox`, `w15:appearance`, `w15:color`,
+  and `w15:repeatingSection` are undeclared by the Transitional graph, so the
+  sink captures them by default. The checkbox has an explicit undeclared
+  handler because folio also reads its checked state.
+
+An empty property set stays explicit: `<w:sdtPr/>` is a valid rich-text
+control, while omitting `w:sdtPr` produces a different, invalid `w:sdt`.
 
 Both are transparent: their children are ordinary inline or block content and
 the wrapper adds a name, a URI and some properties. folio splices a

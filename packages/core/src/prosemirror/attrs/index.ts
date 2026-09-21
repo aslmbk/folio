@@ -682,6 +682,7 @@ export const readTableAttrs = (node: PMNode): ReadProseMirrorAttrsResult<TableAt
   optionalBoolean(attrs, "_resolvedBidi", "table.attrs._resolvedBidi", issues);
   optionalRecord(attrs, "_originalFormatting", "table.attrs._originalFormatting", issues);
   optionalPositionedBookmarks(attrs, "table.attrs._bookmarks", issues);
+  optionalTablePreservedMarkup(attrs, "_preserved", "table.attrs._preserved", issues);
 
   return attrsResult(attrs, issues);
 };
@@ -733,6 +734,8 @@ export const readTableRowAttrs = (node: PMNode): ReadProseMirrorAttrsResult<Tabl
     issues,
   );
   optionalPositionedBookmarks(attrs, "tableRow.attrs._bookmarks", issues);
+  optionalContentControls(attrs, "tableRow.attrs.contentControls", issues);
+  optionalTablePreservedMarkup(attrs, "_preserved", "tableRow.attrs._preserved", issues);
 
   return attrsResult(attrs, issues);
 };
@@ -794,6 +797,7 @@ export const readTableCellAttrs = (node: PMNode): ReadProseMirrorAttrsResult<Tab
   optionalInsetMap(attrs, "margins", "tableCell.attrs.margins", issues);
   optionalRecord(attrs, "_originalFormatting", "tableCell.attrs._originalFormatting", issues);
   optionalTableCellRevision(attrs, issues);
+  optionalContentControls(attrs, "tableCell.attrs.contentControls", issues);
   optionalBoolean(
     attrs,
     "_preserveVMergeRestart",
@@ -965,8 +969,9 @@ export const readBlockSdtAttrs = (node: PMNode): ReadProseMirrorAttrsResult<Bloc
   optionalString(attrs, "dropdownLastValue", "blockSdt.attrs.dropdownLastValue", issues);
   optionalBoolean(attrs, "checked", "blockSdt.attrs.checked", issues);
   optionalBoolean(attrs, "_originallyEmpty", "blockSdt.attrs._originallyEmpty", issues);
-  optionalString(attrs, "rawPropertiesXml", "blockSdt.attrs.rawPropertiesXml", issues);
+  optionalPreservedMarkup(attrs, "_preserved", "blockSdt.attrs._preserved", issues);
   optionalString(attrs, "rawEndPropertiesXml", "blockSdt.attrs.rawEndPropertiesXml", issues);
+  optionalSdtEndProperties(attrs, "blockSdt.attrs.endProperties", issues);
   optionalString(
     attrs,
     "rawSdtChildrenBeforeContent",
@@ -2613,8 +2618,9 @@ const validateSdtAttrsRecord = (
   optionalSdtListItems(attrs, "listItems", `${path}.listItems`, issues);
   optionalString(attrs, "dropdownLastValue", `${path}.dropdownLastValue`, issues);
   optionalBoolean(attrs, "checked", `${path}.checked`, issues);
-  optionalString(attrs, "rawPropertiesXml", `${path}.rawPropertiesXml`, issues);
+  optionalPreservedMarkup(attrs, "_preserved", `${path}._preserved`, issues);
   optionalString(attrs, "rawEndPropertiesXml", `${path}.rawEndPropertiesXml`, issues);
+  optionalSdtEndProperties(attrs, `${path}.endProperties`, issues);
 };
 
 /**
@@ -2624,6 +2630,77 @@ const validateSdtAttrsRecord = (
  * spelling, which is why the namespace is a URI and optional rather than a
  * prefix. See `docx/attributeRemainder.ts`.
  */
+/**
+ * The stack of row- or cell-level content controls a table node carries.
+ *
+ * Only `sdtType` is required: the rest of `SdtProperties` is an optional
+ * projection over a `w:sdtPr` whose bytes the record also carries, and a
+ * reader that demanded more would reject a control folio itself built.
+ */
+const optionalContentControls = (
+  attrs: Record<string, unknown>,
+  path: string,
+  issues: ProseMirrorAttrIssue[],
+): void => {
+  const value = attrs["contentControls"];
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: "Expected an array." });
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    const entryPath = `${path}[${index}]`;
+    if (!isRecord(entry)) {
+      issues.push({ path: entryPath, message: "Expected an object." });
+      continue;
+    }
+    requiredString(entry, "sdtType", `${entryPath}.sdtType`, issues);
+  }
+};
+
+/** A table sink entry may itself sit inside a row- or cell-level control. */
+const optionalTablePreservedMarkup = (
+  attrs: Record<string, unknown>,
+  key: string,
+  path: string,
+  issues: ProseMirrorAttrIssue[],
+): void => {
+  optionalPreservedMarkup(attrs, key, path, issues);
+  const value = attrs[key];
+  if (!isRecord(value) || !Array.isArray(value["children"])) {
+    return;
+  }
+  for (const [index, child] of value["children"].entries()) {
+    if (!isRecord(child)) {
+      continue;
+    }
+    optionalContentControls(child, `${path}.children[${index}].contentControls`, issues);
+  }
+};
+
+/**
+ * `w:sdtEndPr` as a record: an object whose presence is the element's, with
+ * optional run properties inside. `optionalTextFormatting` owns the shape of
+ * those, so the reader stays one line rather than a second copy of `w:rPr`.
+ */
+const optionalSdtEndProperties = (
+  attrs: Record<string, unknown>,
+  path: string,
+  issues: ProseMirrorAttrIssue[],
+): void => {
+  const value = attrs["endProperties"];
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (!isRecord(value)) {
+    issues.push({ path, message: "Expected an object." });
+    return;
+  }
+  optionalTextFormatting(value, "runProperties", `${path}.runProperties`, issues);
+};
+
 const optionalPreservedAttributes = (
   attrs: Record<string, unknown>,
   key: string,
@@ -2749,6 +2826,7 @@ const optionalPositionedBookmarks = (
     if (type === "bookmarkStart") {
       requiredString(marker, "name", `${entryPath}.marker.name`, issues);
     }
+    optionalContentControls(entry, `${entryPath}.contentControls`, issues);
   }
 };
 

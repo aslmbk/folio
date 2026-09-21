@@ -16,6 +16,7 @@ import type {
   PositionalTab,
   PositionedBookmarkMarker,
   PreservedAttribute,
+  PreservedMarkup,
   DisplacedByCustomXml,
   DrawingAnchor,
   DrawingRawXmlMode,
@@ -42,6 +43,7 @@ import type {
   TablePropertyExceptionFormatting,
   TablePropertyChange,
   TablePropertyExceptionChange,
+  TablePreservedMarkup,
   TableRowFormatting,
   TableRowPropertyChange,
   TableCellFormatting,
@@ -51,6 +53,7 @@ import type {
   ShapeFill,
   ShapeOutline,
   ShapeTextBody,
+  SdtEndProperties,
   SdtProperties,
   SdtType,
   TrackedChangeInfo,
@@ -701,10 +704,21 @@ export type SdtAttrs = {
   dropdownLastValue?: string;
   /** Checkbox checked state */
   checked?: boolean;
-  /** Captured `<w:sdtPr>…</w:sdtPr>` for round-trip replay. */
-  rawPropertiesXml?: string;
+  /**
+   * The `w:sdtPr` children folio does not model, at their schema ordinal.
+   *
+   * The control keeps its own bytes through the editor the way a paragraph
+   * keeps its attribute remainder: the serializer merges them back with the
+   * modelled children in `CT_SdtPr` order.
+   */
+  _preserved?: PreservedMarkup;
   /** Captured `<w:sdtEndPr>…</w:sdtEndPr>` for round-trip replay. */
   rawEndPropertiesXml?: string;
+  /**
+   * `w:sdtEndPr` as a record, for a control the editor rebuilds and which has
+   * no captured bytes left to replay. See `SdtProperties.endProperties`.
+   */
+  endProperties?: SdtEndProperties;
 };
 
 /**
@@ -735,10 +749,18 @@ export type BlockSdtAttrs = {
    * uses this flag to drop the filler instead of guessing from shape.
    */
   _originallyEmpty?: boolean;
-  /** Captured `<w:sdtPr>…</w:sdtPr>` for round-trip replay. */
-  rawPropertiesXml?: string;
+  /**
+   * The `w:sdtPr` children folio does not model, at their schema ordinal.
+   *
+   * The control keeps its own bytes through the editor the way a paragraph
+   * keeps its attribute remainder: the serializer merges them back with the
+   * modelled children in `CT_SdtPr` order.
+   */
+  _preserved?: PreservedMarkup;
   /** Captured `<w:sdtEndPr>…</w:sdtEndPr>` for round-trip replay. */
   rawEndPropertiesXml?: string;
+  /** `w:sdtEndPr` as a record; see `SdtAttrs.endProperties`. */
+  endProperties?: SdtEndProperties;
   /** Verbatim XML for sdt siblings before sdtContent (range markers). */
   rawSdtChildrenBeforeContent?: string;
   /** Verbatim XML for sdt siblings after sdtContent (range markers). */
@@ -1050,6 +1072,16 @@ export type TableAttrs = {
    */
   _bookmarks?: PositionedBookmarkMarker[];
   /**
+   * Markup the authored `w:tbl` carried beside its rows — a bookmark or
+   * permission boundary, a proofing error, a custom-XML revision range —
+   * with the row count that places it back between the same two rows.
+   *
+   * Carried by reference for the reason `_preservedAttributes` is: the sink
+   * follows the record it was authored on, so a table the editor created has
+   * none and a copy does not inherit one.
+   */
+  _preserved?: TablePreservedMarkup;
+  /**
    * Marks this whole table as a *suggested* insertion (AI proposal). The table
    * is dropped from serialized DOCX until accepted; because OOXML has no tracked
    * whole-table-insert primitive, accepting applies it directly.
@@ -1101,6 +1133,23 @@ export type TableRowAttrs = {
    * first in document order keeps it.
    */
   _bookmarks?: PositionedBookmarkMarker[];
+  /**
+   * The row-level content controls (`CT_SdtRow`) this row sits inside,
+   * outermost first.
+   *
+   * The record travels on the row because a table's children are rows and
+   * ProseMirror has no node to spare for a wrapper that is not one. Splitting
+   * or moving a row takes its controls with it, which an index between rows
+   * would not; the save re-opens one wrapper per run of consecutive rows that
+   * name the same control. See `TableRow.contentControls`.
+   */
+  contentControls?: SdtProperties[];
+  /**
+   * Markup the authored `w:tr` carried beside its cells, with the cell count
+   * that places it back between the same two cells. Follows the record the
+   * same way `TableAttrs._preserved` does.
+   */
+  _preserved?: TablePreservedMarkup;
 } & (
   | {
       /**
@@ -1248,6 +1297,11 @@ export type TableCellAttrs = {
         verticalMerge?: "continue" | "rest";
         verticalMergeOriginal?: "continue" | "rest";
       };
+  /**
+   * The cell-level content controls (`CT_SdtCell`) this cell sits inside,
+   * outermost first. The row's twin, one level down.
+   */
+  contentControls?: SdtProperties[];
   /** Preserve a DOCX vMerge restart even when PM cannot model it as a rowspan. */
   _preserveVMergeRestart?: boolean;
   /** Original DOCX vMerge continuation cells skipped into this PM rowspan. */

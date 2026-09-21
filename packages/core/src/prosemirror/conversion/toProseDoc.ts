@@ -143,6 +143,7 @@ import {
   type TableCellMarginsAttrs,
   type TableCellPosition,
 } from "./effectiveTableCellFormatting";
+import { hasSinkChildren } from "./preservedSinkCarriers";
 import { sdtAttrsFromProperties } from "./sdtAttrs";
 
 const DETACHED_WATERMARK_HOST = Symbol.for("stll.detachedWatermarkHost");
@@ -556,8 +557,8 @@ function preservedInlineNode(content: PreservedInline): PMNode {
 /**
  * Convert a `BlockSdt` model node into a `blockSdt` PM node, recursively
  * converting its children with the caller-supplied block converter. Pass
- * `rawPropertiesXml` / `rawEndPropertiesXml` through as attrs so the
- * serializer can replay them verbatim after a save.
+ * the preserved `w:sdtPr` children and the verbatim `<w:sdtEndPr>` through
+ * as attrs so the serializer can put them back after a save.
  */
 function convertBlockSdt(
   blockSdt: BlockSdt,
@@ -583,8 +584,9 @@ function convertBlockSdt(
     // inserted here) from source `<w:sdtContent><w:p/></w:sdtContent>`
     // (a real authored empty paragraph the user wants preserved).
     _originallyEmpty: blockSdt.content.length === 0,
-    rawPropertiesXml: props.rawPropertiesXml ?? null,
+    _preserved: props.preserved ?? null,
     rawEndPropertiesXml: props.rawEndPropertiesXml ?? null,
+    endProperties: props.endProperties ?? null,
     rawSdtChildrenBeforeContent: props.rawSdtChildrenBeforeContent ?? null,
     rawSdtChildrenAfterContent: props.rawSdtChildrenAfterContent ?? null,
   };
@@ -2129,6 +2131,12 @@ function convertTable(
   if (table.bookmarks && table.bookmarks.length > 0) {
     attrs._bookmarks = table.bookmarks;
   }
+  // The markup the table carried beside its rows, by identity: the save leg
+  // puts it back between the same two rows, and `fromProseDoc` gives it to the
+  // table it was authored on and to no copy of it.
+  if (hasSinkChildren(table.preserved)) {
+    attrs._preserved = table.preserved;
+  }
 
   const conditionalStyles: {
     wholeTable?: TableConditionalStyle;
@@ -2343,6 +2351,16 @@ function convertTableRow(
   // selects whole rows. Carried by identity for the same reason.
   if (row.bookmarks && row.bookmarks.length > 0) {
     attrsWithoutStructuralChange._bookmarks = row.bookmarks;
+  }
+  // The row-level content controls this row sits inside. They ride the row so
+  // that splitting or moving it keeps it inside its control; the save groups
+  // consecutive rows that name the same one back into a single wrapper.
+  if (row.contentControls && row.contentControls.length > 0) {
+    attrsWithoutStructuralChange.contentControls = row.contentControls;
+  }
+  // The row's child sink, carried by identity for the reason the table's is.
+  if (hasSinkChildren(row.preserved)) {
+    attrsWithoutStructuralChange._preserved = row.preserved;
   }
   let attrs: TableRowAttrs = attrsWithoutStructuralChange;
   const rowStructuralChange = row.structuralChange;
@@ -2691,6 +2709,10 @@ function convertTableCell({
   // Carry `w:tcPrChange` opaquely through PM for round-trip + accept/reject.
   if (cell.propertyChanges && cell.propertyChanges.length > 0) {
     attrs.tcPrChange = [...cell.propertyChanges];
+  }
+  // The cell-level content controls this cell sits inside; see the row's.
+  if (cell.contentControls && cell.contentControls.length > 0) {
+    attrs.contentControls = cell.contentControls;
   }
   const cellStructuralChange = cell.structuralChange;
   if (cellStructuralChange) {

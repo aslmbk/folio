@@ -18,12 +18,11 @@ export const sdtAttrsFromProperties = (properties: SdtProperties): SdtAttrs => (
     ? { dropdownLastValue: properties.dropdownLastValue }
     : {}),
   ...(properties.checked !== undefined ? { checked: properties.checked } : {}),
-  ...(properties.rawPropertiesXml !== undefined
-    ? { rawPropertiesXml: properties.rawPropertiesXml }
-    : {}),
+  ...(properties.preserved !== undefined ? { _preserved: properties.preserved } : {}),
   ...(properties.rawEndPropertiesXml !== undefined
     ? { rawEndPropertiesXml: properties.rawEndPropertiesXml }
     : {}),
+  ...(properties.endProperties !== undefined ? { endProperties: properties.endProperties } : {}),
 });
 
 export const sdtPropertiesFromAttrs = (attrs: SdtAttrs): SdtProperties => {
@@ -61,11 +60,14 @@ export const sdtPropertiesFromAttrs = (attrs: SdtAttrs): SdtProperties => {
   if (typeof attrs.checked === "boolean") {
     properties.checked = attrs.checked;
   }
-  if (attrs.rawPropertiesXml) {
-    properties.rawPropertiesXml = attrs.rawPropertiesXml;
+  if (attrs._preserved) {
+    properties.preserved = attrs._preserved;
   }
   if (attrs.rawEndPropertiesXml) {
     properties.rawEndPropertiesXml = attrs.rawEndPropertiesXml;
+  }
+  if (attrs.endProperties) {
+    properties.endProperties = attrs.endProperties;
   }
   return properties;
 };

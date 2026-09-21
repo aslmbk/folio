@@ -21,7 +21,7 @@ import type {
   TextDirection,
 } from "./formatting";
 import type { NumberFormat, ListRendering } from "./lists";
-import type { PreservedAttribute, PreservedMarkup } from "./preservedMarkup";
+import type { PreservedAttribute, PreservedChild, PreservedMarkup } from "./preservedMarkup";
 import type { PreviewDescriptor } from "./preview";
 import type { RelationshipId } from "./relationshipId";
 import type { PresetLineDashValue } from "./presetLineDash";
@@ -371,6 +371,8 @@ export type PositionedBookmarkMarker = {
   /** Modelled siblings (rows for a table, cells for a row) that preceded it. */
   index: number;
   marker: BookmarkStart | BookmarkEnd;
+  /** Row- or cell-level controls whose content held this marker. */
+  contentControls?: SdtProperties[];
 };
 
 // ============================================================================
@@ -1227,6 +1229,28 @@ export type TableCell = {
    * the model's recursion out of every table.
    */
   content: TableCellBlock[];
+  /**
+   * The cell-level content controls (`CT_SdtCell`) this cell sits inside,
+   * outermost first.
+   *
+   * See {@link TableRow.contentControls}: a cell-level control is the same
+   * shape one level down, and the two share the serializer that re-opens the
+   * wrapper.
+   */
+  contentControls?: SdtProperties[];
+};
+
+/**
+ * A table or row child the verbatim sink kept, including the content-control
+ * stack that owned it when it was read.
+ *
+ * The position alone cannot distinguish a marker just outside a control from
+ * one at the start or end of its `w:sdtContent`. Carrying the stack keeps the
+ * marker inside its authored wrapper and prevents one control from being
+ * rebuilt as two wrappers around the children on either side of it.
+ */
+export type TablePreservedMarkup = {
+  children?: (PreservedChild & { contentControls?: SdtProperties[] })[];
 };
 
 /**
@@ -1268,7 +1292,7 @@ export type TableRow = {
    * there is no member to be, and `index` counts the cells that preceded the
    * capture.
    */
-  preserved?: PreservedMarkup;
+  preserved?: TablePreservedMarkup;
   /**
    * Attributes `w:tr` carried that this record has no field for.
    *
@@ -1285,6 +1309,31 @@ export type TableRow = {
    * joining {@link TableRow.preserved}.
    */
   bookmarks?: PositionedBookmarkMarker[];
+  /**
+   * The row-level content controls (`CT_SdtRow`) this row sits inside,
+   * outermost first.
+   *
+   * `CT_SdtRow` is transparent: what it holds is ordinary rows, and the
+   * control adds a tag, an alias, a lock, a data binding and an end mark. So
+   * the control is recorded *on* the rows it wrapped rather than as a member
+   * between them — a member would need a node of its own in a table whose
+   * children are rows, and an index would drift the moment a row moved.
+   *
+   * **A control may hold several rows, and then each of them carries the same
+   * record.** `CT_SdtContentRow` admits `w:tr*`; across 5299 public packages
+   * every one of the 23 row-level controls held exactly one row, and the same
+   * for all 329 cell-level ones. The serializer rebuilds a multi-row wrapper
+   * by grouping consecutive rows that name the same control, so the schema's
+   * case survives without a `TableRowGroup` member that the ProseMirror table
+   * schema could not carry. The cost is stated where the grouping is: two
+   * adjacent rows in two separate but identically spelled controls come back
+   * as one.
+   *
+   * The list is a stack because a control may hold a control: a repeating
+   * section whose row is itself bound. Outermost first, as the source wrote
+   * them.
+   */
+  contentControls?: SdtProperties[];
 };
 
 /**
@@ -1312,7 +1361,7 @@ export type Table = {
    * model and are read and written elsewhere, so they are not in the sink and
    * the index counts rows only.
    */
-  preserved?: PreservedMarkup;
+  preserved?: TablePreservedMarkup;
   /**
    * Bookmark markers `w:tbl` held beside its rows, with their position.
    *
@@ -1822,16 +1871,16 @@ export type SdtType =
 /**
  * SDT properties (`w:sdtPr`).
  *
- * Modeled fields are a read-only projection for downstream tooling
- * (tag/alias addressing, template extraction). They are NOT the
- * serialization source: the original `<w:sdtPr>` is captured verbatim in
- * `rawPropertiesXml` and replayed on save, which preserves element order
- * (`CT_SdtPr` is an `xsd:sequence`), avoids double-emission, and keeps
- * unmodeled features (`w:dataBinding`, `w15:repeatingSection`, `@lastValue`,
- * `w:sdtEndPr`) lossless.
+ * The modelled fields are the addressing and interaction surface: a tag, an
+ * alias, a lock, the value a user picked. Everything else the schema declares
+ * — the control-kind element, `w:dataBinding`, `w:label`, `w:tabIndex`,
+ * `w:temporary`, `w:rPr` — and every extension-namespace child a producer
+ * writes are in {@link SdtProperties.preserved}, at the ordinal `CT_SdtPr`'s
+ * sequence gives them. Together the two are the whole element: the serializer
+ * writes both halves and nothing replays the source's bytes whole.
  */
 export type SdtProperties = {
-  /** SDT type (projection; round-trip uses `rawPropertiesXml`). */
+  /** SDT type (a projection of the control-kind element the set holds). */
   sdtType: SdtType;
   /** Numeric id (`w:id/@w:val`). */
   id?: number;
@@ -1870,13 +1919,25 @@ export type SdtProperties = {
   /** Checkbox checked state (`w14:checkbox/w14:checked`). */
   checked?: boolean;
   /**
-   * Verbatim `<w:sdtPr>…</w:sdtPr>` captured at parse time. Replayed on
-   * serialize so unmodeled OOXML features (data binding, repeating sections,
-   * `@lastValue`, custom XML mappings) survive round-trip.
+   * The `w:sdtPr` children folio does not model, at their schema ordinal.
+   *
+   * `CT_SdtPr` is an `xsd:sequence`, so the ordinal is the child's position
+   * in it rather than a count of modelled siblings: the count is a mirror of
+   * whichever properties folio models today and it moves under the capture
+   * the moment one more of them is modelled.
    */
-  rawPropertiesXml?: string;
+  preserved?: PreservedMarkup;
   /** Verbatim `<w:sdtEndPr>…</w:sdtEndPr>` captured at parse time. */
   rawEndPropertiesXml?: string;
+  /**
+   * `w:sdtEndPr` as a record, beside the bytes above rather than instead of
+   * them.
+   *
+   * The capture is replayed while it exists, and a control folio *rebuilds* —
+   * one an edit touched, one a full repack writes — has no bytes to replay,
+   * so before this the end mark simply disappeared from the saved control.
+   */
+  endProperties?: SdtEndProperties;
   /**
    * Verbatim XML for any non-content direct children of `<w:sdt>` that
    * appear BEFORE `<w:sdtContent>` — MS-OE376 §2.5.2.30 documents 16
@@ -1889,6 +1950,20 @@ export type SdtProperties = {
   rawSdtChildrenBeforeContent?: string;
   /** Verbatim XML for non-content sdt children that appear AFTER `<w:sdtContent>`. */
   rawSdtChildrenAfterContent?: string;
+};
+
+/**
+ * `w:sdtEndPr`: what the control's end-of-content mark carries.
+ *
+ * `CT_SdtEndPr` declares `w:rPr` and nothing else, so the record's presence is
+ * the element's and its one field is those run properties. `<w:sdtEndPr/>`
+ * with no `w:rPr` is what Word writes for most controls and says something an
+ * absent element does not, which is why presence is the record rather than a
+ * flag on {@link SdtProperties}.
+ */
+export type SdtEndProperties = {
+  /** `w:sdtEndPr/w:rPr`, absent when the element declared none. */
+  runProperties?: TextFormatting;
 };
 
 /**
@@ -1939,7 +2014,7 @@ export type InlineSdt = {
  */
 export type BlockSdt = {
   type: "blockSdt";
-  /** SDT properties (raw XML in `properties.rawPropertiesXml` round-trips losslessly). */
+  /** SDT properties; `properties.preserved` carries what the model does not. */
   properties: SdtProperties;
   /** Block content inside the control. */
   content: BlockContent[];

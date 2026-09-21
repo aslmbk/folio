@@ -1087,6 +1087,7 @@ export type PositionalTab = {
 export type PositionedBookmarkMarker = {
     index: number;
     marker: BookmarkStart | BookmarkEnd;
+    contentControls?: SdtProperties[];
 };
 
 // @public
@@ -1280,6 +1281,11 @@ export type SchemeColorSlot = "dk1" | "lt1" | "dk2" | "lt2" | "accent1" | "accen
 export type SchemeColorValue = "bg1" | "tx1" | "bg2" | "tx2" | "accent1" | "accent2" | "accent3" | "accent4" | "accent5" | "accent6" | "hlink" | "folHlink" | "phClr" | "dk1" | "lt1" | "dk2" | "lt2";
 
 // @public
+export type SdtEndProperties = {
+    runProperties?: TextFormatting;
+};
+
+// @public
 export type SdtProperties = {
     sdtType: SdtType;
     id?: number;
@@ -1296,8 +1302,9 @@ export type SdtProperties = {
     }[];
     dropdownLastValue?: string;
     checked?: boolean;
-    rawPropertiesXml?: string;
+    preserved?: PreservedMarkup;
     rawEndPropertiesXml?: string;
+    endProperties?: SdtEndProperties;
     rawSdtChildrenBeforeContent?: string;
     rawSdtChildrenAfterContent?: string;
 };
@@ -1594,7 +1601,7 @@ export type Table = {
     propertyChanges?: TablePropertyChange[];
     columnWidths?: number[];
     rows: TableRow[];
-    preserved?: PreservedMarkup;
+    preserved?: TablePreservedMarkup;
     bookmarks?: PositionedBookmarkMarker[];
 };
 
@@ -1624,6 +1631,7 @@ export type TableCell = {
     propertyChanges?: TableCellPropertyChange[];
     structuralChange?: TableStructuralChangeInfo;
     content: TableCellBlock[];
+    contentControls?: SdtProperties[];
 };
 
 // @public
@@ -1711,6 +1719,13 @@ export type TableMeasurement = {
 };
 
 // @public
+export type TablePreservedMarkup = {
+    children?: (PreservedChild & {
+        contentControls?: SdtProperties[];
+    })[];
+};
+
+// @public
 export type TablePropertyChange = {
     type: "tablePropertyChange";
     info: PropertyChangeInfo;
@@ -1738,9 +1753,10 @@ export type TableRow = {
     tablePropertyExceptionChanges?: TablePropertyExceptionChange[];
     structuralChange?: TableStructuralChangeInfo;
     cells: TableCell[];
-    preserved?: PreservedMarkup;
+    preserved?: TablePreservedMarkup;
     preservedAttributes?: PreservedAttribute[];
     bookmarks?: PositionedBookmarkMarker[];
+    contentControls?: SdtProperties[];
 };
 
 // @public
