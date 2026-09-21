@@ -2,7 +2,11 @@ import { collectSectionConfigs } from "../layout-engine";
 import type { SectionLayoutConfig } from "../layout-engine";
 import { hasPageBreakBefore } from "../layout-engine/keep-together";
 import { calculateColumnLefts, calculateColumnWidths } from "../layout-engine/paginator";
-import { normalizeSectionBreakType } from "../layout-engine/section-breaks";
+import {
+  physicalColumnRegionIsShared,
+  sectionStartAdvanceOf,
+} from "../layout-engine/section-breaks";
+import type { SectionStartAdvance } from "../layout-engine/section-breaks";
 import type { ColumnLayout, FlowBlock } from "../layout-engine/types";
 
 type ComputePerBlockMeasureInput = {
@@ -33,6 +37,8 @@ type PerBlockMeasureInputs = {
   contentLefts: number[];
   columnIndices: number[];
   columnCounts: number[];
+  /** Resolved paginator transition at each section-break block. */
+  sectionAdvances: (SectionStartAdvance | undefined)[];
   physicalPageGeometry: PerBlockPhysicalPageGeometry;
 };
 
@@ -111,11 +117,13 @@ export function computePerBlockMeasureInputs({
   const contentLefts: number[] = [];
   const columnIndices: number[] = [];
   const columnCounts: number[] = [];
+  const sectionAdvances: (SectionStartAdvance | undefined)[] = [];
   const initialConfig = sectionConfigs[0] ?? finalConfig;
   let physicalPageGeometry: PhysicalPageGeometry = {
     pageSize: initialConfig.pageSize,
     margins: initialConfig.margins,
   };
+  let hasPhysicalPage = false;
   let hasPhysicalPageContent = false;
 
   for (let i = 0; i < blocks.length; i++) {
@@ -125,6 +133,7 @@ export function computePerBlockMeasureInputs({
     switch (preBlockTransition.type) {
       case "physicalPage":
         physicalPageGeometry = preBlockTransition.geometry;
+        hasPhysicalPage = true;
         hasPhysicalPageContent = false;
         columnGeometryDirty = true;
         columnIndex = 0;
@@ -154,6 +163,7 @@ export function computePerBlockMeasureInputs({
     contentLefts.push(activeContentLefts[columnIndex] ?? physicalPageGeometry.margins.left);
     columnIndices.push(columnIndex);
     columnCounts.push(activeColumns.count);
+    sectionAdvances.push(undefined);
     marginTops.push(config.margins.top);
     physicalMarginTops.push(physicalPageGeometry.margins.top);
     pageHeights.push(config.pageSize.h);
@@ -170,12 +180,35 @@ export function computePerBlockMeasureInputs({
     if (sectionIdx < breakIndices.length && i === breakIndices[sectionIdx]) {
       const sectionBreak = block;
       const nextConfig = sectionConfigs[sectionIdx + 1] ?? finalConfig;
-      const sharesPhysicalPage =
-        sectionBreak?.kind === "sectionBreak" &&
-        normalizeSectionBreakType(sectionBreak.type) === "continuous" &&
-        hasPhysicalPageContent &&
+      const advance =
+        sectionBreak?.kind === "sectionBreak" ? sectionStartAdvanceOf(sectionBreak.type) : "page";
+      // Mirrors the paginator: a `nextColumn` section continues in the next
+      // column of the region it shares, so it keeps the sheet and the column
+      // the paginator will place it in.
+      const sharesColumnRegion =
+        hasPhysicalPage &&
+        advance === "column" &&
+        physicalColumnRegionIsShared(
+          { ...physicalPageGeometry, columns: activeColumns },
+          nextConfig,
+        );
+      const continuesInNextColumn = sharesColumnRegion && columnIndex + 1 < activeColumns.count;
+      const pageSizeIsShared =
         Math.round(nextConfig.pageSize.w) === Math.round(physicalPageGeometry.pageSize.w) &&
         Math.round(nextConfig.pageSize.h) === Math.round(physicalPageGeometry.pageSize.h);
+      let sectionAdvance: SectionStartAdvance = "region";
+      if (
+        advance === "page" ||
+        !pageSizeIsShared ||
+        (sharesColumnRegion && !continuesInNextColumn)
+      ) {
+        sectionAdvance = "page";
+      } else if (continuesInNextColumn) {
+        sectionAdvance = "column";
+      }
+      sectionAdvances[i] = sectionAdvance;
+      const sharesPhysicalPage =
+        sectionAdvance === "column" || (sectionAdvance === "region" && hasPhysicalPageContent);
       if (!sharesPhysicalPage) {
         physicalPageGeometry = {
           pageSize: nextConfig.pageSize,
@@ -183,11 +216,15 @@ export function computePerBlockMeasureInputs({
         };
         hasPhysicalPageContent = false;
       }
+      if (sectionAdvance === "page") {
+        hasPhysicalPage = true;
+      }
       columnGeometryDirty = true;
       sectionIdx++;
-      columnIndex = 0;
+      columnIndex = sectionAdvance === "column" ? columnIndex + 1 : 0;
     } else if (block.kind === "pageBreak") {
       physicalPageGeometry = { pageSize: config.pageSize, margins: config.margins };
+      hasPhysicalPage = true;
       hasPhysicalPageContent = false;
       columnGeometryDirty = true;
       columnIndex = 0;
@@ -197,8 +234,10 @@ export function computePerBlockMeasureInputs({
         hasPhysicalPageContent = false;
         columnGeometryDirty = true;
       }
+      hasPhysicalPage = true;
       columnIndex = (columnIndex + 1) % activeColumns.count;
     } else {
+      hasPhysicalPage = true;
       hasPhysicalPageContent = true;
     }
   }
@@ -214,6 +253,7 @@ export function computePerBlockMeasureInputs({
     contentLefts,
     columnIndices,
     columnCounts,
+    sectionAdvances,
     physicalPageGeometry: {
       pageHeights: physicalPageHeights,
       pageWidths: physicalPageWidths,

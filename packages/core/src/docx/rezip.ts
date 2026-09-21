@@ -34,7 +34,7 @@ import type { RemovedSectionReference } from "../internal/sectionEndpointResolut
 
 import { escapeXmlAttribute, escapeXmlText, validateDocxPackage } from "@stll/docx-core";
 import { mintRelationshipId } from "@stll/docx-core/model";
-import { panic } from "better-result";
+import { panic, TaggedError } from "better-result";
 import JSZip from "jszip";
 
 import {
@@ -48,8 +48,10 @@ import type {
   Footnote,
   HeaderFooter,
   Hyperlink,
+  Paragraph,
   ParagraphContent,
   Run,
+  SectionProperties,
   TrackedRunContent,
 } from "../types/content";
 import type {
@@ -60,6 +62,7 @@ import type {
   Watermark,
 } from "../types/document";
 import { applyReplyThreadMarkers } from "./commentReplyMarkers";
+import { BLOCK_TREE_DESCENT, visitBlockTreeRecords } from "./paragraphTraversal";
 import { parseHeaderFooterType } from "./headerFooterRefParser";
 import { withoutOrphanCommentRanges } from "./commentRangeIntegrity";
 import { parseEndnotes, parseFootnotes } from "./footnoteParser";
@@ -129,10 +132,46 @@ import { normalizeRevisionIdsInXmlParts } from "./revisionIdNormalization";
 import { assertXmlResourceLimits } from "./xmlResourceLimits";
 import { isAllowedExternalWatermarkImageUrl } from "../watermark";
 
-export class DocxPackageFidelityError extends Error {
+export class DocxPackageFidelityError extends TaggedError("DocxPackageFidelityError")<{
+  message: string;
+}> {
   constructor(message: string) {
-    super(message);
-    this.name = "DocxPackageFidelityError";
+    super({ message });
+  }
+}
+
+/**
+ * Raised when a save would write a section the editor never authored.
+ *
+ * Two paragraphs holding the *same* `SectionProperties` object are one
+ * section's two halves, not two sections: ProseMirror copies a node's attrs
+ * when a command splits it, and the object is passed through by reference and
+ * never cloned, so identity is what tells a copy from a second authored break.
+ * The paragraph is named because the count alone does not say which of them the
+ * save invented.
+ */
+export class DocxDuplicateSectionCarrierError extends DocxPackageFidelityError {
+  /** The `w:paraId` of the duplicate carrier, when the package gave it one. */
+  readonly paraId: string | null;
+  /** Its position among the paragraph-level carriers, in document order. */
+  readonly carrierIndex: number;
+  /** The position of the carrier it duplicates. */
+  readonly duplicatesCarrierIndex: number;
+
+  constructor(options: {
+    paraId: string | null;
+    carrierIndex: number;
+    duplicatesCarrierIndex: number;
+  }) {
+    super(
+      `Full DOCX repack would add a section: paragraph-level w:sectPr carrier ${options.carrierIndex}` +
+        `${options.paraId === null ? "" : ` (w:paraId ${options.paraId})`}` +
+        ` holds the same section record as carrier ${options.duplicatesCarrierIndex}.`,
+    );
+    this.name = "DocxDuplicateSectionCarrierError";
+    this.paraId = options.paraId;
+    this.carrierIndex = options.carrierIndex;
+    this.duplicatesCarrierIndex = options.duplicatesCarrierIndex;
   }
 }
 
@@ -239,6 +278,68 @@ const consumeReferenceCount = (counts: Map<string, number>, key: string): boolea
   return true;
 };
 
+/** Every paragraph the model says a section ends at, in document order. */
+const sectionCarrierParagraphs = (doc: Document): Paragraph[] => {
+  const carriers: Paragraph[] = [];
+  visitBlockTreeRecords(doc.package.document.content, (record) => {
+    if (record.type === "paragraph" && record.sectionProperties !== undefined) {
+      carriers.push(record);
+    }
+    return BLOCK_TREE_DESCENT.descend;
+  });
+  return carriers;
+};
+
+/**
+ * Every serialized section has exactly one model record, and vice versa.
+ *
+ * A split paragraph's duplicated `w:sectPr` is a section nobody added,
+ * repeating the real one's `w:rsidSect` and claiming its revision history too.
+ * Two carriers over one record are therefore invalid regardless of whether a
+ * separate deletion makes the total section count rise, fall, or stay equal.
+ *
+ * The count is a separate invariant: `serializeSectionProperties` fails closed
+ * to `""` for a record holding settings it cannot write, so carrier uniqueness
+ * alone does not prove the package states the sections the model holds.
+ */
+const assertSectionCarriersMatchModel = ({
+  doc,
+  serializedSectionCount,
+}: {
+  doc: Document;
+  serializedSectionCount: number;
+}): void => {
+  const carriers = sectionCarrierParagraphs(doc);
+  const firstHolder = new Map<SectionProperties, number>();
+  for (const [index, paragraph] of carriers.entries()) {
+    // SAFETY: `sectionCarrierParagraphs` selects on this field being defined.
+    const record = paragraph.sectionProperties!;
+    const duplicates = firstHolder.get(record);
+    if (duplicates !== undefined) {
+      throw new DocxDuplicateSectionCarrierError({
+        paraId: paragraph.paraId ?? null,
+        carrierIndex: index,
+        duplicatesCarrierIndex: duplicates,
+      });
+    }
+    firstHolder.set(record, index);
+  }
+
+  const finalSectionProperties = doc.package.document.finalSectionProperties;
+  if (finalSectionProperties !== undefined && firstHolder.has(finalSectionProperties)) {
+    throw new DocxPackageFidelityError(
+      "Full DOCX repack would write the final section record from a paragraph carrier twice.",
+    );
+  }
+
+  const modelSectionCount = carriers.length + (finalSectionProperties === undefined ? 0 : 1);
+  if (serializedSectionCount !== modelSectionCount) {
+    throw new DocxPackageFidelityError(
+      `Full DOCX repack would write ${serializedSectionCount} sections where the editor holds ${modelSectionCount}.`,
+    );
+  }
+};
+
 type AssertDocumentPackageFidelityOptions = {
   originalDocumentXml: string;
   serializedDocumentXml: string;
@@ -269,6 +370,7 @@ function assertDocumentPackageFidelity({
       "Full DOCX repack would drop section properties. Use selective patching instead.",
     );
   }
+  assertSectionCarriersMatchModel({ doc, serializedSectionCount });
 
   const serializedReferenceCounts = new Map<string, number>();
   for (const reference of extractHeaderFooterReferences(serializedDocumentXml)) {

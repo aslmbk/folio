@@ -92,6 +92,7 @@ import {
 import { autospacingMatchesBase } from "../../prosemirror/autospacingBase";
 import { runShadingAttrsToShading } from "../../prosemirror/conversion/runShadingMark";
 import { directionIsRtl, directionToBidi } from "../../prosemirror/paragraphDirection";
+import { parseSectionBreakType } from "../../prosemirror/sectionCarrier";
 import { expectTextBoxAnchorAttrs } from "../../prosemirror/textBoxAnchorAttrs";
 import {
   resolveEffectiveRunStyleFormatting,
@@ -124,7 +125,6 @@ import type {
   ParagraphAlignment,
   TabStopAlignment,
   Theme,
-  SectionProperties,
   StyleDefinitions,
   TextFormatting,
 } from "../../types/document";
@@ -3622,17 +3622,13 @@ function coalesceTrailingPageBreakBeforeContinuousSection(
   return result;
 }
 
+/**
+ * The last section's start mode, off a document attribute the schema types as
+ * `any`. `parseSectionBreakType` owns the enumeration, so a member added to
+ * `ST_SectionMark` reaches the paginator instead of being dropped here.
+ */
 function readFinalSectionStart(doc: PMNode): NonNullable<SectionBreakBlock["type"]> | undefined {
-  const sectionStart = doc.attrs["_finalSectionStart"];
-  switch (sectionStart) {
-    case "continuous":
-    case "nextPage":
-    case "oddPage":
-    case "evenPage":
-      return sectionStart;
-    default:
-      return undefined;
-  }
+  return parseSectionBreakType(doc.attrs["_finalSectionStart"]) ?? undefined;
 }
 
 /**
@@ -3757,7 +3753,7 @@ export function toFlowBlocks(doc: PMNode, options: ToFlowBlocksOptions = {}): Fl
         paragraphAttrs &&
         next?.type.name === "pageBreak" &&
         paragraphAttrs._trailingPageBreak === true &&
-        (paragraphAttrs._sectionProperties || paragraphAttrs.sectionBreakType)
+        paragraphAttrs._sectionProperties !== undefined
       ) {
         trailingPageBreakSectionPositions.add(childStart);
         consumedPageBreakPositions.add(childStart + child.nodeSize);
@@ -3874,10 +3870,8 @@ export function toFlowBlocks(doc: PMNode, options: ToFlowBlocksOptions = {}): Fl
     switch (node.type.name) {
       case "paragraph": {
         const pmAttrs = expectParagraphAttrs(node);
-        const secProps = pmAttrs._sectionProperties as SectionProperties | undefined;
-        const hasSectionBreak =
-          secProps !== undefined ||
-          (pmAttrs.sectionBreakType !== null && pmAttrs.sectionBreakType !== undefined);
+        const secProps = pmAttrs._sectionProperties;
+        const hasSectionBreak = secProps !== undefined;
         const hasListFormatting =
           (pmAttrs.numPr !== null && pmAttrs.numPr !== undefined) ||
           (pmAttrs.listMarker !== null && pmAttrs.listMarker !== undefined);
@@ -3974,9 +3968,9 @@ export function toFlowBlocks(doc: PMNode, options: ToFlowBlocksOptions = {}): Fl
             kind: "sectionBreak",
             id: nextBlockId(),
           };
-          const breakType = secProps?.sectionStart ?? pmAttrs.sectionBreakType;
+          const breakType = secProps?.sectionStart;
           if (breakType) {
-            sectionBreak.type = breakType as NonNullable<SectionBreakBlock["type"]>;
+            sectionBreak.type = breakType;
           }
 
           if (secProps) {
