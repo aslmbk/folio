@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DRAWING_RAW_XML_MODES } from "@stll/docx-core/model";
+import { panic } from "better-result";
 
 import {
   readFieldAttrs,
@@ -445,6 +446,22 @@ describe("ProseMirror attr readers", () => {
     const result = readTableCellAttrs(node);
 
     expect(result.ok).toBe(true);
+  });
+
+  test("rejects malformed table cell identity metadata", () => {
+    const node = schema.nodes.tableCell.create({
+      colspan: 1,
+      rowspan: 1,
+      _docxCellId: 7,
+    });
+
+    const result = readTableCellAttrs(node);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      panic("Expected table cell attrs to be rejected");
+    }
+    expect(result.issues.map((issue) => issue.path)).toContain("tableCell.attrs._docxCellId");
   });
 
   test("accepts unknown OOXML border style strings", () => {

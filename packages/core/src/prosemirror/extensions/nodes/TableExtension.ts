@@ -103,6 +103,74 @@ const preserveOmittedGridSlots =
     return command(state, dispatch, view);
   };
 
+const preserveSourceCellIdentity =
+  (command: Command): Command =>
+  (state, dispatch, view) => {
+    if (!command(state, undefined, view)) {
+      return false;
+    }
+    if (!dispatch) {
+      return true;
+    }
+
+    const rect = selectedRect(state);
+    const sourceRelativePosition = rect.map.map.at(rect.top * rect.map.width + rect.left);
+    if (sourceRelativePosition === undefined) {
+      return panic("The selected table cell is absent from its table map");
+    }
+    const sourceCell = rect.table.nodeAt(sourceRelativePosition);
+    if (!sourceCell) {
+      return panic("The selected table cell is absent from its table map");
+    }
+    const sourceId = expectTableCellAttrs(sourceCell)._docxCellId;
+
+    return command(
+      state,
+      (tr) => {
+        if (sourceId === undefined || sourceId === null) {
+          dispatch(tr);
+          return;
+        }
+
+        const mappedTablePosition = tr.mapping.map(rect.tableStart - 1, -1);
+        const table = tr.doc.nodeAt(mappedTablePosition);
+        if (!table) {
+          return panic("The split-cell transaction lost its table");
+        }
+        const tableStart = mappedTablePosition + 1;
+        const map = TableMap.get(table);
+        const survivingRelativePosition = map.map.at(rect.top * map.width + rect.left);
+        if (survivingRelativePosition === undefined) {
+          return panic("The surviving table cell is absent from its table map");
+        }
+        const cleared = new Set<number>();
+
+        for (let row = rect.top; row < rect.bottom; row++) {
+          for (let column = rect.left; column < rect.right; column++) {
+            const relativePosition = map.map.at(row * map.width + column);
+            if (relativePosition === undefined) {
+              return panic("A split table cell is absent from its table map");
+            }
+            if (relativePosition === survivingRelativePosition || cleared.has(relativePosition)) {
+              continue;
+            }
+            cleared.add(relativePosition);
+            const cell = table.nodeAt(relativePosition);
+            if (!cell) {
+              return panic("A split table cell is absent from its table map");
+            }
+            tr.setNodeMarkup(tableStart + relativePosition, null, {
+              ...cell.attrs,
+              _docxCellId: null,
+            });
+          }
+        }
+        dispatch(tr);
+      },
+      view,
+    );
+  };
+
 // ============================================================================
 // CSS PASTE HELPERS — Extract formatting from inline styles (Google Docs, etc.)
 // ============================================================================
@@ -568,6 +636,7 @@ const tableCellSpec: NodeSpec = {
   tableRole: "cell",
   isolating: true,
   attrs: {
+    _docxCellId: { default: null },
     colspan: { default: 1 },
     rowspan: { default: 1 },
     _omittedGridSlot: { default: null },
@@ -656,6 +725,7 @@ const tableHeaderSpec: NodeSpec = {
   tableRole: "header_cell",
   isolating: true,
   attrs: {
+    _docxCellId: { default: null },
     colspan: { default: 1 },
     rowspan: { default: 1 },
     _omittedGridSlot: { default: null },
@@ -2957,7 +3027,7 @@ export const TablePluginExtension = createExtension({
         selectRow: () => selectRow,
         selectColumn: () => selectColumn,
         mergeCells: () => preserveOmittedGridSlots(pmMergeCells),
-        splitCell: () => preserveOmittedGridSlots(pmSplitCell),
+        splitCell: () => preserveOmittedGridSlots(preserveSourceCellIdentity(pmSplitCell)),
         setCellBorder: (
           side: "top" | "bottom" | "left" | "right" | "all",
           spec: TableCellBorderCommandSpec | null,
