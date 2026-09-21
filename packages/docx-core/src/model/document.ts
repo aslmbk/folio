@@ -168,6 +168,8 @@ export { COUNTER_FORMATS } from "./lists";
 export type {
   CounterFormat,
   NumberFormat,
+  LevelLegacy,
+  LevelOverride,
   LevelSuffix,
   ListLevel,
   AbstractNumbering,
@@ -322,6 +324,8 @@ export type {
   ThemeFont,
   ThemeFontScheme,
   Theme,
+  EmbeddedFontRef,
+  FontCharset,
   FontInfo,
   FontTable,
   RelationshipType,

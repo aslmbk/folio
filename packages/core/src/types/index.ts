@@ -93,6 +93,8 @@ export type {
 
   // Lists & Numbering
   NumberFormat,
+  LevelLegacy,
+  LevelOverride,
   LevelSuffix,
   ListLevel,
   AbstractNumbering,
@@ -145,6 +147,8 @@ export type {
   Theme,
 
   // Font Table
+  EmbeddedFontRef,
+  FontCharset,
   FontInfo,
   FontTable,
 
