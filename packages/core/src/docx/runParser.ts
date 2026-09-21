@@ -1051,8 +1051,7 @@ function parseRunContents(
         break;
 
       case "cr": {
-        // Carriage return - treat as line break
-        const cr: BreakContent = { type: "break", breakType: "textWrapping" };
+        const cr: BreakContent = { type: "break", sourceElement: "cr" };
         contents.push(cr);
         break;
       }
