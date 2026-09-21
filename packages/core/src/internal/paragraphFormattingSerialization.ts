@@ -1,4 +1,5 @@
 import type { ExhaustiveFields, ParagraphFormatting, TextFormatting } from "../types/document";
+import { serializePreservedAttributes } from "../docx/attributeRemainder";
 import { serializeBorder } from "../docx/serializer/borderSerializer";
 import {
   serializeShading,
@@ -12,6 +13,7 @@ import {
   sameEffectiveParagraphNumbering,
   type ParagraphNumberingOverride,
 } from "@stll/docx-core/model";
+import { serializeSequenceChildren } from "@stll/docx-core/schema";
 import { TRANSITIONAL_NAME_BY_STRICT_NAME } from "../docx/strictNames.gen";
 import { sanitizeCapturedXmlElement } from "../docx/verbatimCapture";
 import { NAMESPACES, OOXML_NAMESPACE_SCOPE } from "../docx/xmlParser";
@@ -28,7 +30,7 @@ type ExhaustiveParagraphBorders = ExhaustiveFields<
 >;
 
 type ParagraphTab = NonNullable<ParagraphFormatting["tabs"]>[number];
-type ClassifiedParagraphTabField = "alignment" | "position" | "leader";
+type ClassifiedParagraphTabField = "alignment" | "position" | "leader" | "preservedAttributes";
 type ExhaustiveParagraphTab = ExhaustiveFields<ParagraphTab, ClassifiedParagraphTabField>;
 
 type ParagraphFrame = NonNullable<ParagraphFormatting["frame"]>;
@@ -45,7 +47,8 @@ type ClassifiedParagraphFrameField =
   | "y"
   | "xAlign"
   | "yAlign"
-  | "wrap";
+  | "wrap"
+  | "preservedAttributes";
 type ExhaustiveParagraphFrame = ExhaustiveFields<ParagraphFrame, ClassifiedParagraphFrameField>;
 
 type SpacingProvenance = NonNullable<ParagraphFormatting["spacingExplicit"]>;
@@ -68,10 +71,12 @@ type ClassifiedParagraphFormattingField =
   | "beforeAutospacing"
   | "afterAutospacing"
   | "spacingExplicit"
+  | "spacingPreservedAttributes"
   | "indentLeft"
   | "indentRight"
   | "indentFirstLine"
   | "hangingIndent"
+  | "indentPreservedAttributes"
   | "borders"
   | "shading"
   | "tabs"
@@ -89,7 +94,8 @@ type ClassifiedParagraphFormattingField =
   | "suppressLineNumbers"
   | "suppressAutoHyphens"
   | "runProperties"
-  | "runInWithNext";
+  | "runInWithNext"
+  | "preserved";
 type ExhaustiveParagraphFormatting = ExhaustiveFields<
   ParagraphFormatting,
   ClassifiedParagraphFormattingField
@@ -154,12 +160,12 @@ const serializeTabStops = (tabs: ParagraphFormatting["tabs"]): string => {
 
   const tabElements = tabs.map((tab) => {
     const exhaustiveTab: ExhaustiveParagraphTab = tab;
-    const { alignment, position, leader } = exhaustiveTab;
+    const { alignment, position, leader, preservedAttributes } = exhaustiveTab;
     const attrs = [`w:val="${alignment}"`, `w:pos="${intAttr(position)}"`];
     if (leader && leader !== "none") {
       attrs.push(`w:leader="${leader}"`);
     }
-    return `<w:tab ${attrs.join(" ")}/>`;
+    return `<w:tab ${serializePreservedAttributes(attrs, preservedAttributes).join(" ")}/>`;
   });
   return `<w:tabs>${tabElements.join("")}</w:tabs>`;
 };
@@ -170,7 +176,8 @@ type ClassifiedSpacingFormattingField =
   | "lineSpacing"
   | "lineSpacingRule"
   | "beforeAutospacing"
-  | "afterAutospacing";
+  | "afterAutospacing"
+  | "spacingPreservedAttributes";
 type SpacingFormatting = RequiredFieldValues<ParagraphFormatting, ClassifiedSpacingFormattingField>;
 
 const serializeSpacing = (formatting: SpacingFormatting): string => {
@@ -193,14 +200,16 @@ const serializeSpacing = (formatting: SpacingFormatting): string => {
   if (formatting.afterAutospacing !== undefined) {
     attrs.push(`w:afterAutospacing="${formatting.afterAutospacing ? "1" : "0"}"`);
   }
-  return attrs.length === 0 ? "" : `<w:spacing ${attrs.join(" ")}/>`;
+  const written = serializePreservedAttributes(attrs, formatting.spacingPreservedAttributes);
+  return written.length === 0 ? "" : `<w:spacing ${written.join(" ")}/>`;
 };
 
 type ClassifiedIndentationFormattingField =
   | "indentLeft"
   | "indentRight"
   | "indentFirstLine"
-  | "hangingIndent";
+  | "hangingIndent"
+  | "indentPreservedAttributes";
 type IndentationFormatting = RequiredFieldValues<
   ParagraphFormatting,
   ClassifiedIndentationFormattingField
@@ -231,7 +240,8 @@ const serializeIndentation = (formatting: IndentationFormatting): string => {
       : formatting.indentFirstLine;
     attrs.push(`w:${attribute}="${intAttr(value)}"`);
   }
-  return attrs.length === 0 ? "" : `<w:ind ${attrs.join(" ")}/>`;
+  const written = serializePreservedAttributes(attrs, formatting.indentPreservedAttributes);
+  return written.length === 0 ? "" : `<w:ind ${written.join(" ")}/>`;
 };
 
 /**
@@ -293,6 +303,7 @@ const serializeFrameProperties = (frame: ParagraphFormatting["frame"]): string =
     xAlign,
     yAlign,
     wrap,
+    preservedAttributes,
   } = exhaustiveFrame;
 
   const attrs: string[] = [];
@@ -309,7 +320,8 @@ const serializeFrameProperties = (frame: ParagraphFormatting["frame"]): string =
   if (xAlign) attrs.push(`w:xAlign="${xAlign}"`);
   if (yAlign) attrs.push(`w:yAlign="${yAlign}"`);
   if (wrap) attrs.push(`w:wrap="${wrap}"`);
-  return attrs.length === 0 ? "" : `<w:framePr ${attrs.join(" ")}/>`;
+  const written = serializePreservedAttributes(attrs, preservedAttributes);
+  return written.length === 0 ? "" : `<w:framePr ${written.join(" ")}/>`;
 };
 
 const modelSpacingProvenance = (
@@ -386,10 +398,12 @@ export const modelParagraphFormattingEmission = (
     beforeAutospacing,
     afterAutospacing,
     spacingExplicit,
+    spacingPreservedAttributes,
     indentLeft,
     indentRight,
     indentFirstLine,
     hangingIndent,
+    indentPreservedAttributes,
     borders,
     shading,
     tabs,
@@ -408,45 +422,68 @@ export const modelParagraphFormattingEmission = (
     suppressAutoHyphens,
     runProperties,
     runInWithNext,
+    preserved,
   } = formatting;
 
   modelSpacingProvenance(spacingExplicit);
 
-  const properties = [
-    styleId ? `<w:pStyle w:val="${escapeXmlAttribute(styleId)}"/>` : "",
-    serializeToggle("keepNext", keepNext),
-    serializeToggle("keepLines", keepLines),
-    serializeToggle("pageBreakBefore", pageBreakBefore),
-    serializeFrameProperties(frame),
-    serializeToggle("widowControl", widowControl),
-    isStyleSourcedParagraphNumbering(numPr, numPrFromStyle)
-      ? serializeNumbering(undefined, numberingChangeXml)
-      : serializeNumbering(numPr, numberingChangeXml),
-    serializeToggle("suppressLineNumbers", suppressLineNumbers),
-    serializeParagraphBorders(borders),
-    serializeShading(shading),
-    serializeTabStops(tabs),
-    serializeToggle("suppressAutoHyphens", suppressAutoHyphens),
-    serializeToggle("kinsoku", kinsoku),
-    serializeToggle("overflowPunct", overflowPunctuation),
-    serializeToggle("bidi", bidi),
-    serializeToggle("snapToGrid", snapToGrid),
-    serializeSpacing({
-      spaceBefore,
-      spaceAfter,
-      lineSpacing,
-      lineSpacingRule,
-      beforeAutospacing,
-      afterAutospacing,
-    }),
-    serializeIndentation({ indentLeft, indentRight, indentFirstLine, hangingIndent }),
-    serializeToggle("contextualSpacing", contextualSpacing),
-    alignment ? `<w:jc w:val="${alignment}"/>` : "",
-    outlineLevel === undefined
-      ? ""
-      : `<w:outlineLvl w:val="${outlineLevelStatedValue(outlineLevel)}"/>`,
-  ];
-  const propertiesXml = properties.join("");
+  const propertiesXml = serializeSequenceChildren({
+    container: "paragraph-properties",
+    preserved,
+    modelled: [
+      ["pStyle", styleId ? `<w:pStyle w:val="${escapeXmlAttribute(styleId)}"/>` : ""],
+      ["keepNext", serializeToggle("keepNext", keepNext)],
+      ["keepLines", serializeToggle("keepLines", keepLines)],
+      ["pageBreakBefore", serializeToggle("pageBreakBefore", pageBreakBefore)],
+      ["framePr", serializeFrameProperties(frame)],
+      ["widowControl", serializeToggle("widowControl", widowControl)],
+      [
+        "numPr",
+        isStyleSourcedParagraphNumbering(numPr, numPrFromStyle)
+          ? serializeNumbering(undefined, numberingChangeXml)
+          : serializeNumbering(numPr, numberingChangeXml),
+      ],
+      ["suppressLineNumbers", serializeToggle("suppressLineNumbers", suppressLineNumbers)],
+      ["pBdr", serializeParagraphBorders(borders)],
+      ["shd", serializeShading(shading)],
+      ["tabs", serializeTabStops(tabs)],
+      ["suppressAutoHyphens", serializeToggle("suppressAutoHyphens", suppressAutoHyphens)],
+      ["kinsoku", serializeToggle("kinsoku", kinsoku)],
+      ["overflowPunct", serializeToggle("overflowPunct", overflowPunctuation)],
+      ["bidi", serializeToggle("bidi", bidi)],
+      ["snapToGrid", serializeToggle("snapToGrid", snapToGrid)],
+      [
+        "spacing",
+        serializeSpacing({
+          spaceBefore,
+          spaceAfter,
+          lineSpacing,
+          lineSpacingRule,
+          beforeAutospacing,
+          afterAutospacing,
+          spacingPreservedAttributes,
+        }),
+      ],
+      [
+        "ind",
+        serializeIndentation({
+          indentLeft,
+          indentRight,
+          indentFirstLine,
+          hangingIndent,
+          indentPreservedAttributes,
+        }),
+      ],
+      ["contextualSpacing", serializeToggle("contextualSpacing", contextualSpacing)],
+      ["jc", alignment ? `<w:jc w:val="${alignment}"/>` : ""],
+      [
+        "outlineLvl",
+        outlineLevel === undefined
+          ? ""
+          : `<w:outlineLvl w:val="${outlineLevelStatedValue(outlineLevel)}"/>`,
+      ],
+    ],
+  }).join("");
   const paragraphMarkPropertiesInnerXml = paragraphMarkPropertiesInner(
     runProperties,
     runInWithNext,
@@ -458,4 +495,34 @@ export const modelParagraphFormattingEmission = (
   }
 
   return emission;
+};
+
+type ParagraphPropertySetOptions = {
+  formatting: ParagraphFormatting | undefined;
+  markPropertiesPrefixXml?: string;
+  sectionPropertiesXml?: string;
+  propertyChangesXml?: readonly string[];
+};
+
+/** Serialize the shared `w:pPr` shape in schema order for all four owners. */
+export const serializeParagraphPropertySet = ({
+  formatting,
+  markPropertiesPrefixXml = "",
+  sectionPropertiesXml = "",
+  propertyChangesXml = [],
+}: ParagraphPropertySetOptions): string => {
+  const modeled = modelParagraphFormattingEmission(formatting);
+  const markProperties = modeled.paragraphMarkPropertiesInnerXml;
+  const markInner = `${markPropertiesPrefixXml}${markProperties ?? ""}`;
+  let markXml = "";
+  if (markPropertiesPrefixXml !== "" || markProperties !== undefined) {
+    markXml = markInner === "" ? "<w:rPr/>" : `<w:rPr>${markInner}</w:rPr>`;
+  }
+  const inner = [
+    modeled.propertiesXml ?? "",
+    markXml,
+    sectionPropertiesXml,
+    ...propertyChangesXml,
+  ].join("");
+  return inner === "" ? "" : `<w:pPr>${inner}</w:pPr>`;
 };

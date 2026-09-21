@@ -1,5 +1,6 @@
 import { panic } from "better-result";
 import type { Mark, Node as PMNode } from "prosemirror-model";
+import { isSafePreservedChildXml, isWithinPreservedMarkupBudget } from "@stll/docx-core/schema";
 
 import {
   FIELD_TYPE_VALUES,
@@ -34,6 +35,7 @@ import {
   UNDERLINE_STYLE_VALUES,
 } from "../../types/documentEnumValues";
 import { DRAWING_ANCHOR_FLAG_KEYS } from "../../docx/drawingAnchor";
+import { isSerializablePreservedAttribute } from "../../docx/attributeRemainder";
 import { GRAPHIC_FRAME_LOCK_KEYS } from "../../docx/graphicFrameLocks";
 import { paragraphNumberingFromAttrValue } from "../numberingAttr";
 import { outlineLevelFromAttrValue } from "../outlineLevelAttr";
@@ -487,7 +489,12 @@ export const readParagraphAttrs = (node: PMNode): ReadProseMirrorAttrsResult<Par
   optionalPropertyChanges(attrs, "_propertyChanges", "paragraph.attrs._propertyChanges", issues, [
     "paragraphPropertyChange",
   ]);
-  optionalPreservedAttributes(attrs, "paragraph.attrs._preservedAttributes", issues);
+  optionalPreservedAttributes(
+    attrs,
+    "_preservedAttributes",
+    "paragraph.attrs._preservedAttributes",
+    issues,
+  );
 
   return attrsResult(attrs, issues);
 };
@@ -719,7 +726,12 @@ export const readTableRowAttrs = (node: PMNode): ReadProseMirrorAttrsResult<Tabl
       message: "Expected at most one structural revision marker.",
     });
   }
-  optionalPreservedAttributes(attrs, "tableRow.attrs._preservedAttributes", issues);
+  optionalPreservedAttributes(
+    attrs,
+    "_preservedAttributes",
+    "tableRow.attrs._preservedAttributes",
+    issues,
+  );
   optionalPositionedBookmarks(attrs, "tableRow.attrs._bookmarks", issues);
 
   return attrsResult(attrs, issues);
@@ -1119,7 +1131,12 @@ export const readTextBoxAttrs = (node: PMNode): ReadProseMirrorAttrsResult<TextB
   requiredTextBoxBodyContentState(attrs, issues);
   optionalTextBoxTrackedChange(attrs, issues);
   optionalTextBoxInlineSdts(attrs, issues);
-  optionalPreservedAttributes(attrs, "textBox.attrs._preservedAttributes", issues);
+  optionalPreservedAttributes(
+    attrs,
+    "_preservedAttributes",
+    "textBox.attrs._preservedAttributes",
+    issues,
+  );
 
   return attrsResult(attrs, issues);
 };
@@ -2581,10 +2598,11 @@ const validateSdtAttrsRecord = (
  */
 const optionalPreservedAttributes = (
   attrs: Record<string, unknown>,
+  key: string,
   path: string,
   issues: ProseMirrorAttrIssue[],
 ): void => {
-  const value = attrs["_preservedAttributes"];
+  const value = attrs[key];
   if (value === undefined || value === null) {
     return;
   }
@@ -2601,6 +2619,61 @@ const optionalPreservedAttributes = (
     requiredString(entry, "name", `${entryPath}.name`, issues);
     requiredString(entry, "value", `${entryPath}.value`, issues);
     optionalString(entry, "namespace", `${entryPath}.namespace`, issues);
+    const name = entry["name"];
+    const namespace = entry["namespace"];
+    if (
+      typeof name === "string" &&
+      (namespace === undefined || typeof namespace === "string") &&
+      !isSerializablePreservedAttribute({ name, ...(namespace === undefined ? {} : { namespace }) })
+    ) {
+      issues.push({
+        path: `${entryPath}.name`,
+        message: "Expected an XML local name in a namespace the serializer binds.",
+      });
+    }
+  }
+};
+
+const optionalPreservedMarkup = (
+  attrs: Record<string, unknown>,
+  key: string,
+  path: string,
+  issues: ProseMirrorAttrIssue[],
+): void => {
+  const value = attrs[key];
+  if (value === undefined || value === null) return;
+  if (!isRecord(value)) {
+    issues.push({ path, message: "Expected an object." });
+    return;
+  }
+  const children = value["children"];
+  if (children === undefined || children === null) return;
+  if (!Array.isArray(children)) {
+    issues.push({ path: `${path}.children`, message: "Expected an array." });
+    return;
+  }
+  if (!isWithinPreservedMarkupBudget(children)) {
+    issues.push({
+      path: `${path}.children`,
+      message: "Preserved XML exceeds its aggregate count or character budget.",
+    });
+    return;
+  }
+  for (const [index, entry] of children.entries()) {
+    const entryPath = `${path}.children[${index}]`;
+    if (!isRecord(entry)) {
+      issues.push({ path: entryPath, message: "Expected an object." });
+      continue;
+    }
+    requiredNumber(entry, "index", `${entryPath}.index`, issues);
+    requiredString(entry, "xml", `${entryPath}.xml`, issues);
+    const xml = entry["xml"];
+    if (typeof xml === "string" && !isSafePreservedChildXml(xml)) {
+      issues.push({
+        path: `${entryPath}.xml`,
+        message: "Expected one bounded, well-formed XML element.",
+      });
+    }
   }
 };
 
@@ -2709,6 +2782,7 @@ const validateBorderSpec = (value: unknown, path: string, issues: ProseMirrorAtt
   optionalBoolean(value, "shadow", `${path}.shadow`, issues);
   optionalBoolean(value, "frame", `${path}.frame`, issues);
   optionalColorValue(value, "color", `${path}.color`, issues);
+  optionalPreservedAttributes(value, "preservedAttributes", `${path}.preservedAttributes`, issues);
 };
 
 const optionalColorValue = (
@@ -2751,6 +2825,7 @@ const optionalShading = (
   optionalColorValue(value, "color", `${path}.color`, issues);
   optionalColorValue(value, "fill", `${path}.fill`, issues);
   optionalOneOf(value, "pattern", `${path}.pattern`, issues, SHADING_PATTERN_VALUES);
+  optionalPreservedAttributes(value, "preservedAttributes", `${path}.preservedAttributes`, issues);
 };
 
 const optionalTabStops = (
@@ -2777,6 +2852,12 @@ const optionalTabStops = (
     requiredNumber(item, "position", `${itemPath}.position`, issues);
     requiredOneOf(item, "alignment", `${itemPath}.alignment`, issues, TAB_STOP_ALIGNMENT_VALUES);
     optionalOneOf(item, "leader", `${itemPath}.leader`, issues, TAB_LEADER_VALUES);
+    optionalPreservedAttributes(
+      item,
+      "preservedAttributes",
+      `${itemPath}.preservedAttributes`,
+      issues,
+    );
   }
 };
 
@@ -3090,7 +3171,10 @@ type ValidatedParagraphFormattingKey =
   | "shading"
   | "tabs"
   | "runProperties"
-  | "frame";
+  | "frame"
+  | "preserved"
+  | "indentPreservedAttributes"
+  | "spacingPreservedAttributes";
 
 const paragraphFormattingValidationIsTotal: Record<
   Exclude<keyof ParagraphFormatting, ValidatedParagraphFormattingKey>,
@@ -3200,6 +3284,10 @@ const validateParagraphFormatting = (
   ]);
   optionalShading(value, "shading", `${path}.shading`, issues);
   optionalTabStops(value, "tabs", `${path}.tabs`, issues);
+  optionalPreservedMarkup(value, "preserved", `${path}.preserved`, issues);
+  for (const key of ["indentPreservedAttributes", "spacingPreservedAttributes"] as const) {
+    optionalPreservedAttributes(value, key, `${path}.${key}`, issues);
+  }
   optionalNestedRecord(
     value,
     "runProperties",
@@ -3242,6 +3330,12 @@ const validateParagraphFormatting = (
       for (const key of ["lines", "width", "height", "hSpace", "vSpace", "x", "y"] as const) {
         optionalNumber(frame, key, `${path}.frame.${key}`, issues);
       }
+      optionalPreservedAttributes(
+        frame,
+        "preservedAttributes",
+        `${path}.frame.preservedAttributes`,
+        issues,
+      );
     }
   }
 };

@@ -32,10 +32,12 @@ import type {
   TextFormatting,
 } from "../../types/document";
 import { PARAGRAPH_MARK_CHANGE_KINDS } from "@stll/docx-core/model";
+import { SEQUENCE_CHILDREN } from "@stll/docx-core/schema";
 import { panic } from "better-result";
 import {
   modelParagraphFormattingEmission,
   type ModeledParagraphFormattingEmission,
+  serializeParagraphPropertySet,
 } from "../../internal/paragraphFormattingSerialization";
 import { serializePreservedAttributes } from "../attributeRemainder";
 import { CONTAINER_CHILDREN } from "../containerChildren.gen";
@@ -123,43 +125,17 @@ const PARAGRAPH_APPEND_PREFIXES = new Map([
   ["r", NAMESPACES.r],
   ["w15", NAMESPACES.w15],
 ]);
-const PARAGRAPH_PROPERTY_CHILD_ORDER = new Map(
-  [
-    "pStyle",
-    "keepNext",
-    "keepLines",
-    "pageBreakBefore",
-    "framePr",
-    "widowControl",
-    "numPr",
-    "suppressLineNumbers",
-    "pBdr",
-    "shd",
-    "tabs",
-    "suppressAutoHyphens",
-    "kinsoku",
-    "wordWrap",
-    "overflowPunct",
-    "topLinePunct",
-    "autoSpaceDE",
-    "autoSpaceDN",
-    "bidi",
-    "adjustRightInd",
-    "snapToGrid",
-    "spacing",
-    "ind",
-    "contextualSpacing",
-    "mirrorIndents",
-    "suppressOverlap",
-    "jc",
-    "textDirection",
-    "textAlignment",
-    "textboxTightWrap",
-    "outlineLvl",
-    "divId",
-    "cnfStyle",
-    "rPr",
-  ].map((name, index) => [name, index]),
+/**
+ * The order a replayed `w:pPr` has to already be in, from the generated table.
+ *
+ * This used to be the same list written out again, which is a mirror of the
+ * order the writer emits: the two could disagree and a capture the gate let
+ * through would then be markup the rebuild would never have written.
+ * `w:sectPr` and `w:pPrChange` are in the generated list and are refused
+ * before this map is consulted, because they have their own lifecycles.
+ */
+const PARAGRAPH_PROPERTY_CHILD_ORDER = new Map<string, number>(
+  SEQUENCE_CHILDREN["paragraph-properties"].map((name, index) => [name, index]),
 );
 /**
  * `EG_RPrBase`: the paragraph mark's `w:rPr` children a replay may carry.
@@ -482,36 +458,12 @@ const serializeParagraphFormattingWithOptions = (
     ]);
   }
 
-  const parts: string[] = [];
-  if (modeledFormatting.propertiesXml) {
-    parts.push(modeledFormatting.propertiesXml);
-  }
-  // EG_ParaRPrTrackChanges puts revision markup first inside the paragraph
-  // mark's rPr; modeled run properties and specVanish follow it. The element
-  // is written on presence rather than on content: the emission says `""` for
-  // a mark that carried an empty `w:rPr` and `undefined` for one that carried
-  // none, and only the second writes nothing.
-  const markProperties = modeledFormatting.paragraphMarkPropertiesInnerXml;
-  if (paragraphMarkXml !== "" || markProperties !== undefined) {
-    const inner = `${paragraphMarkXml}${markProperties ?? ""}`;
-    parts.push(inner === "" ? "<w:rPr/>" : `<w:rPr>${inner}</w:rPr>`);
-  }
-
-  // `CT_PPr` closes with `rPr`, `sectPr`, `pPrChange` in that order: a section
-  // break sits between the mark's run properties and the recorded change, so
-  // it is placed here rather than appended after the properties are built.
-  parts.push(sectionPropertiesXml);
-
-  if (propertyChangesXml.length > 0) {
-    parts.push(...propertyChangesXml);
-  }
-
-  const inner = parts.join("");
-  if (inner.length === 0) {
-    return "";
-  }
-
-  return `<w:pPr>${inner}</w:pPr>`;
+  return serializeParagraphPropertySet({
+    formatting,
+    markPropertiesPrefixXml: paragraphMarkXml,
+    sectionPropertiesXml,
+    propertyChangesXml,
+  });
 };
 
 export function serializeParagraphFormatting(

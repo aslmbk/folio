@@ -647,7 +647,10 @@ describe("paragraph properties survive a no-edit full repack", () => {
     const properties = canonicalElement(
       await firstParagraphProperties(await repackDocx(clone, { updateModifiedDate: false })),
     );
-    expect(properties).toContain("<ind w:left=720>");
+    // `w:leftChars` has no model field and comes back from the indentation
+    // record's attribute remainder, which the typed fallback writes as well:
+    // an element folio models keeps the attributes it does not.
+    expect(properties).toContain("<ind w:left=720 w:leftChars=100>");
     expect(properties).toContain("<bCs >");
   });
 
@@ -694,7 +697,7 @@ describe("paragraph properties survive a no-edit full repack", () => {
     );
   });
 
-  test("a formatting edit invalidates the captured properties", async () => {
+  test("a formatting edit invalidates the capture and the rebuild keeps the unmodelled children", async () => {
     const source = await documentWithSourceProperties();
     const parsed = await parseDocx(source, { preloadFonts: false });
     const paragraph = firstParagraph(parsed);
@@ -708,7 +711,11 @@ describe("paragraph properties survive a no-edit full repack", () => {
       ),
     );
     expect(savedProperties).toContain("<jc w:val=right>");
-    expect(savedProperties).not.toContain("<cnfStyle ");
+    // The whole-`w:pPr` replay is gone, and the rebuild writes the sink:
+    // `w:cnfStyle` is a child folio models nothing of, and it comes back at
+    // the ordinal `CT_PPrBase` gives it — after `w:jc`, not at the end.
+    expect(savedProperties).toContain("<cnfStyle ");
+    expect(savedProperties.indexOf("<cnfStyle ")).toBeGreaterThan(savedProperties.indexOf("<jc "));
   });
 
   test("current structural and revision children are composed around the capture", async () => {

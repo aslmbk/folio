@@ -16,6 +16,12 @@
  */
 
 import {
+  type ModelledAttributes,
+  modelledAttributeNames,
+  PROPERTY_ELEMENT_ATTRIBUTES,
+} from "@stll/folio-core/docx/propertyElementAttributes";
+
+import {
   type AttributeSlot,
   attributesOf,
   type ChildSlot,
@@ -111,7 +117,7 @@ const requiredInstances = (minOccurs: string): number => {
 const escapeAttribute = (value: string): string =>
   value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 
-type WrittenAttribute = { spelled: string; value: string };
+export type WrittenAttribute = { spelled: string; value: string };
 
 const writeAttributes = (attributes: readonly WrittenAttribute[]): string =>
   attributes.map(({ spelled, value }) => ` ${spelled}="${escapeAttribute(value)}"`).join("");
@@ -302,7 +308,23 @@ const withPartnerMarker = (childXml: string, partner: PartnerMarker | undefined)
 
 export type Subject =
   | { kind: "child"; slot: ChildSlot }
-  | { kind: "attribute"; slot: AttributeSlot; value: string };
+  | {
+      kind: "attribute";
+      slot: AttributeSlot;
+      value: string;
+      /**
+       * A second attribute to state on the same element, from
+       * {@link modelledCompanionFor}.
+       *
+       * Without it the census measures one attribute at a time, and a reader
+       * that decides an element whole passes every pair on an element it
+       * models: `<w:ind w:leftChars="100"/>` is kept entire because the reader
+       * took nothing from it, while the `<w:ind w:left="720"
+       * w:leftChars="100"/>` a document actually carries loses the character
+       * unit.
+       */
+      companion?: WrittenAttribute;
+    };
 
 export type BuiltFixture = {
   /** The package part this fixture is: `word/document.xml`, `word/styles.xml`, and so on. */
@@ -525,6 +547,73 @@ export const buildFixture = (space: ContainerSpace, subject: Subject): FixtureRe
   };
 };
 
+/** The property-element tables, widened to the key the census has in hand. */
+const MODELLED_BY_TYPE: Readonly<Record<string, ModelledAttributes<string>>> =
+  PROPERTY_ELEMENT_ATTRIBUTES;
+
+/**
+ * An attribute of the same element that the model has a field for, or nothing.
+ *
+ * Which attribute counts as modelled is the model's answer, not the census's:
+ * `PROPERTY_ELEMENT_ATTRIBUTES` is the same table the reader computes its
+ * remainder from, so the two cannot disagree about what "modelled" means. The
+ * The first field other than the subject's own whose declared attribute has a
+ * representative value is the one written, which makes the choice
+ * deterministic across runs without pairing alternate spellings of one field.
+ *
+ * Nothing is returned when the element declares a *required* modelled
+ * attribute: the fixture already states every required attribute, so the
+ * subject is beside a modelled sibling in the ordinary fixture and a second
+ * one would measure the same package twice. `CT_TabStop` is that case.
+ */
+export const modelledCompanionFor = (
+  space: ContainerSpace,
+  slot: AttributeSlot,
+): WrittenAttribute | undefined => {
+  const modelled = MODELLED_BY_TYPE[localTypeName(slot.container.typeQName)];
+  const container = space.containers.get(containerKey(slot.container));
+  if (modelled === undefined || container === undefined) {
+    return undefined;
+  }
+
+  const fields = Object.values(modelled).map((declared) =>
+    typeof declared === "string" ? [declared] : Array.from(declared),
+  );
+  for (const name of modelledAttributeNames(modelled)) {
+    const declared = container.attributes.find(
+      ({ attribute }) => attribute.namespace === WML_NAMESPACE && attribute.name === name,
+    );
+    if (declared?.required) {
+      return undefined;
+    }
+  }
+
+  for (const field of fields) {
+    // Two names in one field are alternate spellings or mutually exclusive
+    // encodings of the same value. Stating both would manufacture a conflict
+    // rather than place the subject beside another modelled attribute.
+    if (field.includes(slot.attribute.name)) {
+      continue;
+    }
+    for (const name of field) {
+      const declared = container.attributes.find(
+        ({ attribute }) => attribute.namespace === WML_NAMESPACE && attribute.name === name,
+      );
+      if (declared === undefined) {
+        continue;
+      }
+      const spelled = spell(declared.attribute);
+      const value = declared.fixed ?? representativeValue(space.index, declared.typeQName);
+      if (spelled !== undefined && value !== undefined) {
+        return { spelled, value };
+      }
+    }
+  }
+  return undefined;
+};
+
+const localTypeName = (typeQName: string): string => typeQName.slice(typeQName.indexOf("}") + 1);
+
 const renderSubjectLevel = (
   space: ContainerSpace,
   container: Container,
@@ -536,7 +625,10 @@ const renderSubjectLevel = (
       space,
       container.id,
       [],
-      [{ spelled: attributeSpelling ?? "", value: subject.value }],
+      [
+        { spelled: attributeSpelling ?? "", value: subject.value },
+        ...(subject.companion === undefined ? [] : [subject.companion]),
+      ],
       subject.slot.attribute,
     );
   }

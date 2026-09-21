@@ -36,7 +36,9 @@
 import type { PreservedAttribute } from "@stll/docx-core/model";
 
 import { escapeXmlAttribute } from "@stll/docx-core";
+import { TaggedError } from "better-result";
 
+import { type ModelledAttributes, modelledAttributeNames } from "./propertyElementAttributes";
 import { OOXML_NAMESPACES } from "./serializer/partNamespaces";
 import { getLocalName, resolveAttributeNamespaceUri, type XmlElement } from "./xmlParser";
 
@@ -44,6 +46,22 @@ import { getLocalName, resolveAttributeNamespaceUri, type XmlElement } from "./x
 const CANONICAL_PREFIX: ReadonlyMap<string, string> = new Map(
   Object.entries(OOXML_NAMESPACES).map(([prefix, { uri }]) => [uri, prefix]),
 );
+
+const XML_LOCAL_NAME = /^[\p{L}_][\p{L}\p{M}\p{N}._\-\u{00B7}\u{203F}-\u{2040}]*$/u;
+
+export class InvalidPreservedAttributeError extends TaggedError("InvalidPreservedAttributeError")<{
+  message: string;
+  name: string;
+}> {}
+
+/** Whether an attribute remainder can be emitted under a bound canonical name. */
+export const isSerializablePreservedAttribute = ({
+  namespace,
+  name,
+}: Pick<PreservedAttribute, "namespace" | "name">): boolean =>
+  name !== "xmlns" &&
+  XML_LOCAL_NAME.test(name) &&
+  (namespace === undefined || CANONICAL_PREFIX.has(namespace));
 
 /**
  * The modelled set of an element whose serializer writes no attribute at all.
@@ -108,6 +126,32 @@ export const attributeRemainder = ({
   return remainder.length === 0 ? undefined : remainder;
 };
 
+const NAMES_BY_TABLE = new WeakMap<object, ReadonlySet<string>>();
+
+/**
+ * The remainder of an attribute bag, with the modelled set derived from the
+ * record's own fields.
+ *
+ * `w:ind`, `w:spacing`, `w:framePr`, `w:tab`, a border side and `w:shd` are
+ * bags rather than containers: the child dispatcher decides each of them
+ * whole, so an attribute the record has no field for is kept only while the
+ * reader takes nothing from the element at all. Passing the record's table
+ * from `propertyElementAttributes.ts` rather than a set spelled at the call
+ * site is what keeps the predicate derived from the model: a field added
+ * without an attribute to name does not compile.
+ */
+export const readAttributeBag = (
+  element: XmlElement,
+  modelled: ModelledAttributes<string>,
+): PreservedAttribute[] | undefined => {
+  let names = NAMES_BY_TABLE.get(modelled);
+  if (names === undefined) {
+    names = new Set(modelledAttributeNames(modelled));
+    NAMES_BY_TABLE.set(modelled, names);
+  }
+  return attributeRemainder({ element, modelled: names });
+};
+
 /** The name a fragment such as `w14:paraId="1F2E"` writes. */
 const spelledName = (fragment: string): string => fragment.slice(0, fragment.indexOf("="));
 
@@ -128,11 +172,15 @@ export const serializePreservedAttributes = (
 
   const written = new Set(modelled.map(spelledName));
   const fragments = [...modelled];
-  for (const { namespace, name, value } of preserved) {
-    const prefix = namespace === undefined ? undefined : CANONICAL_PREFIX.get(namespace);
-    if (namespace !== undefined && prefix === undefined) {
-      continue;
+  for (const attribute of preserved) {
+    const { namespace, name, value } = attribute;
+    if (!isSerializablePreservedAttribute(attribute)) {
+      throw new InvalidPreservedAttributeError({
+        message: "A preserved attribute must have an XML local name and a bound namespace",
+        name,
+      });
     }
+    const prefix = namespace === undefined ? undefined : CANONICAL_PREFIX.get(namespace);
     const spelling = prefix === undefined ? name : `${prefix}:${name}`;
     if (written.has(spelling)) {
       continue;

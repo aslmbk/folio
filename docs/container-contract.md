@@ -331,6 +331,22 @@ decides anything the contract decides:
   reference in a `w:numPr`. A container folio prunes for being empty would
   report every pair inside it as lost.
 
+**An attribute pair is measured twice: alone, and beside one the element
+models.** A fixture that states one attribute at a time cannot see a reader
+that decides an element whole, and it reports every attribute of such an
+element as surviving — `<w:ind w:leftChars="100"/>` is kept because nothing
+was taken from it, and the `<w:ind w:left="720" w:leftChars="100"/>` a
+document carries is not. So `modelledCompanionFor` states a second attribute
+on the same element and the pair survives only when it survives both runs.
+Which attribute counts as modelled is the model's answer rather than the
+census's: the companion is the first different field of the same
+`PROPERTY_ELEMENT_ATTRIBUTES` table the reader computes its remainder from, so
+the two cannot disagree about the word or pair two spellings of one field.
+Nothing is added where the element
+declares a _required_ modelled attribute — `CT_TabStop`'s `w:val` and
+`w:pos`, `CT_Shd`'s `w:val` — because the ordinary fixture already states
+those, and the second run is skipped where the first already lost.
+
 ### What is skipped, and why
 
 - **Parts a repack replays verbatim.** Removing the capture slots makes the
@@ -1005,6 +1021,92 @@ would have to ride a non-exclusive inline mark, which is the same undesigned
 carrier the `preservedWrapper` section is blocked on. So `r|CT_R`'s three
 pairs move from `neverParsed` to `editorProjection` — the model holds them and
 a save writes them — and they stay there until that mark exists.
+
+### A property set: the same sink, counted differently
+
+`w:pPr` is the last of the property sets to get a dispatcher, and it is where
+the sink's `index` stops meaning what it means everywhere else. Three things
+about it are decisions rather than consequences.
+
+- **The ordinal is the schema's, not a count of siblings.** `CT_PPrBase` is an
+  `xsd:sequence` of thirty-three distinct optional names, so a child's place is
+  a property of its name. A count of modelled siblings is a mirror of whichever
+  properties folio models today: model one more and every capture recorded
+  before it slides one place. `sequencePositions` records the declared ordinal
+  instead, and `serializeSequenceChildren` merges the modelled children and the
+  captures by it. An undeclared name has no place in the sequence, so it takes
+  the place of the last declared child before it.
+- **The order is generated, and it lives in the lower package.** The order
+  belongs to the model rather than to any one serializer, and four writers
+  produce the element: a paragraph, a style's `CT_PPrGeneral`, a numbering
+  level's, and the `CT_PPrBase` snapshot inside `w:pPrChange`. The generated
+  table is `SEQUENCE_CHILDREN` in `@stll/docx-core/schema`, folio-core's
+  declared-child table spreads it in, and one writer emits the element for all
+  four — so the set a handler map is total over and the order a serializer
+  writes cannot disagree.
+- **A handler may refuse.** `<w:spacing/>` states no spacing and
+  `<w:jc w:val="end"/>` states a value the reader's enumeration does not admit.
+  Neither can be decided by name — a map keyed by name can list the names a
+  reader has never heard of, never the values it will refuse — so the handler
+  answers `CAPTURE` when it took nothing and the bytes are kept.
+
+The sink rides the editor as an `original-only` field of the paragraph's
+formatting attrs, the rule the attribute remainder states one level up: the
+remainder follows the record, and a record the editor creates has none. And
+the cascade drops it. A style's captured bytes are not a paragraph's direct
+formatting: `mergeParagraphFormatting` strips `preserved` from both tiers, so
+the same markup cannot be written at two of them and an inherited value cannot
+come back outranking the tier it came from.
+
+The shared property-set reader moves 66 pairs to `captured-verbatim`: 50 that
+previously survived only through replay, plus 16 whose property-set container
+was not kept. They cover the unmodelled `w:pPr` children and the attributes
+carried by those children, including `w:cnfStyle`'s twelve flags.
+
+### The attribute half of a property element
+
+A handler answers about the element, so the sink's decision was
+whole-or-nothing: `<w:ind w:leftChars="100"/>` was kept entire because the
+reader took nothing from it, and `<w:ind w:left="720" w:leftChars="100"/>` —
+which is what a document carries — was modelled and lost the character unit.
+This is the attribute remainder again, one level down from `w:p`'s `w:rsid*`
+attributes, and four things about it are decisions.
+
+- **The remainder rides the record that holds the element's modelled fields.**
+  For `w:framePr`, `w:tab`, a `w:pBdr` side and `w:shd` that record is the
+  element's own, so each gains a `preservedAttributes`. `w:ind` and
+  `w:spacing` were flattened into `ParagraphFormatting`, so that is their
+  record and it carries one remainder per flattened element —
+  `indentPreservedAttributes` and `spacingPreservedAttributes` — rather than
+  one for the set. Same rule, applied to where the model actually put the
+  fields.
+- **The predicate is derived from the model, not written beside the reader.**
+  `propertyElementAttributes.ts` holds one table per record, each
+  `as const satisfies ModelledAttributes<…>` over the record's own fields, so
+  a field added without an attribute to name does not compile. A field may
+  name several: `indentLeft` is filled from `w:left` or from the Strict
+  `w:start`, and both have to be out of the remainder or a save writes the
+  same indent twice under two spellings. `readAttributeBag` takes the table
+  and nothing else, so no call site can state a set of its own.
+- **`w:shd` and `w:framePr` compute a remainder only when they are modelled at
+  all.** An element folio takes nothing from goes to the dispatcher's sink and
+  is kept whole; a remainder as well would write its attributes twice.
+- **The census had to change with it, or the fix could not be measured.** A
+  pair stated alone says nothing about a whole-or-nothing reader. See
+  [Fixture realism](#fixture-realism).
+
+Four more losses close in the shared shading reader: `w:themeTint`,
+`w:themeShade`, `w:themeFillTint`, and `w:themeFillShade` now remain modelled
+even when the source states a modifier without its base theme slot. Ten
+attributes that a one-at-a-time census reported as surviving are now measured
+beside a modelled sibling and survive that too: `w:ind`'s six character units,
+`w:spacing`'s two line counts, and `w:framePr`'s `w:hRule` and `w:anchorLock`.
+Together, the property-set sink and shading modifiers move 70 pairs out of the
+dropped set.
+
+An empty prior property set still carries a change record: keeping that
+`w:pPrChange` closes five more pairs, covering the wrapper, its three tracked
+change attributes, and its nested `w:pPr`.
 
 ### Giving `styles.xml` and its neighbours a rebuild law
 
