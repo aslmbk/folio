@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { TEXT_EFFECT_VALUES } from "../../types/documentEnumValues";
-import { parseRunProperties } from "../runParser";
+import { parseRunProperties, RUN_PROPERTY_OWNERS } from "../runParser";
 import { serializeTextFormatting } from "../serializer/textFormattingSerializer";
 import { parseXml } from "../xmlParser";
 import type { XmlElement } from "../xmlParser";
@@ -19,7 +19,7 @@ function parseRPr(xml: string): XmlElement {
 
 function roundTrip(innerXml: string) {
   const rPr = parseRPr(innerXml);
-  const formatting = parseRunProperties(rPr, null);
+  const formatting = parseRunProperties(rPr, null, RUN_PROPERTY_OWNERS.standalone);
   const serialized = serializeTextFormatting(formatting);
   return { formatting, serialized };
 }
@@ -77,10 +77,10 @@ describe("w:lang run language round-trip", () => {
     expect(serialized).toContain('<w:lang w:val="en-GB" w:eastAsia="ja-JP" w:bidi="ar-SA"/>');
   });
 
-  test("omits an empty language element", () => {
+  test("takes no language from an empty element, and keeps it", () => {
     const { formatting, serialized } = roundTrip("<w:lang/>");
     expect(formatting?.language).toBeUndefined();
-    expect(serialized).not.toContain("<w:lang");
+    expect(serialized).toContain("<w:lang/>");
   });
 });
 
@@ -110,10 +110,10 @@ describe("w:effect text animation round-trip (eigenpal #424 gap 11)", () => {
     });
   }
 
-  test("ignores unrecognised effect attribute values", () => {
+  test("takes no effect from an unrecognised value, and keeps the element", () => {
     const { formatting, serialized } = roundTrip('<w:effect w:val="discoInferno"/>');
     expect(formatting?.effect).toBeUndefined();
-    expect(serialized).not.toContain("<w:effect");
+    expect(serialized).toContain('<w:effect w:val="discoInferno"/>');
   });
 
   test("round-trips effect alongside rtl and other formatting", () => {

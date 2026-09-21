@@ -4,7 +4,10 @@ import fc from "fast-check";
 import { serializeParagraphFormatting } from "../docx/serializer/paragraphSerializer";
 import type { ParagraphFormatting } from "../types/document";
 import { canonicalJson } from "../utils/canonicalJson";
-import { modelParagraphFormattingEmission } from "./paragraphFormattingSerialization";
+import {
+  modelParagraphFormattingEmission,
+  type ModeledParagraphFormattingEmission,
+} from "./paragraphFormattingSerialization";
 
 const COMPLETE_FORMATTING = {
   alignment: "center",
@@ -48,7 +51,6 @@ const NO_OP_FORMATTINGS = [
   { borders: {} },
   { tabs: [] },
   { frame: {} },
-  { runProperties: {} },
   { runProperties: { fontFamily: {} } },
   { runProperties: { styleId: "" } },
   { runProperties: { language: {} } },
@@ -56,6 +58,28 @@ const NO_OP_FORMATTINGS = [
   { spacingExplicit: { before: true } },
   { styleId: "" },
 ] as const satisfies readonly ParagraphFormatting[];
+
+/**
+ * A mark property set that states nothing is still a mark property set.
+ *
+ * `runProperties` is `original-only`: no command writes it, so the exact empty
+ * record is the parser's sentinel that the source carried a bare
+ * `w:pPr/w:rPr`. Nested empty values never come from the reader; it captures
+ * their source elements instead. The bare element still has to come back — it
+ * is the slot the mark's own `w:rPrChange` and `w:ins`/`w:del` live in.
+ */
+const PRESENT_BUT_EMPTY_MARK_PROPERTIES = [
+  { runProperties: {} },
+] as const satisfies readonly ParagraphFormatting[];
+
+/** The mark's element as the serializer writes it, from the emission's three answers. */
+const markPropertiesXml = (modeled: ModeledParagraphFormattingEmission): string => {
+  const inner = modeled.paragraphMarkPropertiesInnerXml;
+  if (inner === undefined) {
+    return "";
+  }
+  return inner === "" ? "<w:rPr/>" : `<w:rPr>${inner}</w:rPr>`;
+};
 
 describe("paragraph formatting emission model", () => {
   test("models every independent field and resolves dependent numbering provenance", () => {
@@ -74,6 +98,16 @@ describe("paragraph formatting emission model", () => {
     expect(modelParagraphFormattingEmission(formatting)).toEqual({});
     expect(serializeParagraphFormatting(formatting)).toBe("");
   });
+
+  test.each(PRESENT_BUT_EMPTY_MARK_PROPERTIES)(
+    "keeps an empty mark property set %#",
+    (formatting) => {
+      expect(modelParagraphFormattingEmission(formatting)).toEqual({
+        paragraphMarkPropertiesInnerXml: "",
+      });
+      expect(serializeParagraphFormatting(formatting)).toBe("<w:pPr><w:rPr/></w:pPr>");
+    },
+  );
 
   test("normalizes an explicit non-hanging indent to the default first-line instruction", () => {
     const firstLine = { indentFirstLine: 120 } satisfies ParagraphFormatting;
@@ -184,11 +218,7 @@ describe("paragraph formatting emission model", () => {
           } as const satisfies ParagraphFormatting;
 
           const modeled = modelParagraphFormattingEmission(formatting);
-          const innerXml = `${modeled.propertiesXml ?? ""}${
-            modeled.paragraphMarkPropertiesInnerXml
-              ? `<w:rPr>${modeled.paragraphMarkPropertiesInnerXml}</w:rPr>`
-              : ""
-          }`;
+          const innerXml = `${modeled.propertiesXml ?? ""}${markPropertiesXml(modeled)}`;
           expect(serializeParagraphFormatting(formatting)).toBe(
             innerXml ? `<w:pPr>${innerXml}</w:pPr>` : "",
           );

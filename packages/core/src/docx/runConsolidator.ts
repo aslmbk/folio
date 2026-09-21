@@ -19,8 +19,55 @@ import type {
   ParagraphContent,
   Paragraph,
   Hyperlink,
+  ExhaustiveFields,
+  PreservedAttribute,
+  PreservedMarkup,
 } from "../types/document";
 import { cloneParagraphWithPropertySource } from "./paragraphPropertySource";
+import { runHoldsPayload } from "./runPayload";
+
+/**
+ * Every `TextFormatting` field, named so the comparison below is total.
+ *
+ * A field this comparison forgets is a field one of two merged runs loses,
+ * silently and at parse time. Naming them turns a field added to the model
+ * without a comparison into a compile error rather than a fidelity defect.
+ */
+type ComparedTextFormattingField =
+  | "bold"
+  | "boldCs"
+  | "italic"
+  | "italicCs"
+  | "underline"
+  | "strike"
+  | "doubleStrike"
+  | "vertAlign"
+  | "smallCaps"
+  | "allCaps"
+  | "hidden"
+  | "noProof"
+  | "color"
+  | "highlight"
+  | "shading"
+  | "fontSize"
+  | "fontSizeCs"
+  | "fontFamily"
+  | "language"
+  | "spacing"
+  | "position"
+  | "scale"
+  | "kerning"
+  | "effect"
+  | "emphasisMark"
+  | "emboss"
+  | "imprint"
+  | "outline"
+  | "shadow"
+  | "rtl"
+  | "cs"
+  | "styleId"
+  | "preserved";
+type ComparedTextFormatting = ExhaustiveFields<TextFormatting, ComparedTextFormattingField>;
 
 /**
  * Check if two TextFormatting objects are equivalent
@@ -29,8 +76,8 @@ import { cloneParagraphWithPropertySource } from "./paragraphPropertySource";
  * can be merged without losing formatting information.
  */
 export function formattingEquals(
-  a: TextFormatting | undefined,
-  b: TextFormatting | undefined,
+  a: ComparedTextFormatting | undefined,
+  b: ComparedTextFormatting | undefined,
 ): boolean {
   // Both undefined - equal
   if (!a && !b) {
@@ -68,6 +115,9 @@ export function formattingEquals(
     return false;
   }
   if (a.hidden !== b.hidden) {
+    return false;
+  }
+  if (a.noProof !== b.noProof) {
     return false;
   }
   if (a.emboss !== b.emboss) {
@@ -149,8 +199,65 @@ export function formattingEquals(
     return false;
   }
 
+  // The `w:rPr` children no reader took a value from. A merged run carries one
+  // property set, so two runs whose captured bytes differ are two runs.
+  if (!preservedMarkupEquals(a.preserved, b.preserved)) {
+    return false;
+  }
+
   return true;
 }
+
+/**
+ * Compare two verbatim sinks position by position.
+ *
+ * The sink is ordered — by `index`, then by source order within an index — and
+ * the order is what puts the markup back between the same modelled siblings,
+ * so equality is by sequence, not by set.
+ */
+function preservedMarkupEquals(
+  a: PreservedMarkup | undefined,
+  b: PreservedMarkup | undefined,
+): boolean {
+  const left = a?.children ?? [];
+  const right = b?.children ?? [];
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every(({ index, xml }, position) => {
+    const other = right[position];
+    return other !== undefined && other.index === index && other.xml === xml;
+  });
+}
+
+/**
+ * Compare two attribute remainders as sets.
+ *
+ * An element cannot carry one expanded name twice, so (namespace, name) orders
+ * a remainder totally and the sorted keys compare exactly. Order is a set
+ * comparison rather than a sequence one because attribute order in XML says
+ * nothing: two runs that spelled the same attributes in a different order
+ * carry the same remainder and may still become one run.
+ */
+function preservedAttributesEqual(
+  a: readonly PreservedAttribute[] | undefined,
+  b: readonly PreservedAttribute[] | undefined,
+): boolean {
+  const left = canonicalRemainderKeys(a);
+  const right = canonicalRemainderKeys(b);
+  return left.length === right.length && left.every((key, index) => key === right[index]);
+}
+
+/** `\u0000` cannot appear in an XML name, namespace URI or attribute value. */
+const REMAINDER_KEY_SEPARATOR = "\u0000";
+
+const canonicalRemainderKeys = (attributes: readonly PreservedAttribute[] | undefined): string[] =>
+  (attributes ?? [])
+    .map(({ namespace, name, value }) =>
+      [namespace ?? "", name, value].join(REMAINDER_KEY_SEPARATOR),
+    )
+    .sort();
 
 function languageEquals(a: TextFormatting["language"], b: TextFormatting["language"]): boolean {
   return a?.val === b?.val && a?.eastAsia === b?.eastAsia && a?.bidi === b?.bidi;
@@ -274,13 +381,55 @@ export function canMergeRun(run: Run): boolean {
     return false;
   }
 
-  // Empty runs can be merged
-  if (run.content.length === 0) {
-    return true;
+  // A run holding no payload never reaches a merge: `consolidateRuns` flushes
+  // at it and keeps it whole, because the payload a later pass will put in it
+  // is not this pass's to merge away.
+  if (!runHoldsPayload(run)) {
+    return false;
   }
 
   // Runs with only text/hyphen content can be merged
   return run.content.every(isMergeableContent);
+}
+
+/**
+ * Every `Run` field, named by what a merge does with it.
+ *
+ * The merged run is the survivor spread whole, so a field added to the model
+ * is carried over from one side by default. Naming each one here forces the
+ * next field to state whether that default is right before it can compile.
+ */
+type MergeDecidedRunField =
+  /** Identical for every run. */
+  | "type"
+  /** Concatenated; see {@link mergeRunContent}. */
+  | "content"
+  /** Must be equal, and the survivor keeps it. */
+  | "formatting"
+  /** Must be equal, and the survivor keeps it. */
+  | "preservedAttributes"
+  /** Refuses the merge outright; see {@link canMergeRun}. */
+  | "propertyChanges";
+type MergeDecidedRun = ExhaustiveFields<Run, MergeDecidedRunField>;
+
+/**
+ * May two adjacent runs become one?
+ *
+ * Every consolidation site asks this one question, because a merge that any
+ * one site decides differently is a merge the next parse undoes. A run holds
+ * three records a merged run can hold only one of: its typed formatting, the
+ * attributes `w:r` carried that the model has no field for, and the `w:rPr`
+ * children no reader took a value from. Merging two runs that disagree on any
+ * of them discards the loser's copy, which is how both runs' `w:rsid*` used to
+ * vanish at parse time — before the editor, before any gate could see it.
+ */
+export function runsMergeable(a: MergeDecidedRun, b: MergeDecidedRun): boolean {
+  return (
+    canMergeRun(a) &&
+    canMergeRun(b) &&
+    formattingEquals(a.formatting, b.formatting) &&
+    preservedAttributesEqual(a.preservedAttributes, b.preservedAttributes)
+  );
 }
 
 /**
@@ -336,14 +485,19 @@ export function consolidateRuns(runs: Run[]): Run[] {
   let current: Run | null = null;
 
   for (const run of runs) {
-    // Empty runs do not serialize to visible content, but they can mark where a
-    // skipped OOXML payload belongs. Treat them as merge boundaries so later
-    // enrichment can reinsert that payload in the original position.
-    if (run.content.length === 0) {
+    // A run holding no payload is a merge boundary, and it is kept: the keep
+    // rule has already decided that this run exists, and it read the source
+    // element to decide it. Such a run reaches here because a later pass will
+    // supply its payload — `enrichParagraphTextBoxes` matches the text box it
+    // lifted to the empty run that carried it — so dropping it here lost the
+    // carrier's own `w:rPr` and could move the box off its position. Merging
+    // it away is the same loss by another route, hence the flush.
+    if (!runHoldsPayload(run)) {
       if (current !== null) {
         result.push(current);
         current = null;
       }
+      result.push(run);
       continue;
     }
 
@@ -353,16 +507,13 @@ export function consolidateRuns(runs: Run[]): Run[] {
       continue;
     }
 
-    // Check if we can merge this run with current
-    if (
-      canMergeRun(current) &&
-      canMergeRun(run) &&
-      formattingEquals(current.formatting, run.formatting)
-    ) {
-      // Merge the runs
+    if (runsMergeable(current, run)) {
+      // Spread the survivor rather than rebuilding it from a field list: the
+      // predicate has already established that every record a merged run can
+      // hold only one of is equal on both sides, so the one it keeps is the
+      // one both wrote, and no field can go missing by omission here.
       current = {
-        type: "run",
-        ...(current.formatting !== undefined ? { formatting: current.formatting } : {}),
+        ...current,
         content: mergeRunContent(current.content, run.content),
       };
     } else {

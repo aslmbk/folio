@@ -63,6 +63,7 @@ import { canReplayEditableImageRawXml } from "../imageRawXml";
 import { serializeNonVisualDrawingNames } from "../nonVisualDrawingProps";
 import { requiredWrapPolygon, serializeWrapPolygon } from "../wrapPolygon";
 import { DECORATIVE_EXTENSION_URI, DECORATIVE_NAMESPACE } from "../imageParser";
+import { runHoldsPayload } from "../runPayload";
 // oxlint-disable-next-line import/no-cycle -- OOXML model is mutually recursive: shape textboxes hold paragraphs, paragraphs hold runs
 import { serializeParagraph } from "./paragraphSerializer";
 import { serializeTable } from "./tableSerializer";
@@ -100,14 +101,10 @@ function getUniqueId(id: string | number | undefined): string {
   return String(nextAutoId++);
 }
 
-function extractRPrInner(rPrXml: string): string {
-  if (!rPrXml.startsWith("<w:rPr>") || !rPrXml.endsWith("</w:rPr>")) {
-    return "";
-  }
-  return rPrXml.slice("<w:rPr>".length, -"</w:rPr>".length);
-}
-
 function serializeRunPropertyChange(change: RunPropertyChange): string {
+  // The snapshot is `CT_RPrOriginal`, and an empty one is legal: the revision
+  // is its author, date and id, and a change that set every property the run
+  // now has had nothing of its own before.
   const previousRPrXml = serializeTextFormatting(change.previousFormatting) || "<w:rPr/>";
   return `<w:rPrChange ${serializeTrackedChangeAttributes(change.info)}>${previousRPrXml}</w:rPrChange>`;
 }
@@ -116,17 +113,13 @@ function serializeRunProperties(
   formatting: TextFormatting | undefined,
   propertyChanges: RunPropertyChange[] | undefined,
 ): string {
-  const currentRPrXml = serializeTextFormatting(formatting);
-  const currentInner = currentRPrXml ? extractRPrInner(currentRPrXml) : "";
   const propertyChange = getSingularRunPropertyChange(propertyChanges);
-  const propertyChangeXml = propertyChange ? serializeRunPropertyChange(propertyChange) : "";
-  const combined = `${currentInner}${propertyChangeXml}`;
-
-  if (!combined) {
-    return "";
-  }
-
-  return `<w:rPr>${combined}</w:rPr>`;
+  // `w:rPrChange` closes `CT_RPr`, and the one writer places it there from the
+  // generated sequence rather than from this call's concatenation order.
+  return serializeTextFormatting(
+    formatting,
+    propertyChange ? [["rPrChange", serializeRunPropertyChange(propertyChange)]] : [],
+  );
 }
 
 // ============================================================================
@@ -977,6 +970,14 @@ function serializeRunContent(content: RunContent): string {
  * @returns XML string for the run
  */
 export function serializeRun(run: Run): string {
+  // A run holding no payload is not written. The reader drops such a run, so
+  // writing one makes save 2 differ from save 1 over a run neither save shows:
+  // the writer asks the reader's question rather than a second one. `w:rPr`
+  // alone is not a payload — it says how a payload looks, and there is none.
+  if (!runHoldsPayload(run)) {
+    return "";
+  }
+
   const parts: string[] = [];
 
   // Add run properties if present
@@ -1012,13 +1013,6 @@ export function serializeRuns(runs: Run[]): string {
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-
-/**
- * Check if a run has any content
- */
-export function hasRunContent(run: Run): boolean {
-  return run.content.length > 0;
-}
 
 /**
  * Check if a run has formatting

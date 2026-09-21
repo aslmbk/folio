@@ -1,4 +1,4 @@
-import type { ExhaustiveFields, ParagraphFormatting } from "../types/document";
+import type { ExhaustiveFields, ParagraphFormatting, TextFormatting } from "../types/document";
 import { serializeBorder } from "../docx/serializer/borderSerializer";
 import {
   serializeShading,
@@ -368,11 +368,43 @@ const modelSpacingProvenance = (
   return undefined;
 };
 
-const extractRunPropertiesInnerXml = (runPropertiesXml: string): string => {
-  if (!runPropertiesXml.startsWith("<w:rPr>") || !runPropertiesXml.endsWith("</w:rPr>")) {
+const MARK_PROPERTIES_OPEN = "<w:rPr>";
+const MARK_PROPERTIES_CLOSE = "</w:rPr>";
+const MARK_PROPERTIES_EMPTY = "<w:rPr/>";
+
+/**
+ * The paragraph mark's `w:rPr`, without its element, as the one `w:rPr` writer
+ * composes it.
+ *
+ * Three answers rather than two: `undefined` when the mark carried no property
+ * set, `""` when it carried an empty one, and the inner markup otherwise.
+ * Collapsing the middle case onto the first is what dropped `<w:rPr/>`: the
+ * element is optional, so writing one is not the same as writing none, and on
+ * the paragraph mark it is the slot a revision on the mark lives in.
+ *
+ * The caller re-wraps it with the mark's own revision in front, so this side
+ * hands back the inner markup rather than the element. `w:specVanish` travels
+ * as an owned child instead of being appended, because `EG_RPrBase` declares
+ * it between `w:eastAsianLayout` and `w:oMath` rather than last.
+ */
+const paragraphMarkPropertiesInner = (
+  runProperties: TextFormatting | undefined,
+  runInWithNext: boolean | undefined,
+): string | undefined => {
+  const xml = serializeTextFormatting(
+    runProperties,
+    runInWithNext === true ? [["specVanish", "<w:specVanish/>"]] : [],
+  );
+  // One branch per answer the writer has: nothing, the empty element, the
+  // element with children. A fourth branch would be guessing at a shape the
+  // writer cannot produce.
+  if (xml === "") {
+    return undefined;
+  }
+  if (xml === MARK_PROPERTIES_EMPTY) {
     return "";
   }
-  return runPropertiesXml.slice("<w:rPr>".length, -"</w:rPr>".length);
+  return xml.slice(MARK_PROPERTIES_OPEN.length, -MARK_PROPERTIES_CLOSE.length);
 };
 
 /**
@@ -459,15 +491,13 @@ export const modelParagraphFormattingEmission = (
     outlineLevel !== undefined ? `<w:outlineLvl w:val="${outlineLevel}"/>` : "",
   ];
   const propertiesXml = properties.join("");
-  const runPropertiesInnerXml = extractRunPropertiesInnerXml(
-    serializeTextFormatting(runProperties),
+  const paragraphMarkPropertiesInnerXml = paragraphMarkPropertiesInner(
+    runProperties,
+    runInWithNext,
   );
-  const paragraphMarkPropertiesInnerXml = `${runPropertiesInnerXml}${
-    runInWithNext === true ? "<w:specVanish/>" : ""
-  }`;
   const emission: MutableModeledParagraphFormattingEmission = {};
   if (propertiesXml) emission.propertiesXml = propertiesXml;
-  if (paragraphMarkPropertiesInnerXml) {
+  if (paragraphMarkPropertiesInnerXml !== undefined) {
     emission.paragraphMarkPropertiesInnerXml = paragraphMarkPropertiesInnerXml;
   }
 

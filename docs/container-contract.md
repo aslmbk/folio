@@ -801,6 +801,82 @@ the save leg writes `w:tcW` from it alone. A command that moves a cell's width
 states one: `mergeTableCellAttrs` derives the record for every command that
 patches a cell, so a resize writes exactly the cells it moved.
 
+### The same property set with four owners
+
+`w:rPr` is another property set and the first with more than one owner.
+`CT_RPr` is `EG_RPrBase` plus `w:rPrChange`; `CT_ParaRPr` opens that with
+`EG_ParaRPrTrackChanges`; and `CT_RPrOriginal` and `CT_ParaRPrOriginal` are the
+snapshots inside either one's revision. One generated row covers all four, and
+`TextFormatting.preserved` is the one sink.
+
+It joins the sequence rows for a weaker reason than the other two, and the
+difference is worth stating rather than inheriting. `CT_TblPrBase` is a real
+`xsd:sequence` of distinct names, so a `w:tblPr` out of order is invalid and
+`validateOoxmlPart` says so. `EG_RPrBase` is an `xsd:choice` referenced
+`maxOccurs="unbounded"`: a `w:rPr` in any order is valid, a repeated child is
+valid, and the validator reports neither. What the generated order buys here is
+one canonical form — the one Word writes — from folio's two `w:rPr` writers,
+which is why the order lives in `@stll/docx-core` where both can read it. The
+repeat is answered by the reader instead: the last statement of a property
+wins, and the statements it beat are not written back, so a canonical-order
+writer cannot invert them. See `docs/reserved-values.md`.
+
+Three further things about the row are decisions rather than consequences.
+
+- **The owners differ only in which children a _sibling_ record claims.** A
+  run's `w:rPrChange` is read into `Run.propertyChanges`; the paragraph mark's
+  revision and its `w:specVanish` are read into the paragraph's own record.
+  A child two readers both take is written twice; one neither takes is lost.
+  So the call site names its owner and the map overrides exactly those
+  children, the way the hyperlink's two callers already do.
+- **`ownedElsewhere` is a claim about the whole child, and a record that holds
+  only part of one may not make it.** `ParagraphFormatting.runInWithNext` is
+  on-or-absent, so it has nowhere to put `<w:specVanish w:val="0"/>`, the value
+  that cancels a style's run-in heading. That child's disposition is a handler
+  answering with what the record took, not a name in a map.
+- **The editor leg stops at the run, and the reason is the one the attribute
+  remainder already gave.** The paragraph mark's properties ride
+  `ParagraphAttrs._originalFormatting.runProperties`, so its sink and its
+  `w:rPrChange` reach the editor and come back. A run has no such record: a run
+  is text plus marks, so `r|CT_R`'s own `w:rPr` sink survives a save and not a
+  round trip, and `rPr|CT_RPr`'s eleven pairs are `editorProjection` rather than
+  `containerNotKept`. Giving a run one is the same separate record with the same
+  grouping rules the remainder needs.
+
+A merge is where this sink differs from the other property sets. Run formatting
+is resolved: a style, the paragraph mark and the run each have their say, and
+`preserved` is not a value that resolves. It is the bytes one element held, so
+`mergeTextFormatting` drops it on every path out rather than writing a style's
+markup into every run below it.
+
+**An empty property set is not an absent one**, and `w:rPr` is where that rule
+costs the most. The element is optional wherever it appears, so the reader
+answers `undefined` only for an owner that carried none, and the writer writes
+`<w:rPr/>` exactly when the record is present — the decision `w:tblPrEx`,
+`w:trPr` and `w:tcPr` already made. The corpus argues for it at every owner
+(5121 empty ones on a run, 3890 on the paragraph mark, 2419 on a style, 674 on
+a numbering level, 31 inside a `w:rPrChange`, Word among the producers of
+each), and the paragraph mark is the sharpest case: an empty one states no
+formatting, which is the whole point, but it is the slot the mark's
+`w:rPrChange` and its `w:ins`/`w:del`/`w:moveFrom`/`w:moveTo` live in, so
+writing one is pure presence. The emission carries three answers rather than
+two for the same reason — `undefined` for a mark with no property set, `""`
+for one with an empty set — because a caller handed `""` for both puts the
+presence back on the floor.
+
+Three pairs move with it, and one of the three is the census rather than folio.
+`pPr|CT_PPr/rPr` goes from `dropped (replayOnly)` to `modelled`, and
+`r|CT_R/rPr` from `dropped (parsedNotSerialized)` to `dropped
+(editorProjection)` — the model holds it and a save writes it; the editor has
+no run record to carry it, which is the boundary the attribute remainder
+already names. `rPrChange|CT_ParaRPrChange/rPr` reads as `modelled` and is
+not: the paragraph mark's `w:rPrChange` is still a capture in the sink, and
+what the carrier probe finds with the sink cleared is the paragraph mark's own
+`<w:rPr/>`. The law asks whether the subject is _somewhere_ in the part with an
+equal value, and one empty element is equal to another. A pair whose fixture
+value is an empty element cannot be told from a sibling of the same name until
+the law compares positions.
+
 ### What `lost-in-the-editor-projection` is and is not
 
 138 pairs carried this mechanism when the section was written, and reading them
