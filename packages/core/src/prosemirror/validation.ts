@@ -1,5 +1,7 @@
 import type { Mark, Node as PMNode } from "prosemirror-model";
 
+import type { PositionedBookmarkMarker } from "../types/document";
+
 import type { ProseMirrorAttrIssue, ReadProseMirrorAttrsResult } from "./attrs";
 import { readBookmarkBoundaryAttrs } from "./bookmarkBoundaryAttrs";
 import { readCommentReferenceAttrs } from "./commentReferenceAttrs";
@@ -91,14 +93,17 @@ export const validateProseMirrorDocument = (doc: PMNode): ValidateProseMirrorDoc
 };
 
 /**
- * Where a bookmark boundary came from. A `bookmarkBoundary` node is emitted by
- * this codebase's own conversion, always in matched pairs. A
+ * Where a bookmark boundary came from. A boundary is either a node or a
+ * positioned marker on a table or row. Positioned starts participate in
+ * pairing because their other boundary may be an inline node; unmatched
+ * positioned markers are tolerated because imported documents can omit their
+ * other carrier. A
  * `paragraph.attrs.bookmarks` entry is input data the conversion could not pair
  * (see `collectPairedBookmarkIds`) and is written back out as a start and an end
  * around that one paragraph. The distinction decides how strictly a duplicate
  * id is treated.
  */
-type BookmarkBoundaryOrigin = "attr" | "node";
+type BookmarkBoundaryOrigin = "boundary" | "paragraph-attr" | "positioned";
 
 type OpenBookmarkBoundary = {
   id: number;
@@ -154,7 +159,7 @@ const validateBookmarkBoundaryStructure = (
     const { id, name, path, paragraph, origin } = boundary;
     const previousOrigin = startedBy.get(id);
     if (previousOrigin !== undefined) {
-      if (origin === "attr" && previousOrigin === "attr") {
+      if (origin === "paragraph-attr" && previousOrigin === "paragraph-attr") {
         return false;
       }
       issues.push({
@@ -196,7 +201,7 @@ const validateBookmarkBoundaryStructure = (
           name: bookmark.name,
           path: bookmarkPath,
           paragraph: enclosingParagraph,
-          origin: "attr",
+          origin: "paragraph-attr",
         });
         if (opened) {
           openedAttrBookmarks.push({ id: bookmark.id, path: bookmarkPath });
@@ -223,7 +228,7 @@ const validateBookmarkBoundaryStructure = (
             name: attrs.name ?? null,
             path,
             paragraph: enclosingParagraph,
-            origin: "node",
+            origin: "boundary",
           });
         } else {
           registerEnd(attrs.id, path, enclosingParagraph);
@@ -231,10 +236,68 @@ const validateBookmarkBoundaryStructure = (
       }
     }
 
+    let positionedBookmarks: readonly PositionedBookmarkMarker[] = [];
+    if (node.type.name === "table") {
+      const result = readTableAttrs(node);
+      if (result.ok) {
+        positionedBookmarks = result.value._bookmarks ?? [];
+      }
+    } else if (node.type.name === "tableRow") {
+      const result = readTableRowAttrs(node);
+      if (result.ok) {
+        positionedBookmarks = result.value._bookmarks ?? [];
+      }
+    }
+    const positionedBookmarksByChildIndex = new Map<
+      number,
+      { marker: PositionedBookmarkMarker["marker"]; path: string }[]
+    >();
+    for (const [index, positioned] of positionedBookmarks.entries()) {
+      const markerPath = `${path}.${node.type.name}.attrs._bookmarks[${index}]`;
+      if (positioned.index > node.childCount) {
+        issues.push({
+          path: `${markerPath}.index`,
+          message: `Expected a child position between 0 and ${node.childCount}.`,
+        });
+        continue;
+      }
+      const markers = positionedBookmarksByChildIndex.get(positioned.index);
+      const atPosition = {
+        marker: positioned.marker,
+        path: markerPath,
+      };
+      if (markers === undefined) {
+        positionedBookmarksByChildIndex.set(positioned.index, [atPosition]);
+      } else {
+        markers.push(atPosition);
+      }
+    }
+    const visitPositionedBookmarks = (childIndex: number): void => {
+      for (const { marker, path: markerPath } of positionedBookmarksByChildIndex.get(childIndex) ??
+        []) {
+        if (marker.type === "bookmarkStart") {
+          registerStart({
+            id: marker.id,
+            name: marker.name,
+            path: markerPath,
+            paragraph: enclosingParagraph,
+            origin: "positioned",
+          });
+        } else if (open.has(marker.id)) {
+          registerEnd(marker.id, markerPath, enclosingParagraph);
+        }
+      }
+    };
+
+    // A table or row marker stands before the child whose index it records.
+    // Bucketing once preserves authored order within that position while the
+    // child walk stays linear in document-controlled children and markers.
     // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
     node.forEach((child, _offset, index) => {
+      visitPositionedBookmarks(index);
       visit(child, `${path}.content[${index}]`, enclosingParagraph);
     });
+    visitPositionedBookmarks(node.childCount);
 
     for (const { id, path: bookmarkPath } of openedAttrBookmarks) {
       registerEnd(id, bookmarkPath, enclosingParagraph);
@@ -243,6 +306,9 @@ const validateBookmarkBoundaryStructure = (
 
   visit(doc, "doc", "the document root");
   for (const boundary of open.values()) {
+    if (boundary.origin === "positioned") {
+      continue;
+    }
     issues.push({
       path: boundary.path,
       message: `${describeBookmark(boundary.id, boundary.name)} has no matching end boundary (${boundary.paragraph}).`,

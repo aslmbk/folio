@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import type { PositionedBookmarkMarker } from "../types/document";
+
 import { schema } from "./schema";
 import { assertValidProseMirrorDocument, validateProseMirrorDocument } from "./validation";
 
@@ -124,6 +126,141 @@ describe("ProseMirror document validation", () => {
     ]);
 
     expect(validateProseMirrorDocument(doc)).toEqual({ valid: true, issues: [] });
+  });
+
+  test("pairs table and row bookmark starts with ends inside following cells", () => {
+    const paragraph = schema.node("paragraph", null, [
+      schema.node("bookmarkBoundary", { type: "end", id: 1 }),
+      schema.node("bookmarkBoundary", { type: "end", id: 2 }),
+    ]);
+    const row = schema.node(
+      "tableRow",
+      {
+        _bookmarks: [{ index: 0, marker: { type: "bookmarkStart", id: 2, name: "row range" } }],
+      },
+      [schema.node("tableCell", null, [paragraph])],
+    );
+    const table = schema.node(
+      "table",
+      {
+        _bookmarks: [{ index: 0, marker: { type: "bookmarkStart", id: 1, name: "table range" } }],
+      },
+      [row],
+    );
+    const doc = schema.node("doc", null, [table]);
+
+    expect(validateProseMirrorDocument(doc)).toEqual({ valid: true, issues: [] });
+  });
+
+  test("allows an unmatched positioned bookmark end from an imported table", () => {
+    const row = schema.node(
+      "tableRow",
+      {
+        _bookmarks: [{ index: 0, marker: { type: "bookmarkEnd", id: 1 } }],
+      },
+      [schema.node("tableCell", null, [schema.node("paragraph")])],
+    );
+    const doc = schema.node("doc", null, [schema.node("table", null, [row])]);
+
+    expect(validateProseMirrorDocument(doc)).toEqual({ valid: true, issues: [] });
+  });
+
+  test("allows an unmatched positioned bookmark start from an imported table", () => {
+    const row = schema.node(
+      "tableRow",
+      {
+        _bookmarks: [
+          { index: 0, marker: { type: "bookmarkStart", id: 1, name: "imported range" } },
+        ],
+      },
+      [schema.node("tableCell", null, [schema.node("paragraph")])],
+    );
+    const doc = schema.node("doc", null, [schema.node("table", null, [row])]);
+
+    expect(validateProseMirrorDocument(doc)).toEqual({ valid: true, issues: [] });
+  });
+
+  const tableWithRowBookmark = (index: number, id: number) =>
+    schema.node("doc", null, [
+      schema.node("table", null, [
+        schema.node(
+          "tableRow",
+          {
+            _bookmarks: [{ index, marker: { type: "bookmarkStart", id, name: "range" } }],
+          },
+          [schema.node("tableCell", null, [schema.node("paragraph")])],
+        ),
+      ]),
+    ]);
+
+  test.each([
+    { label: "fractional", value: 0.5 },
+    { label: "negative", value: -1 },
+    { label: "unsafe", value: Number.MAX_SAFE_INTEGER + 1 },
+  ])("rejects a $label positioned bookmark index", ({ value }) => {
+    const result = validateProseMirrorDocument(tableWithRowBookmark(value, 1));
+
+    expect(result.valid).toBe(false);
+    expect(result.issues).toContainEqual({
+      path: "doc.content[0].content[0].tableRow.attrs._bookmarks[0].index",
+      message: "Expected a non-negative safe integer.",
+    });
+  });
+
+  test.each([
+    { label: "fractional", value: 0.5 },
+    { label: "negative", value: -1 },
+    { label: "unsafe", value: Number.MAX_SAFE_INTEGER + 1 },
+  ])("rejects a $label positioned bookmark id", ({ value }) => {
+    const result = validateProseMirrorDocument(tableWithRowBookmark(0, value));
+
+    expect(result.valid).toBe(false);
+    expect(result.issues).toContainEqual({
+      path: "doc.content[0].content[0].tableRow.attrs._bookmarks[0].marker.id",
+      message: "Expected a non-negative safe integer.",
+    });
+  });
+
+  test("rejects a positioned bookmark beyond its owning node children", () => {
+    const result = validateProseMirrorDocument(tableWithRowBookmark(2, 1));
+
+    expect(result.valid).toBe(false);
+    expect(result.issues).toContainEqual({
+      path: "doc.content[0].content[0].tableRow.attrs._bookmarks[0].index",
+      message: "Expected a child position between 0 and 1.",
+    });
+  });
+
+  test("scans positioned bookmarks a constant number of times for a large table row", () => {
+    const childCount = 256;
+    const maxMarkerReadPasses = 3;
+    let markerReads = 0;
+    const bookmarks = new Proxy(
+      Array.from(
+        { length: childCount },
+        (_, index) =>
+          [
+            { index, marker: { type: "bookmarkStart", id: index, name: `range-${index}` } },
+            { index, marker: { type: "bookmarkEnd", id: index } },
+          ] satisfies PositionedBookmarkMarker[],
+      ).flat(),
+      {
+        get: (target, property, receiver) => {
+          if (typeof property === "string" && /^\d+$/u.test(property)) {
+            markerReads += 1;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+    const cells = Array.from({ length: childCount }, () =>
+      schema.node("tableCell", null, [schema.node("paragraph")]),
+    );
+    const row = schema.node("tableRow", { _bookmarks: bookmarks }, cells);
+    const doc = schema.node("doc", null, [schema.node("table", null, [row])]);
+
+    expect(validateProseMirrorDocument(doc)).toEqual({ valid: true, issues: [] });
+    expect(markerReads).toBeLessThanOrEqual(bookmarks.length * maxMarkerReadPasses);
   });
 
   test("allows a bookmark to overlap a tracked hyperlink", () => {
