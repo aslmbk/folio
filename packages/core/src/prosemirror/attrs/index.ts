@@ -1558,6 +1558,13 @@ const taggedLayerValidator =
         issues.push({ path: `${path}.${key}`, message: "Expected a string." });
       }
     }
+    const propertiesXml = layer["propertiesXml"];
+    if (typeof propertiesXml === "string" && !isSafePreservedChildXml(propertiesXml)) {
+      issues.push({
+        path: `${path}.propertiesXml`,
+        message: "Expected one bounded, well-formed XML element.",
+      });
+    }
     for (const key of Object.keys(layer)) {
       if (!TAGGED_LAYER_KEYS.has(key)) {
         issues.push({ path: `${path}.${key}`, message: `Unexpected ${label} wrapper property.` });
@@ -1591,6 +1598,28 @@ const inlineWrapperLayerValidator = (kind: unknown): InlineWrapperLayerValidator
   return typeof kind === "string" ? byKind[kind] : undefined;
 };
 
+const inlineWrapperProperties = function* (layers: readonly unknown[]): Generator<unknown> {
+  for (let index = 0; index < layers.length; index += 1) {
+    const layer = layers[index];
+    yield {
+      xml:
+        isRecord(layer) && typeof layer["propertiesXml"] === "string" ? layer["propertiesXml"] : "",
+    };
+  }
+};
+
+const emptyHyperlinkWrapperProperties = function* (stacks: readonly unknown[]): Generator<unknown> {
+  for (let stackIndex = 0; stackIndex < stacks.length; stackIndex += 1) {
+    const stack = stacks[stackIndex];
+    // One entry per stack keeps empty arrays inside the same aggregate count
+    // boundary as their layers.
+    yield {};
+    if (Array.isArray(stack)) {
+      yield* inlineWrapperProperties(stack);
+    }
+  }
+};
+
 const validateInlineWrapperStack = (
   value: unknown,
   path: string,
@@ -1602,6 +1631,10 @@ const validateInlineWrapperStack = (
   }
   if (value.length === 0) {
     issues.push({ path, message: "Expected at least one inline wrapper layer." });
+    return;
+  }
+  if (!isWithinPreservedMarkupBudget(inlineWrapperProperties(value))) {
+    issues.push({ path, message: "Inline wrapper stack exceeds its resource budget." });
     return;
   }
   for (const [index, layer] of value.entries()) {
@@ -1647,6 +1680,33 @@ export const readInlineWrapperMarkAttrs = (
   const issues: ProseMirrorAttrIssue[] = [];
   expectMarkType(mark, "inlineWrapper", issues);
   validateInlineWrapperStack(attrs["stack"], "inlineWrapper.attrs.stack", issues);
+  const hyperlinkIndex = attrs["_docxHyperlinkIndex"];
+  const stackStart = attrs["_docxInsideHyperlinkStackStart"];
+  const hasHyperlinkIndex = hyperlinkIndex !== undefined && hyperlinkIndex !== null;
+  const hasStackStart = stackStart !== undefined && stackStart !== null;
+  if (hasHyperlinkIndex !== hasStackStart) {
+    issues.push({
+      path: "inlineWrapper.attrs",
+      message: "Hyperlink wrapper provenance requires both an index and stack start.",
+    });
+  } else if (hasHyperlinkIndex && hasStackStart) {
+    validateNonNegativeInteger(hyperlinkIndex, "inlineWrapper.attrs._docxHyperlinkIndex", issues);
+    validateNonNegativeInteger(
+      stackStart,
+      "inlineWrapper.attrs._docxInsideHyperlinkStackStart",
+      issues,
+    );
+    if (
+      typeof stackStart === "number" &&
+      Array.isArray(attrs["stack"]) &&
+      stackStart >= attrs["stack"].length
+    ) {
+      issues.push({
+        path: "inlineWrapper.attrs._docxInsideHyperlinkStackStart",
+        message: "Expected a stack position inside the wrapper stack.",
+      });
+    }
+  }
 
   return attrsResult(attrs, issues);
 };
@@ -3928,7 +3988,7 @@ const validateNonNegativeInteger = (
     return;
   }
 
-  if (!Number.isInteger(value) || value < 0) {
+  if (!Number.isSafeInteger(value) || value < 0) {
     issues.push({ path, message: "Expected a non-negative integer." });
   }
 };
@@ -3998,5 +4058,30 @@ const optionalEmptyHyperlinkArray = (value: unknown, issues: ProseMirrorAttrIssu
     optionalString(item, "target", `${itemPath}.target`, issues);
     optionalBoolean(item, "history", `${itemPath}.history`, issues);
     optionalString(item, "docLocation", `${itemPath}.docLocation`, issues);
+    const wrapperStacks = item["_docxEmptyWrapperStacks"];
+    if (wrapperStacks === undefined || wrapperStacks === null) {
+      continue;
+    }
+    if (!Array.isArray(wrapperStacks)) {
+      issues.push({
+        path: `${itemPath}._docxEmptyWrapperStacks`,
+        message: "Expected an array of inline wrapper stacks.",
+      });
+      continue;
+    }
+    if (!isWithinPreservedMarkupBudget(emptyHyperlinkWrapperProperties(wrapperStacks))) {
+      issues.push({
+        path: `${itemPath}._docxEmptyWrapperStacks`,
+        message: "Empty inline wrapper stacks exceed their aggregate resource budget.",
+      });
+      continue;
+    }
+    for (const [stackIndex, stack] of wrapperStacks.entries()) {
+      validateInlineWrapperStack(
+        stack,
+        `${itemPath}._docxEmptyWrapperStacks[${stackIndex}]`,
+        issues,
+      );
+    }
   }
 };

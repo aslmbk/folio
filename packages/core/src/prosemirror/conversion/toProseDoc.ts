@@ -874,6 +874,7 @@ function convertParagraph(
           nextRunIdentityId,
         });
         if (linkNodes.length === 0) {
+          const emptyWrapperStacks = emptyInlineWrapperStacks(content.children);
           emptyHyperlinks ??= [];
           emptyHyperlinks.push({
             offset: inlineOffset,
@@ -884,6 +885,9 @@ function convertParagraph(
             ...(content.target !== undefined ? { target: content.target } : {}),
             ...(content.history !== undefined ? { history: content.history } : {}),
             ...(content.docLocation !== undefined ? { docLocation: content.docLocation } : {}),
+            ...(emptyWrapperStacks.length === 0
+              ? {}
+              : { _docxEmptyWrapperStacks: emptyWrapperStacks }),
           });
           break;
         }
@@ -3077,6 +3081,19 @@ const withInlineWrapperStacks = (
       : [{ content: item, stack }],
   );
 
+/** Wrapper nests with no leaf to carry their stack as a ProseMirror mark. */
+const emptyInlineWrapperStacks = (
+  content: readonly ParagraphContent[],
+  stack: readonly InlineWrapperLayer[] = [],
+): readonly (readonly InlineWrapperLayer[])[] =>
+  content.flatMap((item) => {
+    if (item.type !== "inlineWrapper") {
+      return [];
+    }
+    const nested = [...stack, inlineWrapperLayer(item)];
+    return item.content.length === 0 ? [nested] : emptyInlineWrapperStacks(item.content, nested);
+  });
+
 /**
  * `nodes` with `stack` recorded outside whatever wrapper they already carry.
  *
@@ -3090,7 +3107,16 @@ const withInlineWrapperStacks = (
  * one node it is; its leaves were marked with the whole enclosing stack when
  * it was built, because the painter reads the wrapper off the leaf.
  */
-const withInlineWrapperMark = (nodes: PMNode[], stack: readonly InlineWrapperLayer[]): PMNode[] => {
+type InlineWrapperHyperlinkOrigin = {
+  hyperlinkIndex: number;
+  stackStart: number;
+};
+
+const withInlineWrapperMark = (
+  nodes: PMNode[],
+  stack: readonly InlineWrapperLayer[],
+  origin?: InlineWrapperHyperlinkOrigin,
+): PMNode[] => {
   const markType = schema.marks["inlineWrapper"];
   if (stack.length === 0 || !markType) {
     return nodes;
@@ -3100,9 +3126,30 @@ const withInlineWrapperMark = (nodes: PMNode[], stack: readonly InlineWrapperLay
       return node;
     }
     const inner = node.marks.find((mark) => mark.type === markType);
-    const layers =
-      inner === undefined ? stack : [...stack, ...expectInlineWrapperMarkAttrs(inner).stack];
-    return node.mark(markType.create({ stack: layers }).addToSet(node.marks));
+    const innerAttrs = inner === undefined ? undefined : expectInlineWrapperMarkAttrs(inner);
+    const layers = innerAttrs === undefined ? stack : [...stack, ...innerAttrs.stack];
+    const inheritedOrigin =
+      typeof innerAttrs?._docxHyperlinkIndex !== "number" ||
+      typeof innerAttrs._docxInsideHyperlinkStackStart !== "number"
+        ? undefined
+        : {
+            hyperlinkIndex: innerAttrs._docxHyperlinkIndex,
+            stackStart: stack.length + innerAttrs._docxInsideHyperlinkStackStart,
+          };
+    const provenance = origin ?? inheritedOrigin;
+    return node.mark(
+      markType
+        .create({
+          stack: layers,
+          ...(provenance === undefined
+            ? {}
+            : {
+                _docxHyperlinkIndex: provenance.hyperlinkIndex,
+                _docxInsideHyperlinkStackStart: provenance.stackStart,
+              }),
+        })
+        .addToSet(node.marks),
+    );
   });
 };
 
@@ -4542,9 +4589,9 @@ function convertHyperlink(
   });
 
   // A wrapper authored inside the link rides its leaves as the `inlineWrapper`
-  // mark, exactly as one authored around the link does, so the editor holds
-  // `w:bdo > w:hyperlink` and `w:hyperlink > w:bdo` the same way and the save
-  // leg writes both the canonical way round, wrapper outside link.
+  // mark. Its provenance says which suffix of the wrapper stack belongs below
+  // this link, so a wrapper around a link remains distinct from a link around
+  // a wrapper when the save leg rebuilds the model.
   for (const { content: child, stack } of withInlineWrapperStacks(hyperlink.children)) {
     const childNodes: PMNode[] = [];
     switch (child.type) {
@@ -4626,7 +4673,12 @@ function convertHyperlink(
       default:
         break;
     }
-    nodes.push(...withInlineWrapperMark(childNodes, stack));
+    nodes.push(
+      ...withInlineWrapperMark(childNodes, stack, {
+        hyperlinkIndex,
+        stackStart: 0,
+      }),
+    );
   }
 
   return nodes;

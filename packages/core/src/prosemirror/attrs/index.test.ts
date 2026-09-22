@@ -234,7 +234,15 @@ describe("ProseMirror attr readers", () => {
       lineSpacingExplicit: "invalid",
       numPr: { numId: "bad" },
       bookmarks: [{ id: "bad", name: 7 }],
-      _emptyHyperlinks: [{ offset: -1, href: 42 }],
+      _emptyHyperlinks: [
+        {
+          offset: -1,
+          href: 42,
+          _docxEmptyWrapperStacks: [
+            [{ kind: "smartTag", element: "place", propertiesXml: "<w:smartTagPr>" }],
+          ],
+        },
+      ],
     });
 
     const result = readParagraphAttrs(node);
@@ -247,9 +255,30 @@ describe("ProseMirror attr readers", () => {
         "paragraph.attrs.lineSpacingExplicit",
         "paragraph.attrs._emptyHyperlinks[0].offset",
         "paragraph.attrs._emptyHyperlinks[0].href",
+        "paragraph.attrs._emptyHyperlinks[0]._docxEmptyWrapperStacks[0][0].propertiesXml",
       ]),
     );
     expect(() => expectParagraphAttrs(node)).toThrow("Invalid ProseMirror paragraph attrs");
+  });
+
+  test("bounds empty hyperlink wrapper stacks before validating every stack", () => {
+    const wrapperStacks = Array.from({ length: 4097 }, () => []);
+    const node = schema.nodes.paragraph.create({
+      _emptyHyperlinks: [{ offset: 0, _docxEmptyWrapperStacks: wrapperStacks }],
+    });
+
+    const result = readParagraphAttrs(node);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("Expected paragraph attrs to be rejected");
+    }
+    expect(result.issues).toEqual([
+      {
+        path: "paragraph.attrs._emptyHyperlinks[0]._docxEmptyWrapperStacks",
+        message: "Empty inline wrapper stacks exceed their aggregate resource budget.",
+      },
+    ]);
   });
 
   test.each([
@@ -840,6 +869,25 @@ describe("ProseMirror attr readers", () => {
       ]),
     );
   });
+
+  test.each([Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY])(
+    "rejects an unsafe imported hyperlink index %p",
+    (_docxHyperlinkIndex) => {
+      const result = readHyperlinkMarkAttrs(
+        schema.marks.hyperlink.create({
+          href: "https://example.com/doc",
+          _docxHyperlinkIndex,
+        }),
+      );
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.issues.map((issue) => issue.path)).toContain(
+          "hyperlink.attrs._docxHyperlinkIndex",
+        );
+      }
+    },
+  );
 
   test("rejects a malformed note-reference custom-mark decision", () => {
     const mark = schema.marks.footnoteRef.create({

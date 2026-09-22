@@ -13,14 +13,10 @@
  * - **Parse and save keep the authored nesting.** A document folio opens and
  *   writes back is the document it opened, wrapper inside link, with nothing
  *   captured.
- * - **The editor canonicalises.** A wrapper is a mark on the leaves it held
- *   and a link is a mark on the same leaves, and neither mark says which is
- *   inside which, so the save leg writes the one order the wrapper design
- *   fixed: revision, then wrapper, then hyperlink, then run. `w:bdo` moves
- *   from inside the link to around it. That is a documented canonicalisation
- *   and not a loss — the link, the wrapper and the text all survive, and a
- *   paragraph nobody edited keeps its authored order because selective save
- *   replays its bytes.
+ * - **The editor keeps containment.** A wrapper and a link are marks on the
+ *   same leaves, so the wrapper mark carries the imported hyperlink boundary
+ *   for its inside suffix. That provenance makes `<w:hyperlink><w:bdo>` a
+ *   different document from `<w:bdo><w:hyperlink>` through an edit.
  *
  * A field is not canonicalised the same way, because the field node holds its
  * own inline content: a wrapper inside `w:fldSimple` comes back inside it.
@@ -28,6 +24,7 @@
 
 import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
+import { panic } from "better-result";
 import { EditorState, TextSelection } from "prosemirror-state";
 
 import { propertyConfig, propertyTestTimeout } from "../../../../test/property-testing";
@@ -192,6 +189,12 @@ const nest = (layers: readonly Layer[], inner: string): string => {
 const linkOverWrappers = (layers: readonly Layer[]): string =>
   `<w:hyperlink w:anchor="${ANCHOR}">${nest(layers, RUN)}</w:hyperlink>`;
 
+const outerWrapperOverLinkOverWrappers = (outer: Layer, layers: readonly Layer[]): string =>
+  outer.xml(linkOverWrappers(layers));
+
+const linkOverEmptyWrappers = (layers: readonly Layer[]): string =>
+  `<w:hyperlink w:anchor="${ANCHOR}">${nest(layers, "")}</w:hyperlink>`;
+
 /** `<w:fldSimple>` with the wrappers around its cached result. */
 const fieldOverWrappers = (layers: readonly Layer[]): string =>
   `<w:fldSimple w:instr="${INSTRUCTION}">${nest(layers, RUN)}</w:fldSimple>`;
@@ -206,6 +209,21 @@ const wrappersAround = (layers: readonly Layer[], inner: Shape): Shape => {
   let shape = inner;
   for (const layer of layers.toReversed()) {
     shape = { of: "wrapper", wrapper: layer.shape, content: [shape] };
+  }
+  return shape;
+};
+
+const emptyWrappersAround = (layers: readonly Layer[]): Shape => {
+  let shape: Shape | undefined;
+  for (const layer of layers.toReversed()) {
+    shape = {
+      of: "wrapper",
+      wrapper: layer.shape,
+      content: shape === undefined ? [] : [shape],
+    };
+  }
+  if (shape === undefined) {
+    return panic("An empty wrapper fixture needs at least one layer");
   }
   return shape;
 };
@@ -284,12 +302,46 @@ describe("a transparent wrapper inside a simple field, through parse and save", 
 
 describe("a transparent wrapper inside a link, through the editor", () => {
   test(
-    "comes back with the wrapper around the link, the canonical order",
+    "keeps an empty wrapper with no leaf to carry its marks",
+    () => {
+      fc.assert(
+        fc.property(layersArbitrary, (layers) => {
+          const once = throughTheEditor(parseParagraphXml(linkOverEmptyWrappers(layers)));
+          expect(shapesOf(once)).toEqual([linkShape([emptyWrappersAround(layers)])]);
+          expect(shapesOf(throughTheEditor(once))).toEqual(shapesOf(once));
+        }),
+        propertyConfig({ numRuns: 200 }),
+      );
+    },
+    propertyTestTimeout(),
+  );
+
+  test(
+    "keeps the wrapper inside the link",
     () => {
       fc.assert(
         fc.property(layersArbitrary, (layers) => {
           const reopened = throughTheEditor(parseParagraphXml(linkOverWrappers(layers)));
-          expect(shapesOf(reopened)).toEqual([wrappersAround(layers, linkShape([textShape]))]);
+          expect(shapesOf(reopened)).toEqual([linkShape([wrappersAround(layers, textShape)])]);
+        }),
+        propertyConfig({ numRuns: 200 }),
+      );
+    },
+    propertyTestTimeout(),
+  );
+
+  test(
+    "keeps inner and outer wrappers on their respective sides of a link",
+    () => {
+      const outer = bidiLayer("override", "rtl");
+      fc.assert(
+        fc.property(layersArbitrary, (layers) => {
+          const reopened = throughTheEditor(
+            parseParagraphXml(outerWrapperOverLinkOverWrappers(outer, layers)),
+          );
+          expect(shapesOf(reopened)).toEqual([
+            wrappersAround([outer], linkShape([wrappersAround(layers, textShape)])),
+          ]);
         }),
         propertyConfig({ numRuns: 200 }),
       );
@@ -356,7 +408,7 @@ describe("a wrapped hyperlink inside a simple field, through the editor", () => 
             {
               of: "field",
               instruction: INSTRUCTION,
-              content: [wrappersAround(layers, linkShape([textShape]))],
+              content: [linkShape([wrappersAround(layers, textShape)])],
             },
           ]);
         }),
@@ -404,7 +456,7 @@ describe("an edit inside a wrapper inside a link", () => {
         fc.property(layersArbitrary, (layers) => {
           const edited = editedThroughTheEditor(parseParagraphXml(linkOverWrappers(layers)));
           expect(shapesOf(edited)).toEqual([
-            wrappersAround(layers, linkShape([{ of: "text", text: "aEDITc" }])),
+            linkShape([wrappersAround(layers, { of: "text", text: "aEDITc" })]),
           ]);
         }),
         propertyConfig({ numRuns: 100 }),
