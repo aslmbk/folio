@@ -120,7 +120,7 @@ const requiredInstances = (minOccurs: string): number => {
   return Number.isInteger(declared) ? Math.min(declared, REQUIRED_SIBLING_LIMIT) : 1;
 };
 
-const escapeAttribute = (value: string): string =>
+export const escapeAttribute = (value: string): string =>
   value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 
 export type WrittenAttribute = { spelled: string; value: string };
@@ -360,6 +360,8 @@ export type BuiltFixture = {
   /** For an attribute subject, the attribute's spelling; its element is the container. */
   attributeSpelling: string | undefined;
   attributeLocalName: string | undefined;
+  /** The value written for an attribute subject, used by package-level fixture dependencies. */
+  attributeValue: string | undefined;
 };
 
 export type FixtureResult =
@@ -623,6 +625,7 @@ export const buildFixture = (space: ContainerSpace, subject: Subject): FixtureRe
         subject.kind === "child" ? subject.slot.child : subject.slot.container.element,
       attributeSpelling,
       attributeLocalName: subject.kind === "attribute" ? subject.slot.attribute.name : undefined,
+      attributeValue: subject.kind === "attribute" ? subject.value : undefined,
     },
   };
 };
