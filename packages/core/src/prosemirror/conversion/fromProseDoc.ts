@@ -5839,7 +5839,7 @@ function convertPMTableCell(
   const textBoxAnchorMarkers = new Map<string, Run>();
   let previousStandaloneTextBox: PreviousStandaloneTextBox | null = null;
 
-  // Extract cell content (paragraphs and nested tables)
+  // Extract cell content, including nested block controls.
   // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
   node.forEach((contentNode) => {
     if (contentNode.type.name === "paragraph") {
@@ -5849,6 +5849,9 @@ function convertPMTableCell(
       previousStandaloneTextBox = null;
     } else if (contentNode.type.name === "table") {
       content.push(convertPMTable(contentNode, documentCounts, styleResolver));
+      previousStandaloneTextBox = null;
+    } else if (contentNode.type.name === "blockSdt") {
+      content.push(convertPMBlockSdt(contentNode, styleResolver));
       previousStandaloneTextBox = null;
     } else if (contentNode.type.name === "textBox") {
       previousStandaloneTextBox = appendTextBoxBlock(content, contentNode, {

@@ -245,7 +245,7 @@ const insideFirstControl = (xml: string): string => {
   return opened === -1 ? "" : xml.slice(opened, xml.indexOf("</w:sdtContent>"));
 };
 
-describe("a row- or cell-level content control keeps its wrapper", () => {
+describe("a table content control keeps its wrapper", () => {
   test("a row-level control survives every declared sibling, on every leg", async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -340,11 +340,14 @@ describe("a row- or cell-level content control keeps its wrapper", () => {
     }
   }, 60_000);
 
-  test("an empty row- or cell-level control remains positioned in its parent", async () => {
+  test("an empty or opaque table control remains positioned in its parent", async () => {
     const empty = control("");
+    const opaque = `<w:sdt>${CONTROL_PROPERTIES}</w:sdt>`;
     const bodies = [
       `<w:tbl><w:tblPr/>${GRID}${empty}${row("plain")}</w:tbl>`,
       `<w:tbl><w:tblPr/>${GRID}<w:tr>${empty}${cell("plain")}</w:tr></w:tbl>`,
+      `<w:tbl><w:tblPr/>${GRID}<w:tr><w:tc><w:tcPr/>${empty}<w:p/></w:tc></w:tr></w:tbl>`,
+      `<w:tbl><w:tblPr/>${GRID}<w:tr><w:tc><w:tcPr/>${opaque}<w:p/></w:tc></w:tr></w:tbl>`,
     ];
 
     for (const body of bodies) {
