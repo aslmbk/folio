@@ -3,9 +3,14 @@ import type { Node as PMNode } from "prosemirror-model";
 import { EditorState } from "prosemirror-state";
 
 import { createFolioAIEditSnapshot } from "../ai-edits/snapshot";
+import { FolioDocxReviewer } from "../ai-edits/headless";
+import { createDocx } from "../docx/rezip";
 import { acceptAllChanges, rejectAllChanges } from "../prosemirror/commands/comments";
 import { schema } from "../prosemirror/schema";
-import { matchInlineAtoms } from "./inline-atoms";
+import type { ParagraphContent } from "../types/document";
+import { createEmptyDocument } from "../utils/createDocument";
+import { compareDocx } from "./compare";
+import { matchInlineAtoms, sameInlineAtoms } from "./inline-atoms";
 
 const field = () =>
   schema.nodes["field"]!.create({
@@ -23,8 +28,33 @@ const wordsField = () =>
     fieldKind: "simple",
   });
 
+const numberedField = (instruction: string) =>
+  schema.nodes["field"]!.create({
+    fieldType: "NUMPAGES",
+    instruction,
+    displayText: "1",
+    fieldKind: "simple",
+  });
+
 const documentWith = (content: readonly PMNode[]) =>
   schema.node("doc", null, [schema.node("paragraph", null, content)]);
+
+const comparisonInsertedText = (text: string) =>
+  schema.text(text, [
+    schema.marks["insertion"]!.create({
+      revisionId: 20,
+      author: "Compare",
+      date: "2026-09-13T00:00:00.000Z",
+    }),
+  ]);
+
+const docxWith = async (content: readonly ParagraphContent[]): Promise<ArrayBuffer> => {
+  const document = createEmptyDocument();
+  document.package.document.content = [
+    { type: "paragraph", paraId: "12345678", content: [...content] },
+  ];
+  return await createDocx(document);
+};
 
 const resolve = ({
   state,
@@ -42,9 +72,104 @@ const resolve = ({
 };
 
 describe("matchInlineAtoms", () => {
+  test("replaces a materialized field result with its serialized carrier", async () => {
+    const base = await docxWith([{ type: "run", content: [{ type: "text", text: "Count: 12" }] }]);
+    const target = await docxWith([
+      { type: "run", content: [{ type: "text", text: "Count: " }] },
+      {
+        type: "simpleField",
+        fieldType: "NUMWORDS",
+        instruction: " NUMWORDS ",
+        content: [{ type: "run", content: [{ type: "text", text: "12" }] }],
+      },
+    ]);
+
+    const compared = await compareDocx(base, target, {
+      author: "Compare",
+      timestamp: "2026-09-13T00:00:00.000Z",
+    });
+
+    if (compared.isErr()) throw compared.error;
+    expect(compared.value.verification).toEqual({ status: "verified" });
+    const accepting = await FolioDocxReviewer.fromBuffer(compared.value.buffer);
+    accepting.acceptAll();
+    expect(accepting.snapshot().blocks.at(0)?.text).toBe("Count: 12");
+    const rejecting = await FolioDocxReviewer.fromBuffer(compared.value.buffer);
+    rejecting.rejectAll();
+    expect(rejecting.snapshot().blocks.at(0)?.text).toBe("Count: 12");
+  });
+
+  test("replaces a field carrier with retained literal result text", async () => {
+    const base = await docxWith([
+      { type: "run", content: [{ type: "text", text: "Count: " }] },
+      {
+        type: "simpleField",
+        fieldType: "NUMWORDS",
+        instruction: " NUMWORDS ",
+        content: [{ type: "run", content: [{ type: "text", text: "12" }] }],
+      },
+    ]);
+    const target = await docxWith([
+      { type: "run", content: [{ type: "text", text: "Count: 12" }] },
+    ]);
+
+    const compared = await compareDocx(base, target, {
+      author: "Compare",
+      timestamp: "2026-09-13T00:00:00.000Z",
+    });
+
+    if (compared.isErr()) throw compared.error;
+    expect(compared.value.verification).toEqual({ status: "verified" });
+  });
+
+  test("restores a field carrier after comparison inserts its result text", async () => {
+    const base = await docxWith([{ type: "run", content: [{ type: "text", text: "Count: " }] }]);
+    const target = await docxWith([
+      { type: "run", content: [{ type: "text", text: "Count: " }] },
+      {
+        type: "simpleField",
+        fieldType: "NUMWORDS",
+        instruction: " NUMWORDS ",
+        content: [{ type: "run", content: [{ type: "text", text: "12" }] }],
+      },
+    ]);
+
+    const compared = await compareDocx(base, target, {
+      author: "Compare",
+      timestamp: "2026-09-13T00:00:00.000Z",
+    });
+
+    if (compared.isErr()) throw compared.error;
+    expect(compared.value.verification).toEqual({ status: "verified" });
+  });
+
+  test("removes a field carrier together with its result text", async () => {
+    const base = await docxWith([
+      { type: "run", content: [{ type: "text", text: "Count: " }] },
+      {
+        type: "simpleField",
+        fieldType: "NUMWORDS",
+        instruction: " NUMWORDS ",
+        content: [{ type: "run", content: [{ type: "text", text: "12" }] }],
+      },
+    ]);
+    const target = await docxWith([{ type: "run", content: [{ type: "text", text: "Count: " }] }]);
+
+    const compared = await compareDocx(base, target, {
+      author: "Compare",
+      timestamp: "2026-09-13T00:00:00.000Z",
+    });
+
+    if (compared.isErr()) throw compared.error;
+    expect(compared.value.verification).toEqual({ status: "verified" });
+  });
+
   test("tracks a field restored into replacement text through accept and reject", () => {
     const target = documentWith([schema.text("Pages: "), field()]);
-    const state = EditorState.create({ schema, doc: documentWith([schema.text("Pages: ")]) });
+    const state = EditorState.create({
+      schema,
+      doc: documentWith([schema.text("Pages: "), comparisonInsertedText("1")]),
+    });
     const result = matchInlineAtoms({
       state,
       targetSnapshot: createFolioAIEditSnapshot(target),
@@ -83,10 +208,10 @@ describe("matchInlineAtoms", () => {
         },
         [schema.text("Pages:")],
       ),
-      schema.node("paragraph", null, [schema.text(" ")]),
+      schema.node("paragraph", null, [schema.text(" "), comparisonInsertedText("1")]),
     ]);
     const state = EditorState.create({ schema, doc: source });
-    expect(resolve({ state, mode: "accept" }).doc.textContent).toBe("Pages: ");
+    expect(resolve({ state, mode: "accept" }).doc.textContent).toBe("Pages: 1");
     const result = matchInlineAtoms({
       state,
       targetSnapshot: createFolioAIEditSnapshot(target),
@@ -107,7 +232,10 @@ describe("matchInlineAtoms", () => {
 
   test("preserves the target order for multiple atoms at one text boundary", () => {
     const target = documentWith([schema.text("Counts: "), field(), wordsField()]);
-    const state = EditorState.create({ schema, doc: documentWith([schema.text("Counts: ")]) });
+    const state = EditorState.create({
+      schema,
+      doc: documentWith([schema.text("Counts: "), comparisonInsertedText("12")]),
+    });
     const result = matchInlineAtoms({
       state,
       targetSnapshot: createFolioAIEditSnapshot(target),
@@ -145,6 +273,59 @@ describe("matchInlineAtoms", () => {
     const reviewed = state.apply(result.transaction);
     expect(resolve({ state: reviewed, mode: "accept" }).doc.eq(target)).toBe(true);
     expect(resolve({ state: reviewed, mode: "reject" }).doc.textContent).toBe("BeforeAfter");
+  });
+
+  test("ignores package-local comment ids beside an unchanged supported carrier", () => {
+    const source = documentWith([
+      schema.node("pageBreakRun"),
+      schema.node("commentReference", { commentId: 3 }),
+    ]);
+    const target = documentWith([
+      schema.node("pageBreakRun"),
+      schema.node("commentReference", { commentId: 1 }),
+    ]);
+    const state = EditorState.create({ schema, doc: source });
+
+    const result = matchInlineAtoms({
+      state,
+      targetSnapshot: createFolioAIEditSnapshot(target),
+      revisionStamp: { idSeed: 40, date: "2026-09-13T00:00:00.000Z" },
+      originalRevisionIdSeed: 10,
+      author: "Compare",
+      maxRanges: 10,
+    });
+
+    expect(result).toMatchObject({ status: "matched", rangeCount: 0 });
+    expect(sameInlineAtoms(source, target)).toBe(true);
+  });
+
+  test("ignores unrelated preserved markup while restoring a supported carrier", () => {
+    const source = documentWith([schema.text("AB")]);
+    const target = documentWith([
+      schema.text("A"),
+      schema.node("pageBreakRun"),
+      schema.text("B"),
+      schema.node("preservedXml", {
+        xml: '<w:proofErr w:type="gramStart"/>',
+        text: "",
+        level: "inline",
+      }),
+    ]);
+    const state = EditorState.create({ schema, doc: source });
+
+    const result = matchInlineAtoms({
+      state,
+      targetSnapshot: createFolioAIEditSnapshot(target),
+      revisionStamp: { idSeed: 40, date: "2026-09-13T00:00:00.000Z" },
+      originalRevisionIdSeed: 10,
+      author: "Compare",
+      maxRanges: 10,
+    });
+
+    expect(result.status).toBe("matched");
+    if (result.status !== "matched") return;
+    const accepted = resolve({ state: state.apply(result.transaction), mode: "accept" }).doc;
+    expect(sameInlineAtoms(accepted, target)).toBe(true);
   });
 
   test("uses the stable paragraph identity when review resolution deletes its position", () => {
@@ -214,7 +395,31 @@ describe("matchInlineAtoms", () => {
   test("reports the range budget before creating an atom revision", () => {
     const target = documentWith([schema.text("Pages: "), field()]);
     const result = matchInlineAtoms({
-      state: EditorState.create({ schema, doc: documentWith([schema.text("Pages: ")]) }),
+      state: EditorState.create({
+        schema,
+        doc: documentWith([schema.text("Pages: "), comparisonInsertedText("1")]),
+      }),
+      targetSnapshot: createFolioAIEditSnapshot(target),
+      revisionStamp: { idSeed: 40, date: "2026-09-13T00:00:00.000Z" },
+      originalRevisionIdSeed: 10,
+      author: "Compare",
+      maxRanges: 0,
+    });
+
+    expect(result.status).toBe("budget-exceeded");
+  });
+
+  test("refuses many field replacements before planning past the range budget", () => {
+    const fieldCount = 4_096;
+    const source = documentWith(
+      Array.from({ length: fieldCount }, (_, index) => numberedField(` NUMPAGES ${index} `)),
+    );
+    const target = documentWith(
+      Array.from({ length: fieldCount }, (_, index) => numberedField(` NUMPAGES ${index + 1} `)),
+    );
+
+    const result = matchInlineAtoms({
+      state: EditorState.create({ schema, doc: source }),
       targetSnapshot: createFolioAIEditSnapshot(target),
       revisionStamp: { idSeed: 40, date: "2026-09-13T00:00:00.000Z" },
       originalRevisionIdSeed: 10,
