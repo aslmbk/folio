@@ -622,13 +622,10 @@ const captureAllowedElement = (
  * This function returns only the parsed root serialized through the capture
  * owner, and rejects siblings, unexpected roots, and namespace shadowing.
  */
-export const sanitizeCapturedXmlElement = (
-  xml: string | undefined,
+const sanitizeCapturedXmlElement = (
+  xml: string,
   options: SanitizeCapturedXmlOptions,
 ): string | null => {
-  if (xml === undefined) {
-    return null;
-  }
   const trimmed = xml.trim();
   if (!trimmed) {
     return null;
@@ -642,4 +639,62 @@ export const sanitizeCapturedXmlElement = (
     options.inheritedNamespaceScope ?? OOXML_NAMESPACE_SCOPE,
   );
   return root ? captureAllowedElement(root, options) : null;
+};
+
+/**
+ * Characters of source and sanitized XML one sanitizer retains. A paragraph
+ * capture is a few hundred characters, so this holds every distinct capture of
+ * a large document while bounding what outlives the documents it came from.
+ */
+const CAPTURED_XML_SANITIZER_CACHE_CHARACTERS = 2 * 1024 * 1024;
+/**
+ * What one cache entry costs beyond its strings, in characters. Charging it
+ * keeps many short keys from holding far more memory than their text, and
+ * caps the entry count at the budget divided by this.
+ */
+const CAPTURED_XML_SANITIZER_ENTRY_OVERHEAD_CHARACTERS = 64;
+
+const capturedXmlCacheCharacters = (xml: string, sanitized: string | null): number =>
+  CAPTURED_XML_SANITIZER_ENTRY_OVERHEAD_CHARACTERS + xml.length + (sanitized?.length ?? 0);
+
+/**
+ * {@link sanitizeCapturedXmlElement} over fixed options, memoized by source
+ * string.
+ *
+ * Sanitizing is a pure function of the string and the options, and a capture
+ * is fixed when it is parsed, so every save after the first would otherwise
+ * re-parse and re-validate the same markup. The key is the string rather than
+ * the object holding it: editor round-trips copy capture holders, but the
+ * string they carry is the one the parser produced. `transform` and `validate`
+ * must therefore depend on nothing but the element they are given.
+ */
+export const createCapturedXmlSanitizer = (
+  options: SanitizeCapturedXmlOptions,
+): ((xml: string | undefined) => string | null) => {
+  const cache = new Map<string, string | null>();
+  let cachedCharacters = 0;
+  return (xml) => {
+    if (xml === undefined) {
+      return null;
+    }
+    const cached = cache.get(xml);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const sanitized = sanitizeCapturedXmlElement(xml, options);
+    const characters = capturedXmlCacheCharacters(xml, sanitized);
+    if (characters > CAPTURED_XML_SANITIZER_CACHE_CHARACTERS) {
+      return sanitized;
+    }
+    for (const [oldestXml, oldestSanitized] of cache) {
+      if (cachedCharacters + characters <= CAPTURED_XML_SANITIZER_CACHE_CHARACTERS) {
+        break;
+      }
+      cache.delete(oldestXml);
+      cachedCharacters -= capturedXmlCacheCharacters(oldestXml, oldestSanitized);
+    }
+    cache.set(xml, sanitized);
+    cachedCharacters += characters;
+    return sanitized;
+  };
 };
