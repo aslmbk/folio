@@ -19,6 +19,7 @@ import {
   countParagraphElements,
 } from "./selectiveXmlPatch";
 import { serializeDocument } from "./serializer/documentSerializer";
+import { planCommentParts, serializeComments } from "./serializer/commentSerializer";
 
 // ============================================================================
 // Helpers
@@ -278,6 +279,79 @@ describe("Selective XML Patch with real DOCX", () => {
 // ============================================================================
 
 describe("attemptSelectiveSave", () => {
+  test("retains unchanged comments when selectively saving Strict package metadata", async () => {
+    const zip = new JSZip();
+    const strictNamespace = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    const commentsXml = serializeComments(planCommentParts([]));
+    zip.file(
+      "word/document.xml",
+      `${XML_DECLARATION}<w:document xmlns:w="${strictNamespace}"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>`,
+    );
+    zip.file("word/comments.xml", commentsXml);
+    const buffer = await zip.generateAsync({ type: "arraybuffer" });
+    const doc = await parseDocx(buffer, { preloadFonts: false });
+
+    const saved = await attemptSelectiveSave(doc, buffer, {
+      changedParaIds: new Set(),
+      structuralChange: false,
+      hasUntrackedChanges: false,
+    });
+    expect(saved).not.toBeNull();
+    if (saved === null) {
+      return;
+    }
+    expect(await getDocumentXml(saved)).toContain(`xmlns:w="${strictNamespace}"`);
+    expect(await (await JSZip.loadAsync(saved)).file("word/comments.xml")?.async("text")).toBe(
+      commentsXml,
+    );
+  });
+
+  test("keeps a no-op Strict package but sends changed Strict content to full repack", async () => {
+    const zip = new JSZip();
+    const strictNamespace = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+    zip.file(
+      "word/document.xml",
+      `${XML_DECLARATION}<w:document xmlns:w="${strictNamespace}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="10000001"><w:pPr><w:ind w:start="36pt"/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p></w:body></w:document>`,
+    );
+    const buffer = await zip.generateAsync({ type: "arraybuffer" });
+    const doc = await parseDocx(buffer, { preloadFonts: false });
+    const options = {
+      changedParaIds: new Set<string>(),
+      structuralChange: false,
+      hasUntrackedChanges: false,
+    };
+
+    const unchanged = await attemptSelectiveSave(doc, buffer, options);
+    expect(unchanged).not.toBeNull();
+    if (unchanged === null) {
+      return;
+    }
+    expect(await getDocumentXml(unchanged)).toContain(`xmlns:w="${strictNamespace}"`);
+
+    const paragraph = doc.package.document.content.at(0);
+    if (paragraph?.type !== "paragraph") {
+      throw new Error("Expected a paragraph");
+    }
+    const run = paragraph.content.find((item): item is Run => item.type === "run");
+    const text = run?.content.find((item) => item.type === "text");
+    if (text?.type !== "text") {
+      throw new Error("Expected text");
+    }
+    text.text = "After";
+
+    expect(
+      await attemptSelectiveSave(doc, buffer, {
+        ...options,
+        changedParaIds: new Set(["10000001"]),
+      }),
+    ).toBeNull();
+    const fullSaveXml = await getDocumentXml(await repackDocx(doc));
+    expect(fullSaveXml).toContain(
+      'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+    );
+    expect(fullSaveXml).toContain("After");
+  });
+
   test("returns null when orphan comment markers need cleanup", async () => {
     const buffer = await loadFixture("example-with-image.docx");
     const doc = await parseDocx(buffer, { preloadFonts: false });

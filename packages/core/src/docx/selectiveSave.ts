@@ -11,6 +11,8 @@
 import type JSZip from "jszip";
 
 import type { Document } from "../types/document";
+import { DOCX_CONFORMANCE_CLASSES } from "@stll/docx-core/model";
+import { detectDocxConformanceClass } from "./conformance";
 import { parseCommentsExtended, type CommentExtendedInfo } from "./commentParser";
 import { withoutOrphanCommentRanges } from "./commentRangeIntegrity";
 import { hasUnsynthesizedReplyRanges } from "./commentReplyMarkers";
@@ -489,10 +491,16 @@ export async function attemptSelectiveSave(
     // previous part as-is) and round-trip back as phantom threads.
     const sourceCommentsFile = zip.file("word/comments.xml");
     if (hasComments || sourceCommentsFile) {
-      const sourceBindings = sourceCommentsFile
-        ? readRootNamespaceBindings(await sourceCommentsFile.async("text"))
+      const sourceCommentsXml = sourceCommentsFile
+        ? await sourceCommentsFile.async("text")
         : undefined;
-      updates.set("word/comments.xml", serializeComments(commentPlan, sourceBindings));
+      const commentsXml = serializeComments(
+        commentPlan,
+        sourceCommentsXml === undefined ? undefined : readRootNamespaceBindings(sourceCommentsXml),
+      );
+      if (commentsXml !== sourceCommentsXml) {
+        updates.set("word/comments.xml", commentsXml);
+      }
     }
     if (hasComments) {
       // Ensure [Content_Types].xml has an Override for comments.xml
@@ -558,6 +566,28 @@ export async function attemptSelectiveSave(
         "docProps/core.xml",
         updateCoreProperties(corePropsXml, { updateModifiedDate: true }),
       );
+    }
+
+    // Selective patches splice Transitional serializer output under the source
+    // part's root. A Strict root would give those elements and numeric values
+    // the wrong vocabulary; the full repack owns conformance conversion.
+    if (
+      [...updates.keys()].some((path) => {
+        const lowerPath = path.toLowerCase();
+        return (
+          lowerPath.startsWith("word/") &&
+          (lowerPath.endsWith(".xml") || lowerPath.endsWith(".rels"))
+        );
+      })
+    ) {
+      const sourceDocumentXml = await findZipEntryCaseInsensitive(zip, "word/document.xml")?.async(
+        "text",
+      );
+      if (
+        detectDocxConformanceClass(sourceDocumentXml ?? null) === DOCX_CONFORMANCE_CLASSES.STRICT
+      ) {
+        return null;
+      }
     }
 
     // Use the already-loaded zip to avoid a redundant decompression pass
