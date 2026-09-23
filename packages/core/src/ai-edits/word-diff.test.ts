@@ -13,7 +13,13 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import fc from "fast-check";
 
 import { propertyConfig, propertyTestTimeout } from "../../../../test/property-testing";
-import { createWordDiffSession, diffWordSegments, type WordDiffSegment } from "./word-diff";
+import {
+  createWordDiffSession,
+  diffWordSegments,
+  MAX_EDGE_PUNCTUATION_TOKENS,
+  tokenizeWords,
+  type WordDiffSegment,
+} from "./word-diff";
 
 setDefaultTimeout(propertyTestTimeout(30_000));
 
@@ -36,6 +42,33 @@ const sentence = fc
     maxLength: 14,
   })
   .map((words) => words.join(" "));
+
+/** Space, no-break space and narrow no-break space: each separates words. */
+const WORD_SEPARATORS = [" ", String.fromCodePoint(0xa0), String.fromCodePoint(0x20_2f)];
+
+/** Latin, Czech/German low-high, guillemet and typographic quotes, brackets, dashes, ellipsis. */
+const PUNCTUATION_MARKS = [
+  ".",
+  ",",
+  ";",
+  ":",
+  "!",
+  "?",
+  "(",
+  ")",
+  '"',
+  "'",
+  "„",
+  "“",
+  "”",
+  "‘",
+  "’",
+  "«",
+  "»",
+  "–",
+  "—",
+  "…",
+];
 
 const unicodeText = fc
   .array(fc.constantFrom("a", " ", "\n", "😀", "👩‍⚖️", "§", "č", "م", "क", "e\u0301"), {
@@ -80,7 +113,7 @@ describe("diffWordSegments", () => {
   });
 
   test("a token-subsequence edit never invents the opposite change direction", () => {
-    const tokenSequence = fc.array(fc.tuple(fc.constantFrom("a", "b", "c"), fc.boolean()), {
+    const tokenSequence = fc.array(fc.tuple(fc.constantFrom("a", "b", "c", "."), fc.boolean()), {
       maxLength: 9,
     });
     fc.assert(
@@ -117,6 +150,213 @@ describe("diffWordSegments", () => {
       }),
       propertyConfig({ numRuns: 500 }),
     );
+  });
+
+  test("an inserted punctuated word does not delete an existing mark", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(".", ",", ";"),
+        fc.constantFrom("x", "y", "word"),
+        fc.constantFrom(...WORD_SEPARATORS),
+        (mark, word, separator) => {
+          const before = ["a", mark, "b"].join(separator);
+          const after = ["a", mark, `${word}${mark}`, "b"].join(separator);
+          const insertion = diffWordSegments(before, after);
+          expect(rebuildBefore(insertion)).toBe(before);
+          expect(rebuildAfter(insertion)).toBe(after);
+          expect(insertion.some(({ type }) => type === "del")).toBe(false);
+
+          const deletion = diffWordSegments(after, before);
+          expect(rebuildBefore(deletion)).toBe(after);
+          expect(rebuildAfter(deletion)).toBe(before);
+          expect(deletion.some(({ type }) => type === "ins")).toBe(false);
+        },
+      ),
+      propertyConfig({ numRuns: 200 }),
+    );
+  });
+
+  test("inserting or deleting words at the start, middle or end marks only those words", () => {
+    const words = fc.array(fc.constantFrom("(1)", "Závislá", "práce", "the", "§", "15", ","), {
+      minLength: 1,
+      maxLength: 8,
+    });
+    const wordsOf = (segments: readonly WordDiffSegment[], type: WordDiffSegment["type"]) =>
+      segments
+        .filter((segment) => segment.type === type)
+        .flatMap(({ text }) => text.split(/\s+/u))
+        .filter((word) => word.length > 0);
+    fc.assert(
+      fc.property(
+        words,
+        words,
+        fc.nat(),
+        fc.constantFrom(...WORD_SEPARATORS),
+        (kept, inserted, rawSplit, separator) => {
+          const split = rawSplit % (kept.length + 1);
+          const shorter = kept.join(separator);
+          const longer = [...kept.slice(0, split), ...inserted, ...kept.slice(split)].join(
+            separator,
+          );
+
+          const insertion = diffWordSegments(shorter, longer);
+          expect(rebuildBefore(insertion)).toBe(shorter);
+          expect(rebuildAfter(insertion)).toBe(longer);
+          expect(wordsOf(insertion, "del")).toEqual([]);
+          expect(wordsOf(insertion, "equal")).toEqual(kept);
+          expect(wordsOf(insertion, "ins")).toHaveLength(inserted.length);
+
+          const deletion = diffWordSegments(longer, shorter);
+          expect(rebuildBefore(deletion)).toBe(longer);
+          expect(rebuildAfter(deletion)).toBe(shorter);
+          expect(wordsOf(deletion, "ins")).toEqual([]);
+          expect(wordsOf(deletion, "equal")).toEqual(kept);
+          expect(wordsOf(deletion, "del")).toHaveLength(inserted.length);
+        },
+      ),
+      propertyConfig({ numRuns: 500 }),
+    );
+  });
+
+  test("changing only punctuation around words marks only the punctuation", () => {
+    const mark = fc.constantFrom(...PUNCTUATION_MARKS);
+    const marks = fc.array(mark, { maxLength: 2 }).map((chosen) => chosen.join(""));
+    const punctuatedWord = fc.record({
+      word: fc.constantFrom(
+        "jmění",
+        "d.o.o",
+        "1.1.2026",
+        "odst",
+        "b",
+        "3.5",
+        "well-known",
+        "Goods",
+      ),
+      before: fc.tuple(marks, marks),
+      after: fc.tuple(marks, marks),
+    });
+    fc.assert(
+      fc.property(
+        fc.array(punctuatedWord, { minLength: 1, maxLength: 40 }),
+        fc.constantFrom(...WORD_SEPARATORS),
+        (words, separator) => {
+          const before = words
+            .map(({ word, before: [leading, trailing] }) => `${leading}${word}${trailing}`)
+            .join(separator);
+          const after = words
+            .map(({ word, after: [leading, trailing] }) => `${leading}${word}${trailing}`)
+            .join(separator);
+
+          const segments = diffWordSegments(before, after);
+          expect(rebuildBefore(segments)).toBe(before);
+          expect(rebuildAfter(segments)).toBe(after);
+          for (const { type, text } of segments) {
+            if (type !== "equal") {
+              expect(text).toMatch(/^[\s\p{P}]*$/u);
+            }
+          }
+        },
+      ),
+      propertyConfig({ numRuns: 500 }),
+    );
+  });
+
+  test("a list item that gains a following item changes only its closing mark", () => {
+    expect(
+      diffWordSegments(
+        "a) věci patřící do společného jmění.",
+        "a) věci patřící do společného jmění,",
+      ),
+    ).toEqual([
+      { type: "equal", text: "a) věci patřící do společného jmění" },
+      { type: "del", text: "." },
+      { type: "ins", text: "," },
+    ]);
+    expect(diffWordSegments("„smlouva“", '"smlouva"')).toEqual([
+      { type: "del", text: "„" },
+      { type: "ins", text: '"' },
+      { type: "equal", text: "smlouva" },
+      { type: "del", text: "“" },
+      { type: "ins", text: '"' },
+    ]);
+  });
+
+  test("punctuation changes preserve an unchanged symbol", () => {
+    for (const symbol of ["§", "€", "+", "😀"]) {
+      expect(diffWordSegments(`(${symbol})`, `[${symbol}]`)).toEqual([
+        { type: "del", text: "(" },
+        { type: "ins", text: "[" },
+        { type: "equal", text: symbol },
+        { type: "del", text: ")" },
+        { type: "ins", text: "]" },
+      ]);
+    }
+  });
+
+  test("long punctuation edges retain nearby edits without unbounded token storage", () => {
+    const before = `${".".repeat(100_000)}word.`;
+    const after = ` ${".".repeat(100_000)}word,`;
+    const tokens = tokenizeWords(before);
+    expect(tokens.join("")).toBe(before);
+    expect(tokens.length).toBeLessThanOrEqual(2 * MAX_EDGE_PUNCTUATION_TOKENS + 1);
+    const segments = diffWordSegments(before, after);
+
+    expect(rebuildBefore(segments)).toBe(before);
+    expect(rebuildAfter(segments)).toBe(after);
+    expect(segments).toEqual([
+      { type: "ins", text: " " },
+      { type: "equal", text: `${".".repeat(100_000)}word` },
+      { type: "del", text: "." },
+      { type: "ins", text: "," },
+    ]);
+  });
+
+  test("words removed before a closing mark are a pure deletion, and restoring them a pure insertion", () => {
+    const longer = "…ke společnému dítěti i o povinnostech a právech rodičů k němu.";
+    const shorter = "…ke společnému dítěti.";
+    expect(diffWordSegments(longer, shorter)).toEqual([
+      { type: "equal", text: "…ke společnému dítěti" },
+      { type: "del", text: " i o povinnostech a právech rodičů k němu" },
+      { type: "equal", text: "." },
+    ]);
+    expect(diffWordSegments(shorter, longer)).toEqual([
+      { type: "equal", text: "…ke společnému dítěti" },
+      { type: "ins", text: " i o povinnostech a právech rodičů k němu" },
+      { type: "equal", text: "." },
+    ]);
+  });
+
+  test("punctuation inside a word stays part of it", () => {
+    expect(diffWordSegments("§ 755 odst. 2 písm. b)", "§ 755 odst. 3 písm. b)")).toEqual([
+      { type: "equal", text: "§ 755 odst." },
+      { type: "del", text: " 2" },
+      { type: "ins", text: " 3" },
+      { type: "equal", text: " písm. b)" },
+    ]);
+    expect(diffWordSegments("dne 1.1.2026", "dne 1.2.2026")).toEqual([
+      { type: "equal", text: "dne" },
+      { type: "del", text: " 1.1.2026" },
+      { type: "ins", text: " 1.2.2026" },
+    ]);
+  });
+
+  test("a paragraph number prefixed to a sentence is the only insertion", () => {
+    const provision = "Závislá práce nezletilých je zakázána.";
+    for (const separator of WORD_SEPARATORS) {
+      expect(diffWordSegments(provision, `(1)${separator}${provision}`)).toEqual([
+        { type: "ins", text: `(1)${separator}` },
+        { type: "equal", text: provision },
+      ]);
+    }
+  });
+
+  test("a whitespace change around an unchanged word marks the whitespace only", () => {
+    expect(diffWordSegments("the goods  and the services", "the goods and the services")).toEqual([
+      { type: "equal", text: "the goods" },
+      { type: "del", text: "  " },
+      { type: "ins", text: " " },
+      { type: "equal", text: "and the services" },
+    ]);
   });
 
   test("identical strings produce one equal segment and no change", () => {
@@ -161,6 +401,21 @@ describe("diffWordSegments", () => {
       "The Supplier shall deliver the Goods within thirty days after receipt of the Purchase Order.";
     const after =
       "The Vendor must provide all Products no later than twenty business days following receipt of a valid order.";
+
+    expect(diffWordSegments(before, after)).toEqual([
+      { type: "del", text: before },
+      { type: "ins", text: after },
+    ]);
+  });
+
+  test("a rewrite reusing the old opening word mid-sentence is still replaced whole", () => {
+    // Word text alone decides a match, so "Supplier" opening the old sentence
+    // now matches " Supplier" inside the new one. The rewrite must not
+    // shred around it.
+    const before =
+      "Supplier shall deliver the Goods within thirty days after receipt of the Purchase Order.";
+    const after =
+      "The Vendor must provide all Products no later than twenty business days following receipt of a valid order from the Supplier.";
 
     expect(diffWordSegments(before, after)).toEqual([
       { type: "del", text: before },
@@ -244,9 +499,8 @@ describe("diffWordSegments", () => {
         after: "the the",
         granularity: "word" as const,
         expected: [
-          { type: "equal" as const, text: "the" },
-          { type: "del" as const, text: " the" },
-          { type: "equal" as const, text: " the" },
+          { type: "del" as const, text: "the " },
+          { type: "equal" as const, text: "the the" },
         ],
       },
     ];
@@ -263,9 +517,8 @@ describe("diffWordSegments", () => {
       { type: "ins", text: "a" },
     ]);
     expect(diffWordSegments("the the clause", "the the the clause the")).toEqual([
-      { type: "equal", text: "the" },
-      { type: "ins", text: " the" },
-      { type: "equal", text: " the clause" },
+      { type: "ins", text: "the " },
+      { type: "equal", text: "the the clause" },
       { type: "ins", text: " the" },
     ]);
   });
