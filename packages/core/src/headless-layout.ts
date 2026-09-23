@@ -48,6 +48,8 @@ import { layoutDocument } from "./layout-engine/index";
 import { getMeasureProvider } from "./layout-engine/measure/measureProvider";
 import { needsShaping } from "./shaping/placeRun";
 import { getShaper } from "./shaping/shaper";
+import { collectRequestedHyphenationDictionaries } from "./layout-engine/measure/hyphenationDictionaries";
+import { preloadHyphenationDictionaries } from "./layout-engine/measure/hyphenationPreload";
 import { measureBlocks } from "./layout-engine/measure/measureBlocks";
 import { resolveSectionHeaderFooterRefs } from "./layout-engine/headerFooterRefs";
 import { FOOTNOTE_ENTRY_MARGIN_BOTTOM } from "./layout-engine/types";
@@ -383,35 +385,52 @@ const declaresEmbeddedFonts = (document: Document): boolean =>
       font.embedBoldItalic !== undefined,
   );
 
+type PackageRecordEntries = readonly (readonly [string, unknown])[];
+
 /**
- * Parse and paginate a package. Fails rather than defaulting when no
- * measurement backend is installed: a layout measured by the wrong provider
- * is wrong in a way no downstream check catches.
- */
-/**
- * Whether any text in the package needs shaping.
+ * Whether `test` holds for any record in the package's content model.
  *
  * Every story a page paints, body, headers, footers and notes alike, is built
  * from the same content model, so one walk over the package answers for all of
- * them. The answer decides whether the shaper is fetched at all: a document in
- * Latin, Cyrillic or Greek must not pay for an artifact it has no use for.
+ * them. Headers and footers are keyed by relationship id in `Map`s, which
+ * `Object.entries` sees as empty, so the walk descends into map values too.
  */
-const packageNeedsShaping = (value: unknown): boolean => {
-  if (Array.isArray(value)) {
-    return value.some(packageNeedsShaping);
+const somePackageRecord = (
+  value: unknown,
+  test: (entries: PackageRecordEntries) => boolean,
+): boolean => {
+  if (Array.isArray(value) || value instanceof Map) {
+    for (const child of value.values()) {
+      if (somePackageRecord(child, test)) {
+        return true;
+      }
+    }
+    return false;
   }
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const entries = Object.entries(value);
-  const text = entries.find(([key]) => key === "text")?.[1];
-  const kind = entries.find(([key]) => key === "type")?.[1];
-  if (kind === "text" && typeof text === "string" && needsShaping(text)) {
-    return true;
-  }
-  return entries.some(([, child]) => packageNeedsShaping(child));
+  return test(entries) || entries.some(([, child]) => somePackageRecord(child, test));
 };
 
+/**
+ * Whether any text in the package needs shaping. The answer decides whether
+ * the shaper is fetched at all: a document in Latin, Cyrillic or Greek must not
+ * pay for an artifact it has no use for.
+ */
+const packageNeedsShaping = (value: unknown): boolean =>
+  somePackageRecord(value, (entries) => {
+    const text = entries.find(([key]) => key === "text")?.[1];
+    const kind = entries.find(([key]) => key === "type")?.[1];
+    return kind === "text" && typeof text === "string" && needsShaping(text);
+  });
+
+/**
+ * Parse and paginate a package. Fails rather than defaulting when no
+ * measurement backend is installed: a layout measured by the wrong provider
+ * is wrong in a way no downstream check catches.
+ */
 export const layoutDocxHeadless = async (
   input: DocxInput,
   options: HeadlessLayoutOptions = {},
@@ -492,113 +511,141 @@ export const layoutDocxHeadless = async (
   const flowOptions = buildFlowOptions(document, pageContentHeight);
   const storyOptions = buildStoryOptions(flowOptions);
 
-  const laidOut = Result.try(() => {
-    const authored = toFlowBlocks(projected.value, flowOptions);
+  // One synchronous pass over every story: the body, its notes, then headers
+  // and footers.
+  const layOut = () => {
+    const laidOut = Result.try(() => {
+      const authored = toFlowBlocks(projected.value, flowOptions);
 
-    // Body markers carry the raw `w:id` as their text; Word paints the
-    // reference-order number. Remapping before measurement is what keeps the
-    // marker's measured width, the painted digits and the number on the body in
-    // the footnote band all the same number.
-    const footnotes = document.package.footnotes ?? [];
-    const endnotes = document.package.endnotes ?? [];
-    const footnoteRefs = collectFootnoteRefs(authored);
-    const footnoteNumbers = computeNoteDisplayNumbers(
-      footnotes,
-      footnoteRefs.map((ref) => ref.footnoteId),
-    );
-    const endnoteNumbers = computeNoteDisplayNumbers(
-      endnotes,
-      collectEndnoteRefs(authored).map((ref) => ref.endnoteId),
-    );
-    const endnoteNumberFormat = finalSection?.endnotePr?.numFmt ?? "lowerRoman";
-    const endnoteTexts = formatEndnoteTexts(endnoteNumbers, (displayNumber) =>
-      formatOoxmlCounter(displayNumber, endnoteNumberFormat),
-    );
-    const blocks = remapNoteMarkerText(authored, {
-      footnoteNumbers,
-      endnoteTexts,
+      // Body markers carry the raw `w:id` as their text; Word paints the
+      // reference-order number. Remapping before measurement is what keeps the
+      // marker's measured width, the painted digits and the number on the body in
+      // the footnote band all the same number.
+      const footnotes = document.package.footnotes ?? [];
+      const endnotes = document.package.endnotes ?? [];
+      const footnoteRefs = collectFootnoteRefs(authored);
+      const footnoteNumbers = computeNoteDisplayNumbers(
+        footnotes,
+        footnoteRefs.map((ref) => ref.footnoteId),
+      );
+      const endnoteNumbers = computeNoteDisplayNumbers(
+        endnotes,
+        collectEndnoteRefs(authored).map((ref) => ref.endnoteId),
+      );
+      const endnoteNumberFormat = finalSection?.endnotePr?.numFmt ?? "lowerRoman";
+      const endnoteTexts = formatEndnoteTexts(endnoteNumbers, (displayNumber) =>
+        formatOoxmlCounter(displayNumber, endnoteNumberFormat),
+      );
+      const blocks = remapNoteMarkerText(authored, {
+        footnoteNumbers,
+        endnoteTexts,
+      });
+
+      const measures = measureBlocks(blocks, contentWidth);
+
+      const footnoteContentById =
+        footnoteRefs.length === 0
+          ? undefined
+          : buildFootnoteContentMap(footnotes, footnoteRefs, contentWidth, {
+              ...storyOptions,
+              measureBlocks,
+            });
+      // The paginator reserves each note's band on the page its reference line
+      // lands on, so it needs the heights before it places a line. The separator
+      // slot is added once per note-bearing page by the paginator itself.
+      const footnoteHeightById = new Map<number, number>();
+      for (const [id, content] of footnoteContentById ?? []) {
+        footnoteHeightById.set(id, content.height + FOOTNOTE_ENTRY_MARGIN_BOTTOM);
+      }
+
+      const sectionHeaderFooterRefs = resolveSectionHeaderFooterRefs(document);
+      const finalPageSize = getPageSize(finalSection);
+      const finalMargins = getMargins(finalSection);
+      const layoutOptions: LayoutOptions = {
+        pageSize,
+        margins,
+        pageNumbering: getPageNumbering(firstSection),
+        finalPageSize,
+        finalMargins,
+        finalPageNumbering: getPageNumbering(finalSection),
+        sectionVerticalAlignments: sections.map(({ properties }) => properties.verticalAlign),
+        pageGap: options.pageGap ?? 0,
+        titlePage: firstSection?.titlePg === true,
+        evenAndOddHeaders: document.package.settings?.evenAndOddHeaders === true,
+        mirrorMargins: readsMirrorMargins(document.package.settings),
+        ...(footnoteHeightById.size === 0 ? {} : { footnoteHeightById }),
+        ...(sectionHeaderFooterRefs === undefined ? {} : { sectionHeaderFooterRefs }),
+      };
+      return {
+        layout: layoutDocument(blocks, measures, layoutOptions),
+        blockLookup: buildBlockLookup(blocks, measures),
+        footnoteContentById,
+      };
     });
-
-    const measures = measureBlocks(blocks, contentWidth);
-
-    const footnoteContentById =
-      footnoteRefs.length === 0
-        ? undefined
-        : buildFootnoteContentMap(footnotes, footnoteRefs, contentWidth, {
-            ...storyOptions,
-            measureBlocks,
-          });
-    // The paginator reserves each note's band on the page its reference line
-    // lands on, so it needs the heights before it places a line. The separator
-    // slot is added once per note-bearing page by the paginator itself.
-    const footnoteHeightById = new Map<number, number>();
-    for (const [id, content] of footnoteContentById ?? []) {
-      footnoteHeightById.set(id, content.height + FOOTNOTE_ENTRY_MARGIN_BOTTOM);
+    if (laidOut.isErr()) {
+      return Result.err(
+        new HeadlessLayoutError({
+          message: "The document could not be paginated.",
+          cause: laidOut.error,
+        }),
+      );
     }
 
-    const sectionHeaderFooterRefs = resolveSectionHeaderFooterRefs(document);
-    const finalPageSize = getPageSize(finalSection);
-    const finalMargins = getMargins(finalSection);
-    const layoutOptions: LayoutOptions = {
-      pageSize,
-      margins,
-      pageNumbering: getPageNumbering(firstSection),
-      finalPageSize,
-      finalMargins,
-      finalPageNumbering: getPageNumbering(finalSection),
-      sectionVerticalAlignments: sections.map(({ properties }) => properties.verticalAlign),
-      pageGap: options.pageGap ?? 0,
-      titlePage: firstSection?.titlePg === true,
-      evenAndOddHeaders: document.package.settings?.evenAndOddHeaders === true,
-      mirrorMargins: readsMirrorMargins(document.package.settings),
-      ...(footnoteHeightById.size === 0 ? {} : { footnoteHeightById }),
-      ...(sectionHeaderFooterRefs === undefined ? {} : { sectionHeaderFooterRefs }),
-    };
-    return {
-      layout: layoutDocument(blocks, measures, layoutOptions),
-      blockLookup: buildBlockLookup(blocks, measures),
-      footnoteContentById,
-    };
-  });
-  if (laidOut.isErr()) {
-    return Result.err(
-      new HeadlessLayoutError({
-        message: "The document could not be paginated.",
-        cause: laidOut.error,
-      }),
-    );
-  }
+    const { layout, blockLookup, footnoteContentById } = laidOut.value;
 
-  const { layout, blockLookup, footnoteContentById } = laidOut.value;
+    // Headers and footers are converted after pagination because a page-number
+    // field measures against the final page count, and because nothing in a
+    // header changes where the body's lines fell.
+    const stories = Result.try(() => {
+      const pageCount = layout.pages.length;
+      const now = options.now ?? new Date();
+      const shared = { contentWidth, storyOptions, pageCount, now } as const;
+      return {
+        headerContentByRId: convertStories({
+          ...shared,
+          parts: document.package.headers,
+          metrics: { section: "header", pageSize, margins },
+        }),
+        footerContentByRId: convertStories({
+          ...shared,
+          parts: document.package.footers,
+          metrics: { section: "footer", pageSize, margins },
+        }),
+      };
+    });
+    if (stories.isErr()) {
+      return Result.err(
+        new HeadlessLayoutError({
+          message: "The header and footer stories could not be laid out.",
+          cause: stories.error,
+        }),
+      );
+    }
+    return Result.ok({ layout, blockLookup, footnoteContentById, ...stories.value });
+  };
 
-  // Headers and footers are converted after pagination because a page-number
-  // field measures against the final page count, and because nothing in a
-  // header changes where the body's lines fell.
-  const stories = Result.try(() => {
-    const pageCount = layout.pages.length;
-    const now = options.now ?? new Date();
-    const shared = { contentWidth, storyOptions, pageCount, now } as const;
-    return {
-      headerContentByRId: convertStories({
-        ...shared,
-        parts: document.package.headers,
-        metrics: { section: "header", pageSize, margins },
-      }),
-      footerContentByRId: convertStories({
-        ...shared,
-        parts: document.package.footers,
-        metrics: { section: "footer", pageSize, margins },
-      }),
-    };
-  });
-  if (stories.isErr()) {
-    return Result.err(
-      new HeadlessLayoutError({
-        message: "The header and footer stories could not be laid out.",
-        cause: stories.error,
-      }),
-    );
+  // Measurement hyphenates synchronously and cannot wait for a dictionary, so
+  // a pass that lacked one loads exactly those it asked for and lays out again.
+  // A document without automatic hyphenation, or whose dictionaries are
+  // already loaded, lays out once.
+  let pass = collectRequestedHyphenationDictionaries(layOut);
+  if (pass.missing.size > 0) {
+    const loaded = await preloadHyphenationDictionaries(pass.missing);
+    if (loaded.isErr()) {
+      return Result.err(
+        new HeadlessLayoutError({
+          message: "A hyphenation dictionary could not be loaded, and this document needs one.",
+          cause: loaded.error,
+        }),
+      );
+    }
+    pass = collectRequestedHyphenationDictionaries(layOut);
   }
+  if (pass.result.isErr()) {
+    return Result.err(pass.result.error);
+  }
+  const { layout, blockLookup, footnoteContentById, headerContentByRId, footerContentByRId } =
+    pass.result.value;
 
   const embeddedFonts = declaresEmbeddedFonts(document)
     ? await Result.tryPromise({
@@ -648,8 +695,8 @@ export const layoutDocxHeadless = async (
       ...(watermark === undefined ? {} : { watermark }),
       watermarkByHeaderRId: watermarksByHeader,
       ...(watermarkImageSrc === undefined ? {} : { watermarkImageSrc }),
-      headerContentByRId: stories.value.headerContentByRId,
-      footerContentByRId: stories.value.footerContentByRId,
+      headerContentByRId,
+      footerContentByRId,
       titlePg: firstSection?.titlePg === true,
       ...(footnoteContentById === undefined
         ? {}

@@ -64,6 +64,7 @@ import type {
 } from "@stll/folio-core/controller/hiddenEditorManager";
 import { runLayoutPipeline as runLayoutPipelineCompute } from "@stll/folio-core/controller/layoutPipeline";
 import type { LayoutOutcome, LayoutRunOptions } from "@stll/folio-core/controller/layoutPipeline";
+import { createHyphenationReadiness } from "@stll/folio-core/controller/hyphenationReadiness";
 import { browserClock, createLayoutScheduler } from "@stll/folio-core/controller/layoutScheduler";
 import type { LayoutScheduler } from "@stll/folio-core/controller/layoutScheduler";
 import { createLayoutSession } from "@stll/folio-core/controller/layoutSession";
@@ -586,6 +587,21 @@ export function useDocxEditor(options: UseDocxEditorOptions): UseDocxEditorRetur
   const emitter = createFolioEditorEmitter();
   const syncCoordinator = new LayoutSelectionGate();
   const session = createLayoutSession();
+  // One per editor: a layout run that lacked a hyphenation dictionary re-runs
+  // when it loads (the load already invalidated measured paragraphs) or
+  // reports the failure once. Mirrors React's PagedEditor.
+  const hyphenationReadiness = createHyphenationReadiness({
+    relayout: () => {
+      // Falls back to the last laid-out state before the view exists, as
+      // React's PagedEditor does for its pre-view layout.
+      const state = editorView.value?.state ?? session.lastEditorState;
+      if (state) {
+        runLayoutPipeline(state, { reason: "hyphenation-ready" });
+      }
+    },
+    onError: (error) => onError?.(error),
+  });
+  onScopeDispose(hyphenationReadiness.cancel);
   const painter = new LayoutPainter({ pageGap, showShadow: true });
   const headerFooterManager = createHeaderFooterEditorManager({
     getHost: () => headerFooterHost.value,
@@ -728,6 +744,7 @@ export function useDocxEditor(options: UseDocxEditorOptions): UseDocxEditorRetur
           describeInvalidHighlightMarks,
           emptyTemplatePreviewEntries: EMPTY_TEMPLATE_PREVIEW_ENTRIES,
           emptyTemplatePreviewHidden: EMPTY_TEMPLATE_PREVIEW_HIDDEN,
+          hyphenationReadiness,
         },
         state,
         runOptions,

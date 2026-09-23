@@ -4462,6 +4462,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
                           ? { onAnchorPositionsChange: setAnchorPositions }
                           : {})}
                         onTotalPagesChange={handleTotalPagesChange}
+                        onError={handleEditorError}
                         scrollContainerRef={scrollContainerRef}
                         sidebarOverlay={commentsSidebarOverlay}
                       />

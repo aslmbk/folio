@@ -56,6 +56,7 @@ import {
   type LayoutScheduler,
 } from "@stll/folio-core/controller/layoutScheduler";
 import { createLayoutSession } from "@stll/folio-core/controller/layoutSession";
+import { createHyphenationReadiness } from "@stll/folio-core/controller/hyphenationReadiness";
 import {
   documentFontsAreLoaded,
   getDocumentFontSet,
@@ -375,6 +376,8 @@ export type PagedEditorProps = {
   onAnchorPositionsChange?: (positions: Map<string, number>) => void;
   /** Callback when layout reports a different total page count. */
   onTotalPagesChange?: (totalPages: number) => void;
+  /** Callback for failures the editor recovers from, such as a hyphenation dictionary that cannot load. */
+  onError?: (error: Error) => void;
   /** Which mark anchors should be mapped for sidebars/margin markers. */
   anchorPositionMode?: "comments" | "comments-and-revisions";
   /**
@@ -1345,6 +1348,7 @@ export const PagedEditor = forwardRef<PagedEditorRef, PagedEditorProps>(
       onContextMenu,
       onAnchorPositionsChange,
       onTotalPagesChange,
+      onError,
       anchorPositionMode = "comments-and-revisions",
       onAnonymizationTermClick,
       selectedAnonymizationCanonical = null,
@@ -1416,6 +1420,7 @@ export const PagedEditor = forwardRef<PagedEditorRef, PagedEditorProps>(
     const onEditorViewReadyRef = useRef(onEditorViewReady);
     const onDocumentChangeRef = useRef(onDocumentChange);
     const onTotalPagesChangeRef = useRef(onTotalPagesChange);
+    const onErrorRef = useRef(onError);
     const lastTotalPagesRef = useRef<number | null>(null);
 
     // Keep refs in sync with latest props
@@ -1424,6 +1429,7 @@ export const PagedEditor = forwardRef<PagedEditorRef, PagedEditorProps>(
     onEditorViewReadyRef.current = onEditorViewReady;
     onDocumentChangeRef.current = onDocumentChange;
     onTotalPagesChangeRef.current = onTotalPagesChange;
+    onErrorRef.current = onError;
 
     // State
     const [layout, setLayout] = useState<Layout | null>(null);
@@ -1830,6 +1836,30 @@ export const PagedEditor = forwardRef<PagedEditorRef, PagedEditorProps>(
      * 3. Layout blocks onto pages
      * 4. Paint pages to DOM
      */
+    // One per editor: a layout run that lacked a hyphenation dictionary re-runs
+    // when it loads (the load already invalidated measured paragraphs) or
+    // reports the failure once. Unmount cancels loads still pending.
+    const [hyphenationReadiness] = useState(() =>
+      createHyphenationReadiness({
+        relayout: () => {
+          // Before the hidden view exists the pages come from a pre-view
+          // layout; re-run that state, or view readiness (which skips a
+          // document already laid out) would leave them unhyphenated.
+          const view = hiddenPMRef.current?.getView();
+          const state = view?.state ?? layoutSessionRef.current.lastEditorState;
+          if (!state) {
+            return;
+          }
+          runLayoutPipelineRef.current(state, { reason: "hyphenation-ready" });
+          if (view) {
+            updateSelectionOverlayRef.current(view.state);
+          }
+        },
+        onError: (error) => onErrorRef.current?.(error),
+      }),
+    );
+    useEffect(() => hyphenationReadiness.cancel, [hyphenationReadiness]);
+
     const runLayoutPipeline = useCallback(
       (
         state: EditorState,
@@ -1877,6 +1907,7 @@ export const PagedEditor = forwardRef<PagedEditorRef, PagedEditorProps>(
             describeInvalidHighlightMarks,
             emptyTemplatePreviewEntries: EMPTY_TEMPLATE_PREVIEW_ENTRIES,
             emptyTemplatePreviewHidden: EMPTY_TEMPLATE_PREVIEW_HIDDEN,
+            hyphenationReadiness,
           },
           state,
           options,
