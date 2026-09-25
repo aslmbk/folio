@@ -82,6 +82,7 @@ import { isBaselineVertAlign } from "../../docx/runParser";
 import {
   PROSE_PARAGRAPH_SOURCE_CONTRACT_ATTR,
   createProseParagraphWithPropertySource,
+  proseParagraphAttrsWithoutPropertySource,
   getDocumentParagraphPropertySourceContract,
   recreateProseNodeWithParagraphPropertySource,
   transportTableCellsWithParagraphPropertySources,
@@ -4995,10 +4996,33 @@ function convertParagraphWithTextBoxes(
         ...(standalone && index === 0 && block.preservedAttributes
           ? { hostPreservedAttributes: block.preservedAttributes }
           : {}),
+        // Likewise its paragraph properties: an inline drawing is run content
+        // of its `w:p`, whose spacing and alignment still place the box.
+        ...(standalone && index === 0
+          ? { hostParagraph: hostParagraphAttrs(pmParagraph.attrs) }
+          : {}),
       }),
     );
   }
   return nodes;
+}
+
+/**
+ * The host paragraph's attributes without its identity. The node may be
+ * copied, and a copy must not make a second claim on the same `w:p`; the
+ * attribute remainder travels in the node's own `_preservedAttributes`.
+ */
+function hostParagraphAttrs(
+  attrs: PMNode["attrs"],
+): NonNullable<TextBoxAttrs["_docxHostParagraph"]> {
+  const {
+    paraId: _paraId,
+    textId: _textId,
+    idStability: _idStability,
+    _preservedAttributes,
+    ...host
+  } = proseParagraphAttrsWithoutPropertySource(attrs);
+  return host;
 }
 
 function hasContentBesidesTextBoxAnchors(paragraph: PMNode): boolean {
@@ -5265,6 +5289,8 @@ function convertTextBox(
     inlineSdts: NonNullable<TextBoxAttrs["_docxInlineSdts"]>;
     /** The host `w:p`'s attribute remainder, when this node stands in for it. */
     hostPreservedAttributes?: PreservedAttribute[];
+    /** The host `w:p`'s paragraph attributes, when this node stands in for it. */
+    hostParagraph?: TextBoxAttrs["_docxHostParagraph"];
   },
 ): PMNode {
   reportSourceContainerPageBreakRun(
@@ -5466,6 +5492,7 @@ function convertTextBox(
       _docxTrackedChange: options.trackedChange,
       _docxInlineSdts: options.inlineSdts.length > 0 ? options.inlineSdts : undefined,
       _preservedAttributes: options.hostPreservedAttributes,
+      _docxHostParagraph: options.hostParagraph,
     },
     contentNodes,
   );
