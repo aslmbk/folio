@@ -14,9 +14,10 @@ import {
   computeKeepNextChains,
   calculateChainHeight,
   getMidChainIndices,
+  hasKeepLines,
   hasPageBreakBefore,
 } from "./keep-together";
-import { measuredLineAdvance } from "./lineFlow";
+import { measuredLineAdvance, measuredLineRangeHeight } from "./lineFlow";
 import { FOOTNOTE_SEPARATOR_HEIGHT, SECTION_START_PLACEMENT, createPaginator } from "./paginator";
 import type { PageState } from "./paginator";
 import { getParagraphFragmentPmRange } from "./paragraphFragmentRange";
@@ -681,6 +682,26 @@ function layoutParagraph({
   const spaceBefore = suppressSpaceBefore ? 0 : getParagraphSpacingBefore(block);
   const spaceAfter = getParagraphSpacingAfter(block);
 
+  // `w:keepLines` (§17.3.1.14) needs the whole paragraph's line and footnote
+  // demand. Sum it once so the column retries below stay constant-time.
+  let keepLinesDemand: { linesHeight: number; footnoteHeight: number } | undefined;
+  if (lines.length > 1 && hasKeepLines(block)) {
+    let footnoteHeight = 0;
+    for (const line of lines) {
+      footnoteHeight += getLineFootnoteRefs(
+        block,
+        line.fromRun,
+        line.toRun,
+        footnoteHeightById,
+      ).height;
+    }
+    keepLinesDemand = {
+      linesHeight: measuredLineRangeHeight(lines, 0, lines.length),
+      footnoteHeight,
+    };
+  }
+  let keepLinesMoveAttempted = false;
+
   // Try to fit all lines on current page/column
   let currentLineIndex = 0;
 
@@ -735,6 +756,35 @@ function layoutParagraph({
         spaceBefore + firstLineHeight <= columnCapacity
       ) {
         paginator.ensureFits(collapsedLead + firstLineHeight);
+        continue;
+      }
+    }
+
+    // `w:keepLines` (§17.3.1.14): a paragraph that does not fit whole in the
+    // rest of this column starts on the next one instead of splitting. One
+    // taller than a full column cannot be kept together and splits normally.
+    // The move is tried once; a paragraph still too tall for the column it
+    // lands in splits there rather than retrying column by column.
+    if (
+      keepLinesDemand !== undefined &&
+      !keepLinesMoveAttempted &&
+      currentLineIndex === 0 &&
+      state.cursorY !== state.topMargin
+    ) {
+      const wholeHeight =
+        keepLinesDemand.linesHeight +
+        projectedFootnoteReserveGrowth(state, keepLinesDemand.footnoteHeight);
+      const collapsedLead = collapseParagraphSpacing({
+        before: spaceBefore,
+        after: state.trailingSpacing,
+      });
+      const columnCapacity = state.contentBottom - state.topMargin;
+      if (
+        collapsedLead + wholeHeight > availableHeight &&
+        spaceBefore + wholeHeight <= columnCapacity
+      ) {
+        keepLinesMoveAttempted = true;
+        paginator.ensureFits(collapsedLead + wholeHeight);
         continue;
       }
     }
