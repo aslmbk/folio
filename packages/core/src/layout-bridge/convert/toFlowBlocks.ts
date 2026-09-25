@@ -2770,6 +2770,7 @@ function splitParagraphAtPageBreaks({
   }
 
   const remainingRuns = partitioned.remaining;
+  let paragraphMarkCarrier: ParagraphBlock | undefined;
   if (remainingRuns.length > 0) {
     appendParagraph(remainingRuns, fragmentStart, paragraph.pmEnd ?? fragmentStart);
   } else if (
@@ -2785,6 +2786,7 @@ function splitParagraphAtPageBreaks({
       !hasVisibleParagraphPayload(carrier.attrs ?? {})
     ) {
       carrier.attrs = { ...carrier.attrs, suppressEmptyParagraphHeight: true };
+      paragraphMarkCarrier = carrier;
     }
   }
 
@@ -2801,7 +2803,31 @@ function splitParagraphAtPageBreaks({
       delete fragment.attrs;
     }
   }
+  if (paragraphMarkCarrier?.attrs) {
+    // Without the w:splitPgBreakAndParaMark compatibility setting, the
+    // paragraph mark stays on the page that ends with the break. The carrier
+    // only maps that mark after the break, so the paragraph's before/after
+    // spacing belongs to the previous page and must not open the next one:
+    // otherwise a following nextPage section cannot reuse that still-blank
+    // page and strands an empty sheet.
+    paragraphMarkCarrier.attrs = withoutParagraphSpacing(paragraphMarkCarrier.attrs);
+  }
   return result;
+}
+
+function withoutParagraphSpacing(source: ParagraphAttrs): ParagraphAttrs {
+  const attrs: ParagraphAttrs = { ...source };
+  if (attrs.spacing) {
+    const { before: _before, after: _after, ...lineSpacing } = attrs.spacing;
+    if (Object.keys(lineSpacing).length > 0) {
+      attrs.spacing = lineSpacing;
+    } else {
+      delete attrs.spacing;
+    }
+  }
+  delete attrs.automaticSpacing;
+  delete attrs.spacingExplicit;
+  return attrs;
 }
 
 /**
