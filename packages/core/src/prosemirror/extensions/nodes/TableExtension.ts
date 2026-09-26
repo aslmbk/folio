@@ -16,7 +16,6 @@ import {
   splitCell as pmSplitCell,
   CellSelection,
   selectedRect,
-  removeRow,
   TableMap,
 } from "prosemirror-tables";
 import { Decoration, DecorationSet } from "prosemirror-view";
@@ -43,6 +42,7 @@ import {
   mergeTableRowAttrs,
 } from "../../attrs";
 import type { TableAttrs, TableCellAttrs } from "../../schema/nodes";
+import { removeTableRow } from "../../tableGridMutation";
 import { setTableLookFlags } from "../../../docx/tableLook";
 import { createNodeExtension, createExtension } from "../create";
 import type {
@@ -1424,13 +1424,15 @@ export const TablePluginExtension = createExtension({
           dispatch(tr.scrollIntoView());
           return true;
         }
-        // Remove rows bottom-up through prosemirror-tables so cells that span
-        // into a deleted row have their rowspan adjusted (and their content
-        // preserved) instead of being orphaned. `removeRow` mutates the table,
-        // so the map is re-read after each removal.
+        // Remove rows bottom-up so cells that span into a deleted row have
+        // their rowspan adjusted (and their content preserved) instead of
+        // being orphaned. The row removal is the operation layer's, not
+        // prosemirror-tables' `removeRow`, which loses its column after a
+        // wide merged cell and leaves a merge further right a row too long.
+        // Each removal mutates the table, so the map is re-read after it.
         const rect = selectedRect(state);
         for (let row = lastRow; row >= firstRow; row--) {
-          removeRow(tr, rect, row);
+          removeTableRow(tr, rect, row);
           if (row > firstRow) {
             const updated = tr.doc.nodeAt(rect.tableStart - 1);
             if (updated) {
@@ -1751,12 +1753,20 @@ export const TablePluginExtension = createExtension({
       }
 
       if (dispatch) {
+        // A cell selection is addressed by the positions of cells, which the
+        // table map gives relative to the table's content start.
         const tableStart = context.tablePos + 1;
-        // Find first and last cell in the table
-        const $first = state.doc.resolve(tableStart);
-        const $last = state.doc.resolve(context.tablePos + context.table.nodeSize - 2);
-        const cellSel = CellSelection.create(state.doc, $first.pos, $last.pos);
-        dispatch(state.tr.setSelection(cellSel));
+        const { map } = TableMap.get(context.table);
+        const first = map.at(0);
+        const last = map.at(-1);
+        if (first === undefined || last === undefined) {
+          return false;
+        }
+        dispatch(
+          state.tr.setSelection(
+            CellSelection.create(state.doc, tableStart + first, tableStart + last),
+          ),
+        );
       }
       return true;
     }
@@ -1773,18 +1783,19 @@ export const TablePluginExtension = createExtension({
       }
 
       if (dispatch) {
+        // The table map names the cell covering each slot of the row, which
+        // is also right for a row whose first slot a merge from above covers.
         const tableStart = context.tablePos + 1;
-        // Navigate to the target row
-        let rowPos = tableStart;
-        for (let r = 0; r < context.rowIndex; r++) {
-          const row = context.table.child(r);
-          rowPos += row.nodeSize;
+        const tableMap = TableMap.get(context.table);
+        const firstCell = tableMap.map[context.rowIndex * tableMap.width];
+        if (firstCell === undefined) {
+          return false;
         }
-        const row = context.table.child(context.rowIndex);
-        const firstCellPos = rowPos + 1; // inside the row
-        const lastCellPos = rowPos + row.nodeSize - 2;
-        const cellSel = CellSelection.create(state.doc, firstCellPos, lastCellPos);
-        dispatch(state.tr.setSelection(cellSel));
+        dispatch(
+          state.tr.setSelection(
+            CellSelection.rowSelection(state.doc.resolve(tableStart + firstCell)),
+          ),
+        );
       }
       return true;
     }
