@@ -71,6 +71,8 @@ import { encloseWholeControls } from "../prosemirror/contentControlRevisions";
 import { getFolioParaIdFromBlockId } from "../types/block-id";
 import type { ParagraphFormatting, RunPropertyChange, TextFormatting } from "../types/document";
 import { stripBlockIdentityAttrs } from "./block-identity";
+import { type BatchClaim, BatchClaims } from "./batch-claims";
+import { type CharacterBoundaryStrictness, describeCharacterSplit } from "./character-boundaries";
 import { buildCleanBlockText, type CleanBlockText, resolveCleanTextRange } from "./clean-text";
 import {
   hasInlineEmphasis,
@@ -80,6 +82,7 @@ import {
 import {
   applyTextChanges,
   changesFromSegments,
+  keepAtomicSpans,
   planTextChanges,
   type TextChange,
   widenChangesToAtomicSpans,
@@ -346,6 +349,13 @@ const SUGGESTED_SUPPORTED_OPERATION_TYPES: ReadonlySet<FolioAIEditOperation["typ
   "deleteTableRow",
   "insertTableColumn",
   "deleteTableColumn",
+]);
+
+/** Operations that only add marks: they move no position of the document. */
+const ANNOTATION_OPERATION_TYPES: ReadonlySet<FolioAIEditOperation["type"]> = new Set([
+  "formatRange",
+  "commentOnRange",
+  "commentOnBlock",
 ]);
 
 type ResolvedOperationFields = {
@@ -1545,7 +1555,7 @@ type TableCellMerge = {
 
 type TableCellSplit = TableCellMerge;
 
-const getTableMutationPlanTarget = (item: ResolvedOperation): TableMutationPlanTarget => {
+const getTableMutationPlanTarget = (item: ResolvedBase): TableMutationPlanTarget => {
   if (item.tableCellMerge) {
     return { type: "mergeCells", ...item.tableCellMerge };
   }
@@ -1563,6 +1573,148 @@ const getTableMutationPlanTarget = (item: ResolvedOperation): TableMutationPlanT
     return { type: "tableStructure", tablePosition };
   }
   return { type: "none" };
+};
+
+/**
+ * `insertion`, resolved against the document as it was read, placed through
+ * what `tr` has already changed. The batch runs from the end backwards, so
+ * nothing it has applied yet sits before the new row; mapped all the same, so
+ * that stays true of the positions the row is written at and not only of the
+ * order they are visited in. A row another operation of the batch inserted
+ * at the same boundary is the later one in input order, so the new row goes
+ * before it.
+ */
+const mapTableRowInsertion = (tr: Transaction, insertion: TableRowInsertion): TableRowInsertion => {
+  const tableStart = tr.mapping.map(insertion.tableStart, -1);
+  return {
+    ...insertion,
+    tableStart,
+    rowPosition: tr.mapping.map(insertion.rowPosition, -1),
+    rowspanUpdates: insertion.rowspanUpdates.map(
+      (update) => tr.mapping.map(insertion.tableStart + update, 1) - tableStart,
+    ),
+  };
+};
+
+type BatchClaimOptions = {
+  item: ResolvedBase;
+  doc: PMNode;
+  producesTrackedChanges: boolean;
+};
+
+/** The cells a column deletion removes: every cell standing in that column alone. */
+const deletedColumnCellRanges = (
+  doc: PMNode,
+  { tablePosition, columnIndex }: TableColumnDeletion,
+): { from: number; to: number }[] => {
+  const table = doc.nodeAt(tablePosition);
+  if (!table || table.type.spec["tableRole"] !== "table") {
+    return [];
+  }
+  const map = TableMap.get(table);
+  const tableStart = tablePosition + 1;
+  const ranges: { from: number; to: number }[] = [];
+  const seen = new Set<number>();
+  for (let row = 0; row < map.height; row++) {
+    const relative = map.map[row * map.width + columnIndex];
+    if (relative === undefined || seen.has(relative)) {
+      continue;
+    }
+    seen.add(relative);
+    const rectangle = map.findCell(relative);
+    const cell = table.nodeAt(relative);
+    if (!cell || rectangle.left !== columnIndex || rectangle.right !== columnIndex + 1) {
+      continue;
+    }
+    ranges.push({ from: tableStart + relative, to: tableStart + relative + cell.nodeSize });
+  }
+  return ranges;
+};
+
+/** What `item` claims of the document its batch resolved against; see `batch-claims.ts`. */
+const batchClaimOf = ({ item, doc, producesTrackedChanges }: BatchClaimOptions): BatchClaim => {
+  const block = item.blockFrom;
+  switch (item.operation.type) {
+    case "replaceInBlock":
+    case "replaceRange":
+      return { type: "text", block, from: item.from, to: item.to };
+    case "formatRange":
+    case "commentOnRange":
+    case "commentOnBlock":
+      return { type: "annotation", block, from: item.from, to: item.to };
+    case "splitBlock":
+      return { type: "split", block, from: item.from, to: item.to };
+    case "replaceBlock":
+      return item.replaceBlockImpact === "style"
+        ? { type: "paragraphProperties", block }
+        : { type: "rewriteBlock", block };
+    case "setBlockParagraphProperties":
+      return { type: "paragraphProperties", block };
+    case "mergeBlockWithNext":
+      return { type: "merge", block, next: item.blockTo, joinsNow: !producesTrackedChanges };
+    case "deleteBlock": {
+      // The same test the deletion itself makes: see its case in the applier.
+      const at = doc.resolve(block);
+      const endsItsContainer = paragraphEndsItsContainer(at, item.blockNode.type.name);
+      const keepsParagraph = producesTrackedChanges
+        ? endsItsContainer
+        : endsItsContainer && at.nodeBefore?.type.name !== item.blockNode.type.name;
+      return {
+        type: "deleteBlock",
+        block,
+        keepsParagraph,
+        removesNode: !producesTrackedChanges && !keepsParagraph,
+      };
+    }
+    case "insertAfterBlock":
+    case "insertBeforeBlock":
+    case "insertSignatureTable":
+    case "insertTable":
+      return { type: "insertion", at: item.from };
+    case "deleteTable": {
+      const deleted = item.deletedTable;
+      return deleted
+        ? {
+            type: "tableRemoval",
+            table: deleted.position,
+            wholeTable: true,
+            ranges: [{ from: deleted.position, to: deleted.position + deleted.node.nodeSize }],
+          }
+        : { type: "unclaimed" };
+    }
+    case "deleteTableRow": {
+      const deletion = item.tableRowDeletion;
+      const row = deletion ? doc.nodeAt(deletion.rowPosition) : null;
+      return deletion && row
+        ? {
+            type: "tableRemoval",
+            table: deletion.tablePosition,
+            wholeTable: false,
+            ranges: [{ from: deletion.rowPosition, to: deletion.rowPosition + row.nodeSize }],
+          }
+        : { type: "unclaimed" };
+    }
+    case "deleteTableColumn": {
+      const deletion = item.tableColumnDeletion;
+      return deletion
+        ? {
+            type: "tableRemoval",
+            table: deletion.tablePosition,
+            wholeTable: false,
+            ranges: deletedColumnCellRanges(doc, deletion),
+          }
+        : { type: "unclaimed" };
+    }
+    case "insertTableRow":
+    case "insertTableColumn":
+    case "mergeTableCells":
+    case "splitTableCell": {
+      const target = getTableMutationPlanTarget(item);
+      return target.type === "none"
+        ? { type: "unclaimed" }
+        : { type: "tableStructure", table: target.tablePosition };
+    }
+  }
 };
 
 /**
@@ -2347,6 +2499,7 @@ const applyFolioAIEditOperationsInternal = ({
   };
   const claimedTableRows = new Set<string>();
   const claimedTableColumns = new Set<string>();
+  const batchClaims = new BatchClaims();
   const diffText: ReturnType<typeof createWordDiffSession>["diff"] =
     wordDiffMode === "coarse" ? coarseWordDiff : wordDiffSessionFromOptions(wordDiff).diff;
 
@@ -2408,7 +2561,6 @@ const applyFolioAIEditOperationsInternal = ({
         skipped.push({ id: operation.id, reason: "noopOperation" });
         continue;
       }
-      claimedTableRows.add(rowKey);
     }
 
     const columnDeletion = resolution.operation.tableColumnDeletion;
@@ -2418,7 +2570,32 @@ const applyFolioAIEditOperationsInternal = ({
         skipped.push({ id: operation.id, reason: "noopOperation" });
         continue;
       }
-      claimedTableColumns.add(columnKey);
+    }
+
+    // Every operation resolved against the document as it was read; one whose
+    // target an earlier operation of the batch deletes, rewrites, splits,
+    // merges or overlaps would be applied to positions that operation already
+    // moved. See `batch-claims.ts`.
+    const claim = batchClaimOf({
+      item: resolution.operation,
+      doc: view.state.doc,
+      producesTrackedChanges,
+    });
+    const claimedBy = batchClaims.conflictOf(claim);
+    if (claimedBy !== null) {
+      skipped.push({
+        id: operation.id,
+        reason: "overlappingOperation",
+        message: `operation ${JSON.stringify(claimedBy)}, earlier in this batch, already claims its target.`,
+      });
+      continue;
+    }
+    batchClaims.add(operation.id, claim);
+    if (deletion) {
+      claimedTableRows.add(`${deletion.tablePosition}:${deletion.rowIndex}`);
+    }
+    if (columnDeletion) {
+      claimedTableColumns.add(getTableColumnCoordinateKey(columnDeletion));
     }
 
     if (
@@ -2528,7 +2705,17 @@ const applyFolioAIEditOperationsInternal = ({
   // inserted columns so it still removes the original target. Other
   // ties use reverse input order so repeated insertions retain their
   // requested sequence.
+  //
+  // Annotations — comments and formatting, which add marks and move no
+  // position — go first, onto the text as it was read. An edit inside one then
+  // carries it like any mark around it, rather than the annotation landing on
+  // positions the edit already moved (see `batch-claims.ts`).
   const executionOrder = executableResolved.toSorted((left, right) => {
+    const leftAnnotates = ANNOTATION_OPERATION_TYPES.has(left.operation.type);
+    const rightAnnotates = ANNOTATION_OPERATION_TYPES.has(right.operation.type);
+    if (leftAnnotates !== rightAnnotates) {
+      return leftAnnotates ? -1 : 1;
+    }
     const leftCellShape = left.tableCellMerge ?? left.tableCellSplit;
     const rightCellShape = right.tableCellMerge ?? right.tableCellSplit;
     if (!leftCellShape && rightCellShape) {
@@ -2668,6 +2855,9 @@ const applyFolioAIEditOperationsInternal = ({
     // but the doc was untouched.
     const stepsBefore = tr.steps.length;
     let appliedRevisionIds: number[] = [];
+    // Set when a text replacement wrote one formatting over a stretch that
+    // carried several; reported once the operation is known to apply.
+    let unifiedFormatting = false;
 
     // Suggested mode covers the inline text/format operations plus the block and
     // table row/column structural operations (see
@@ -2715,7 +2905,8 @@ const applyFolioAIEditOperationsInternal = ({
             ...(styleResolver !== undefined ? { styleResolver } : {}),
           });
           if (minimal !== null) {
-            tr = minimal;
+            tr = minimal.transaction;
+            unifiedFormatting = minimal.unifiesFormatting;
             break;
           }
         }
@@ -2750,6 +2941,7 @@ const applyFolioAIEditOperationsInternal = ({
           if (tracked) {
             tr = tracked.transaction;
             operationRevisionSeed = tracked.nextRevisionId;
+            unifiedFormatting = tracked.unifiesFormatting;
             appliedRevisionIds = [
               revisionIdDelete,
               revisionIdInsert,
@@ -2944,10 +3136,12 @@ const applyFolioAIEditOperationsInternal = ({
           continue;
         }
         if (minimal !== null) {
-          tr = minimal;
+          tr = minimal.transaction;
+          unifiedFormatting = minimal.unifiesFormatting;
         } else if (tracked !== null) {
           tr = tracked.transaction;
           operationRevisionSeed = tracked.nextRevisionId;
+          unifiedFormatting = tracked.unifiesFormatting;
           clearedBackground = tracked.backgroundRevisionIds.length > 0;
           backgroundRevisionIds = tracked.backgroundRevisionIds;
         } else if (changesText) {
@@ -3104,7 +3298,7 @@ const applyFolioAIEditOperationsInternal = ({
         const template = tableTemplates?.get(item.operation.id);
         const result = applyTableRowInsertion({
           tr,
-          insertion,
+          insertion: mapTableRowInsertion(tr, insertion),
           cellTexts: item.operation.cellTexts,
           revision,
           ...(template !== undefined && { template }),
@@ -3499,13 +3693,20 @@ const applyFolioAIEditOperationsInternal = ({
         // the stale attributes dropped that mark without a trace: the
         // properties applied, the merge silently did not.
         //
-        // An earlier operation of the batch may also have removed the
-        // paragraph (a direct `deleteBlock`, or a merge that joined it away):
-        // its position then maps onto whatever follows, which is not the
-        // block this operation names.
+        // The batch refuses an operation on a paragraph another of its
+        // operations removes before it gets here (see `batch-claims.ts`); a
+        // position that maps into removed content, or onto a paragraph that is
+        // not this one, still never receives its properties. `deletedAfter`
+        // cannot say so: a paragraph inserted right before this one sets it
+        // as well, though this one is still there.
         const mapped = tr.mapping.mapResult(item.blockFrom);
-        const liveBlock = mapped.deletedAfter ? null : tr.doc.nodeAt(mapped.pos);
-        if (!liveBlock || liveBlock.type !== item.blockNode.type) {
+        const liveBlock = mapped.deletedAcross ? null : tr.doc.nodeAt(mapped.pos);
+        const paraId: unknown = item.blockNode.attrs["paraId"];
+        if (
+          !liveBlock ||
+          liveBlock.type !== item.blockNode.type ||
+          (typeof paraId === "string" && liveBlock.attrs["paraId"] !== paraId)
+        ) {
           skipped.push({ id: item.operation.id, reason: "missingBlock" });
           continue;
         }
@@ -3726,6 +3927,9 @@ const applyFolioAIEditOperationsInternal = ({
     // reference keep working. The full set is on `revisionIds` for
     // accept/reject paths that must clear every mark belonging to
     // this op.
+    if (unifiedFormatting) {
+      normalizations.push({ id: item.operation.id, code: "uniformReplacementFormatting" });
+    }
     applied.push({
       id: item.operation.id,
       ...(committedCommentId !== undefined && { commentId: committedCommentId }),
@@ -4122,6 +4326,11 @@ type PlanDocumentReplacementOptions = {
   replacement: string;
   /** The changes from the matched text to the replacement, before field widening. */
   planChanges: (source: string) => readonly TextChange[];
+  /**
+   * Another plan of the same replacement whose untouched fields the changes
+   * must leave untouched too (see {@link keepAtomicSpans}).
+   */
+  keepFieldsOf?: (source: string) => readonly TextChange[];
 };
 
 /**
@@ -4135,6 +4344,7 @@ const planDocumentReplacement = ({
   item,
   replacement,
   planChanges,
+  keepFieldsOf,
 }: PlanDocumentReplacementOptions): DocumentReplacementPlan | null => {
   const cleanBlock = buildCleanBlockText(item.blockNode, item.blockFrom);
   const span = replacedCleanSpan(item, cleanBlock);
@@ -4148,7 +4358,17 @@ const planDocumentReplacement = ({
       ? [{ offset: boundary.offset - spanStart, length: boundary.length }]
       : [],
   );
-  const changes = widenChangesToAtomicSpans(span.text, planChanges(span.text), atomicSpans);
+  const widened = widenChangesToAtomicSpans(span.text, planChanges(span.text), atomicSpans);
+  const changes =
+    keepFieldsOf === undefined
+      ? widened
+      : keepAtomicSpans(
+          span.text,
+          replacement,
+          widened,
+          widenChangesToAtomicSpans(span.text, keepFieldsOf(span.text), atomicSpans),
+          atomicSpans,
+        );
   if (applyTextChanges(span.text, changes) !== replacement) {
     return null;
   }
@@ -4321,6 +4541,105 @@ const planDocumentReplacement = ({
   };
 };
 
+/** The marks that present a character: its formatting, and the links and comments over it. */
+const presentationMarks = (marks: readonly Mark[]): readonly Mark[] =>
+  marks.filter((mark) => isFormattingMark(mark) || isCarriedMark(mark));
+
+/**
+ * Whether a change of `plan` replaces characters that do not all present
+ * alike. Its new text takes one formatting, the first replaced character's,
+ * and every link and comment over the stretch, so the others' formatting ends
+ * where the replaced text did. That is the rule for every mode, and the
+ * receipt says it was applied (`uniformReplacementFormatting`).
+ */
+const replacementUnifiesFormatting = (doc: PMNode, plan: DocumentReplacementPlan): boolean =>
+  plan.planned.some(({ change, pieces }) => {
+    if (pieces.length === 0 || change.text.length === 0) {
+      return false;
+    }
+    let first: readonly Mark[] | null = null;
+    for (let index = change.start; index < change.end; index++) {
+      const unit = plan.unitAt(plan.spanStart + index);
+      const marks = presentationMarks((unit ? doc.nodeAt(unit.from)?.marks : null) ?? Mark.none);
+      if (first === null) {
+        first = marks;
+      } else if (!Mark.sameSet(first, marks)) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+/**
+ * The marks each UTF-16 unit of `replacement` carries once a direct
+ * replacement has written it (see {@link applyMinimalDirectReplacement}): a
+ * character the direct plan keeps keeps its own, and one it writes takes the
+ * marks that plan gives its change. Background cleared from a touched stretch
+ * is left off either way.
+ *
+ * A tracked replacement writes its insertions with these marks, so accepting
+ * it leaves exactly the text and formatting the direct edit writes, although
+ * its redline cuts the text into coarser, readable changes than the direct
+ * edit does.
+ */
+const directReplacementMarks = ({
+  doc,
+  plan,
+  replacementBackground,
+}: {
+  doc: PMNode;
+  plan: DocumentReplacementPlan;
+  replacementBackground: FolioReplacementBackground;
+}): (readonly Mark[])[] => {
+  const clearsBackground = replacementBackground === "clear";
+  const touched = clearsBackground ? touchedBackgroundIndices({ doc, plan }) : new Set<number>();
+  const withoutBackground = (marks: readonly Mark[]): readonly Mark[] =>
+    marks.filter((mark) => !BACKGROUND_MARK_NAMES.has(mark.type.name));
+  const allocated: (readonly Mark[])[] = [];
+  // Span-relative index of the next matched character not yet allocated.
+  let cursor = 0;
+  const keepUntil = (end: number) => {
+    for (; cursor < end; cursor++) {
+      const index = plan.spanStart + cursor;
+      const unit = plan.unitAt(index);
+      const marks = (unit ? doc.nodeAt(unit.from)?.marks : null) ?? Mark.none;
+      allocated.push(touched.has(index) ? withoutBackground(marks) : marks);
+    }
+  };
+  for (const { change, pieces, insertion } of plan.planned) {
+    keepUntil(change.start);
+    cursor = change.end;
+    let marks: readonly Mark[];
+    if (insertion !== undefined) {
+      marks = insertion.marks(doc);
+    } else {
+      const first = pieces.at(0);
+      const last = pieces.at(-1);
+      if (first === undefined || last === undefined) {
+        panic("A planned replacement lost the characters it removes");
+      }
+      marks = addCarriedMarks(
+        inheritedReplacementMarks(doc, first.from, first.to),
+        surveyReplacedAnnotations(doc, first.from, last.to).carried,
+      );
+    }
+    // Direct writes onto a touched stretch after clearing it, and a pure
+    // insertion touches the characters on both sides of it.
+    const written = clearsBackground ? withoutBackground(marks) : marks;
+    for (let offset = 0; offset < change.text.length; offset++) {
+      allocated.push(written);
+    }
+  }
+  keepUntil(plan.spanEnd - plan.spanStart);
+  return allocated;
+};
+
+type MinimalDirectReplacementResult = {
+  transaction: Transaction;
+  /** See {@link replacementUnifiesFormatting}. */
+  unifiesFormatting: boolean;
+};
+
 type MinimalDirectReplacementOptions = {
   tr: Transaction;
   item: ResolvedOperation;
@@ -4346,7 +4665,7 @@ const applyMinimalDirectReplacement = ({
   commentMark,
   replacementBackground,
   styleResolver,
-}: MinimalDirectReplacementOptions): Transaction | null => {
+}: MinimalDirectReplacementOptions): MinimalDirectReplacementResult | null => {
   const plan = planDocumentReplacement({
     doc: tr.doc,
     item,
@@ -4357,6 +4676,7 @@ const applyMinimalDirectReplacement = ({
     return null;
   }
   const { planned, matchedFrom, matchedTo } = plan;
+  const unifiesFormatting = replacementUnifiesFormatting(tr.doc, plan);
 
   let nextTr = tr;
   if (replacementBackground === "clear") {
@@ -4419,7 +4739,7 @@ const applyMinimalDirectReplacement = ({
       nextTr = nextTr.addMark(from, to, commentMark);
     }
   }
-  return nextTr;
+  return { transaction: nextTr, unifiesFormatting };
 };
 
 type MinimalTrackedReplacementOptions = {
@@ -4449,6 +4769,8 @@ type MinimalTrackedReplacementResult =
       transaction: Transaction;
       backgroundRevisionIds: readonly number[];
       nextRevisionId: number;
+      /** See {@link replacementUnifiesFormatting}. */
+      unifiesFormatting: boolean;
     }
   | { type: "pendingRunPropertyChange" };
 
@@ -4492,10 +4814,27 @@ const applyMinimalTrackedReplacement = ({
     item,
     replacement,
     planChanges: (source) => changesFromSegments(diffText(source, replacement)),
+    // A field the direct edit keeps stays a field once this redline is
+    // accepted, rather than coming back as its displayed text.
+    keepFieldsOf: (source) => planTextChanges(source, replacement),
   });
   if (plan === null) {
     return null;
   }
+  // What the direct edit would write, character by character: the insertions
+  // below carry it, so accepting this redline gives exactly that.
+  const directPlan = planDocumentReplacement({
+    doc: tr.doc,
+    item,
+    replacement,
+    planChanges: (source) => planTextChanges(source, replacement),
+  });
+  const allocatedMarks =
+    directPlan === null
+      ? null
+      : directReplacementMarks({ doc: tr.doc, plan: directPlan, replacementBackground });
+  const unifiesFormatting =
+    directPlan === null ? false : replacementUnifiesFormatting(tr.doc, directPlan);
 
   let nextTr = tr;
   let backgroundRevisionIds: readonly number[] = [];
@@ -4549,9 +4888,48 @@ const applyMinimalTrackedReplacement = ({
         !(clearsBackground && BACKGROUND_MARK_NAMES.has(mark.type.name)),
     );
 
+  // Where each change's text starts in the replacement.
+  const replacementStarts: number[] = [];
+  let replacementShift = 0;
+  for (const { change } of plan.planned) {
+    replacementStarts.push(change.start + replacementShift);
+    replacementShift += change.text.length - (change.end - change.start);
+  }
+  const insertedNodes = (
+    text: string,
+    replacementStart: number,
+    fallback: readonly Mark[],
+  ): PMNode[] => {
+    if (allocatedMarks?.length !== replacement.length) {
+      return cleanTextInlineNodes({ schema, text, marks: insertedMarks(fallback) });
+    }
+    const marksAt = (offset: number): readonly Mark[] =>
+      allocatedMarks[replacementStart + offset] ?? fallback;
+    const nodes: PMNode[] = [];
+    let groupStart = 0;
+    for (let offset = 1; offset <= text.length; offset++) {
+      if (offset < text.length && Mark.sameSet(marksAt(offset), marksAt(groupStart))) {
+        continue;
+      }
+      nodes.push(
+        ...cleanTextInlineNodes({
+          schema,
+          text: text.slice(groupStart, offset),
+          marks: insertedMarks(marksAt(groupStart)),
+        }),
+      );
+      groupStart = offset;
+    }
+    return nodes;
+  };
+
   // Right to left, so a change never moves the positions of one before it.
   // Marking a deletion moves nothing; only the inserted text does.
-  for (const change of plan.planned.toReversed()) {
+  for (let plannedIndex = plan.planned.length - 1; plannedIndex >= 0; plannedIndex--) {
+    const change = plan.planned[plannedIndex];
+    if (change === undefined) {
+      panic("A planned replacement change went missing", { plannedIndex });
+    }
     const doc = nextTr.doc;
     let at: number;
     let marks: readonly Mark[];
@@ -4582,7 +4960,7 @@ const applyMinimalTrackedReplacement = ({
     if (change.text.length === 0) {
       continue;
     }
-    const nodes = cleanTextInlineNodes({ schema, text: change.text, marks: insertedMarks(marks) });
+    const nodes = insertedNodes(change.text, replacementStarts[plannedIndex] ?? 0, marks);
     nextTr = nextTr.insert(at, nodes);
     const end = at + Fragment.fromArray(nodes).size;
     nextTr = nextTr.addMark(at, end, insertion);
@@ -4590,7 +4968,13 @@ const applyMinimalTrackedReplacement = ({
       nextTr = nextTr.addMark(at, end, commentMark);
     }
   }
-  return { type: "applied", transaction: nextTr, backgroundRevisionIds, nextRevisionId };
+  return {
+    type: "applied",
+    transaction: nextTr,
+    backgroundRevisionIds,
+    nextRevisionId,
+    unifiesFormatting,
+  };
 };
 
 type TouchedBackgroundOptions = {
@@ -4808,6 +5192,14 @@ const resolveOperation = ({
     const selectedText = currentText.slice(startOffset, endOffset);
     if (hashFolioAIBlockText(selectedText) !== selectedTextHash) {
       return { type: "skip", reason: "staleRange" };
+    }
+    const characterSplit = describeCharacterSplit(
+      currentText,
+      [startOffset, endOffset],
+      operation.type === "replaceRange" ? "grapheme" : "codePoint",
+    );
+    if (characterSplit !== null) {
+      return { type: "skip", reason: "splitsCharacter", message: characterSplit };
     }
     const range = resolveCleanTextRange({ cleanBlock, startOffset, endOffset });
     if (range === null) {
@@ -5169,6 +5561,14 @@ const resolveOperation = ({
     if (currentText.slice(operation.offset, operation.offset + separator.length) !== separator) {
       return { type: "skip", reason: "staleRange" };
     }
+    const characterSplit = describeCharacterSplit(
+      currentText,
+      [startOffset, endOffset],
+      "grapheme",
+    );
+    if (characterSplit !== null) {
+      return { type: "skip", reason: "splitsCharacter", message: characterSplit };
+    }
     const range = resolveCleanTextRange({ cleanBlock, startOffset, endOffset });
     if (range === null || !canSplit(doc, range.from)) {
       return { type: "skip", reason: "unsupportedBlock" };
@@ -5307,7 +5707,11 @@ const resolveOperation = ({
   }
 
   const quote = getOperationQuote(operation);
-  const range = resolveTextInCleanBlock(cleanBlock, quote || currentText);
+  const range = resolveTextInCleanBlock(
+    cleanBlock,
+    quote || currentText,
+    operation.type === "replaceInBlock" ? "grapheme" : "codePoint",
+  );
   if (range.type !== "resolved") {
     return range;
   }
@@ -5334,9 +5738,8 @@ type OperationResolutionSkip = {
 const resolveTextInCleanBlock = (
   cleanBlock: ReturnType<typeof buildCleanBlockText>,
   find: string,
-):
-  | { type: "resolved"; from: number; to: number }
-  | { type: "skip"; reason: FolioAIEditSkipReason } => {
+  strictness: CharacterBoundaryStrictness,
+): { type: "resolved"; from: number; to: number } | OperationResolutionSkip => {
   if (find.length === 0) {
     return { type: "skip", reason: "emptyOperation" };
   }
@@ -5348,6 +5751,16 @@ const resolveTextInCleanBlock = (
   }
   if (text.includes(find, firstIndex + 1)) {
     return { type: "skip", reason: "ambiguousFind" };
+  }
+  // A `find` beginning or ending with half a surrogate pair — or, for a
+  // replacement, with part of a cluster — matches inside a character.
+  const characterSplit = describeCharacterSplit(
+    text,
+    [firstIndex, firstIndex + find.length],
+    strictness,
+  );
+  if (characterSplit !== null) {
+    return { type: "skip", reason: "splitsCharacter", message: `the match's ${characterSplit}` };
   }
 
   const range = resolveCleanTextRange({

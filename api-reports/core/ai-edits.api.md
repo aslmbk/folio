@@ -198,6 +198,19 @@ export type FolioAIEditNormalization =
     id: string;
     code: "unpairedMove";
     moveId: string;
+} |
+/**
+* A text replacement rewrote a stretch whose characters did not all carry
+* the same formatting, link or comment. The new text takes the formatting
+* of the first character it replaces, and every link and comment over the
+* stretch; text the replacement keeps keeps its own. A change spanning
+* several words keeps only whole words, so no word is left partly in the
+* old formatting. Direct and tracked modes allocate alike: accepting the
+* tracked replacement leaves what the direct one writes.
+*/
+    {
+    id: string;
+    code: "uniformReplacementFormatting";
 };
 
 // @public (undocumented)
@@ -446,7 +459,26 @@ export type FolioAIEditSkipReason = "missingBlock" | "changedBlock" | "ambiguous
 * has. Nothing was applied; `message` names the values that do not fit.
 * Supply fewer values, or anchor the operation where the table has room.
 */
-"payloadDoesNotFit";
+"payloadDoesNotFit" |
+/**
+* An earlier operation of the same batch already claims this operation's
+* target: it deletes, rewrites, splits or merges the block this one edits,
+* or edits an overlapping stretch of its text. Operations of one batch all
+* address the document as it was read, so this one would have landed on
+* positions the other had moved. Nothing of it was applied; re-read the
+* document after the batch and send it again, on its own.
+*/
+"overlappingOperation" |
+/**
+* An offset of the operation falls inside one character: between the two
+* UTF-16 halves of a surrogate pair (an emoji, a character outside the
+* Basic Multilingual Plane), or — for an operation that changes text or
+* breaks a paragraph — inside a grapheme cluster (a letter and its combining
+* marks, an emoji sequence joined with zero-width joiners, a flag). Text cut
+* there cannot be written back whole. Nothing was applied; move the offset
+* to the boundary before or after the character.
+*/
+"splitsCharacter";
 
 // @public
 export type FolioAIEditSnapshot = FolioContentSnapshot<FolioAIBlock> & {

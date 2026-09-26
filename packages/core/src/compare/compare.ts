@@ -745,6 +745,8 @@ const COMPARE_SKIP_DISPOSITION = {
   documentVersionMismatch: "fatal",
   documentNotEditable: "fatal",
   payloadDoesNotFit: "unwritable",
+  overlappingOperation: "fatal",
+  splitsCharacter: "unwritable",
 } as const satisfies Record<FolioAIEditSkipReason, "fatal" | "unwritable">;
 
 export const getCompareSkipDisposition = (reason: FolioAIEditSkipReason): "fatal" | "unwritable" =>
