@@ -1,0 +1,98 @@
+/**
+ * Scenarios that reproduce an open issue run as expected failures: each must
+ * still fail, with an error matching the issue's symptom. When the fix lands
+ * the scenario passes, the expected failure fails ("no longer reproduces"),
+ * and the marker is removed so the scenario guards the fix from then on.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+export const OPEN_ISSUES = {
+  1103: "operations accept a numbering.numId the package does not define",
+} as const;
+
+/**
+ * Found by these scenarios and not yet filed or fixed; each has a minimal
+ * repro in the scenario that pins it.
+ */
+export const FINDINGS = {
+  STALE_LIST_LABELS:
+    "after an operation adds, removes or renumbers list items, the reviewer's getContent() / snapshot labels keep the numbers read at open until a save and reopen",
+  COMMENT_ANCHOR_DRIFT:
+    "a comment whose range an edit splits or replaces reads a different anchoredText before the save (the marked text) than after it (everything between the range markers)",
+  NOTE_REFERENCE_TEXT:
+    'getContent(), the snapshot and read_document render a footnote/endnote reference as its w:id ("7"), while the page shows its number ("1", or "i" for an endnote)',
+  COMPARE_INSERTED_LIST_ITEMS:
+    "generateRedlineDocx inserts a paragraph the revised version has as a list item as a plain paragraph (the insertion carries only its style), so accepting the redline loses the bullet or number",
+  REJECT_SPLIT_AROUND_INSERTED_TABLE:
+    "rejecting every change leaves a tracked split in place when a tracked table was inserted after the split's first half (the join is attempted while the table still stands between the halves)",
+  BATCH_SPLIT_THEN_DELETE:
+    "a tracked batch that splits a block and deletes the same block deletes the wrong span: part of the text survives, and accepting leaves an empty paragraph",
+  SUGGESTED_ACCEPT_ALL_LOSES_INSERTS:
+    "after a run of suggested edits that includes a table column and list inserts, acceptAll keeps the inserted paragraphs in the reviewer but the save drops them (found by fuzz; no smaller repro yet)",
+  REJECT_ALL_JOIN_INTO_INSERTED_PARAGRAPH:
+    "rejectAll throws (`Index 6 out of range`) when a tracked merge joined a tracked split's second half into a tracked inserted paragraph: the bulk resolution works with positions past the end of the resolved document",
+  UNMARKED_LIST_ITEM_KIND:
+    "a paragraph whose numbering names a level its instance does not define shows no marker, but getContent(), the snapshot and read_document call it a listItem while docxToMarkdown renders plain text",
+} as const;
+
+export type OpenIssue = keyof typeof OPEN_ISSUES;
+export type Finding = keyof typeof FINDINGS;
+
+const describeKnown = (known: OpenIssue | Finding): string =>
+  typeof known === "number" ? `#${known} (${OPEN_ISSUES[known]})` : `${known} (${FINDINGS[known]})`;
+
+/**
+ * operations.test.ts runs (fixture / mode) whose operation sequence reaches a
+ * finding; they run as expected failures there.
+ */
+export const KNOWN_FAILING_OPERATION_RUNS: readonly {
+  fixture: string;
+  mode: string;
+  finding: Finding;
+}[] = [
+  {
+    fixture: "comments",
+    mode: "tracked-changes",
+    finding: "REJECT_ALL_JOIN_INTO_INSERTED_PARAGRAPH",
+  },
+];
+
+/**
+ * Seeded flows (support/fuzz.ts) that reproduce a finding. The default fuzz
+ * run skips them and known-issues.test.ts runs them as expected failures.
+ */
+export const KNOWN_FAILING_FLOWS: readonly { seed: number; steps: number; finding: Finding }[] = [
+  { seed: 20_260_933, steps: 10, finding: "SUGGESTED_ACCEPT_ALL_LOSES_INSERTS" },
+  { seed: 99, steps: 15, finding: "SUGGESTED_ACCEPT_ALL_LOSES_INSERTS" },
+  { seed: 101, steps: 15, finding: "SUGGESTED_ACCEPT_ALL_LOSES_INSERTS" },
+];
+
+export const expectedFailure = (
+  issue: OpenIssue | Finding,
+  name: string,
+  symptom: RegExp,
+  body: () => Promise<void> | void,
+): void => {
+  const tag = typeof issue === "number" ? `#${issue}` : issue;
+  test(`${name} [expected failure: ${tag}]`, async () => {
+    let failure: unknown;
+    try {
+      await body();
+    } catch (error) {
+      failure = error;
+    }
+    if (failure === undefined) {
+      assert.fail(
+        `${describeKnown(issue)} no longer reproduces: "${name}" passes. ` +
+          "Make it a plain scenario and drop the entry from support/known-issues.ts.",
+      );
+    }
+    const message = failure instanceof Error ? failure.message : String(failure);
+    if (!symptom.test(message)) {
+      // It fails, but not the way the issue does: a real regression.
+      throw failure;
+    }
+  });
+};

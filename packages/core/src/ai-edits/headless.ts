@@ -66,8 +66,13 @@ import {
 } from "../internal/sectionEndpointResolution";
 import {
   acceptAIEditRevision,
+  acceptAllSuggestions,
+  acceptSuggestion,
   rejectAIEditRevision,
+  rejectAllSuggestions,
+  rejectSuggestion,
   resolveAllChangesInHeadlessState,
+  suggestionIdOfRevision,
 } from "../prosemirror/commands/comments";
 import { proseDocToBlocks, updateDocumentContent } from "../prosemirror/conversion/fromProseDoc";
 import { completeNumberingForDoc } from "../prosemirror/listInstanceReferences";
@@ -799,6 +804,26 @@ const resolveReviewedState = (state: EditorState, view: FolioReviewedView): Edit
     return state;
   }
   return resolveAllChangesInHeadlessState(state, view === "original" ? "reject" : "accept");
+};
+
+/**
+ * Turn `"suggested"` edits into ordinary tracked changes (accept) or remove
+ * them (reject) before a bulk resolve. The bulk resolver reads revision marks;
+ * a suggested whole-paragraph or table insert is flagged on the node instead,
+ * and a save drops a node still flagged, so accepting without this step lost
+ * the accepted paragraph.
+ */
+const settleSuggestions = (
+  state: EditorState,
+  mode: "accept" | "reject",
+  author: string,
+): EditorState => {
+  let settled = state;
+  const command = mode === "accept" ? acceptAllSuggestions({ author }) : rejectAllSuggestions();
+  command(state, (transaction) => {
+    settled = state.apply(transaction);
+  });
+  return settled;
 };
 
 const createHeadlessPlugins = (
@@ -2110,6 +2135,13 @@ export class FolioDocxReviewer {
 
   private acceptChangeInternal(target: FolioReviewChange | number): boolean {
     const id = revisionIdOf(target);
+    // A suggested change first becomes an ordinary tracked change: a
+    // suggested paragraph insert is flagged on its node, which accepting the
+    // revision marks alone leaves behind, and a save drops a flagged node.
+    const suggestionId = suggestionIdOfRevision(this.state, id);
+    if (suggestionId !== null) {
+      this.runCommand(acceptSuggestion(suggestionId, { author: this.author }));
+    }
     const bodyChanged = this.runCommand(acceptAIEditRevision(id));
     const sectionChanged = this.resolveFinalSectionProperties("accept", id) > 0;
     return bodyChanged || sectionChanged;
@@ -2125,6 +2157,11 @@ export class FolioDocxReviewer {
 
   private rejectChangeInternal(target: FolioReviewChange | number): boolean {
     const id = revisionIdOf(target);
+    // A suggestion is rejected whole, node flags included.
+    const suggestionId = suggestionIdOfRevision(this.state, id);
+    if (suggestionId !== null && this.runCommand(rejectSuggestion(suggestionId))) {
+      return true;
+    }
     const bodyChanged = this.runCommand(rejectAIEditRevision(id));
     const sectionChanged = this.resolveFinalSectionProperties("reject", id) > 0;
     return bodyChanged || sectionChanged;
@@ -2205,7 +2242,10 @@ export class FolioDocxReviewer {
         continue;
       }
       count += getTrackedChangesFromDoc(state.doc).length;
-      this.setEditableStoryState(handle, resolveAllChangesInHeadlessState(state, mode));
+      this.setEditableStoryState(
+        handle,
+        resolveAllChangesInHeadlessState(settleSuggestions(state, mode, this.author), mode),
+      );
     }
     return count;
   }

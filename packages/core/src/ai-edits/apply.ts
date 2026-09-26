@@ -3459,12 +3459,21 @@ const applyFolioAIEditOperationsInternal = ({
         };
         const rowPositions: number[] = [];
         let rowOffset = livePosition + 1;
+        let holdsPendingInsertedRow = false;
         liveTable.forEach((row) => {
           if (row.type.spec["tableRole"] === "row" && row.attrs["trDel"] == null) {
             rowPositions.push(rowOffset);
+            holdsPendingInsertedRow ||= row.attrs["trIns"] != null;
           }
           rowOffset += row.nodeSize;
         });
+        // A row cannot be both a pending insertion and a pending deletion (the
+        // model refuses the pair at save), so a table holding an inserted row
+        // is refused, as `deleteTableRow` refuses that row.
+        if (holdsPendingInsertedRow) {
+          skipped.push({ id: item.operation.id, reason: "unsupportedBlock" });
+          continue;
+        }
         if (rowPositions.length === 0) {
           skipped.push({ id: item.operation.id, reason: "noopOperation" });
           continue;
@@ -3489,8 +3498,18 @@ const applyFolioAIEditOperationsInternal = ({
         // the mark lands before the properties do. Rebuilding the node from
         // the stale attributes dropped that mark without a trace: the
         // properties applied, the merge silently did not.
-        const blockPosition = tr.mapping.map(item.blockFrom);
-        const liveBlock = tr.doc.nodeAt(blockPosition) ?? item.blockNode;
+        //
+        // An earlier operation of the batch may also have removed the
+        // paragraph (a direct `deleteBlock`, or a merge that joined it away):
+        // its position then maps onto whatever follows, which is not the
+        // block this operation names.
+        const mapped = tr.mapping.mapResult(item.blockFrom);
+        const liveBlock = mapped.deletedAfter ? null : tr.doc.nodeAt(mapped.pos);
+        if (!liveBlock || liveBlock.type !== item.blockNode.type) {
+          skipped.push({ id: item.operation.id, reason: "missingBlock" });
+          continue;
+        }
+        const blockPosition = mapped.pos;
         const appliedProperties = applyBlockParagraphProperties({
           tr,
           position: blockPosition,

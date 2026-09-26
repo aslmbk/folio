@@ -846,12 +846,47 @@ function stripSuggestedInlineMarks(
   return next;
 }
 
+/** A paragraph's attrs without its suggested property changes, or `null` when it has none. */
+function stripSuggestedParagraphPropertyChanges(node: PMNode): Record<string, unknown> | null {
+  const propertyChanges = expectParagraphAttrs(node)._propertyChanges;
+  if (!Array.isArray(propertyChanges)) {
+    return null;
+  }
+  if (!propertyChanges.some(({ info }) => info.provenance === "suggested")) {
+    return null;
+  }
+  const removal = removeParagraphPropertyChanges(
+    propertyChanges,
+    ({ info }) => info.provenance === "suggested",
+  );
+  if (removal.type === "unchanged") {
+    return null;
+  }
+  const nextAttrs: Record<string, unknown> = {
+    ...node.attrs,
+    _propertyChanges: removal.remaining.length > 0 ? removal.remaining : null,
+  };
+  // Only a trailing run of suggestions determines the live pPr. Suggested
+  // changes before a retained tracked entry instead rewrite that entry's
+  // previous snapshot above, so removing the proposal cannot overwrite the
+  // later authored state.
+  if (removal.type === "restore-previous") {
+    Object.assign(nextAttrs, paragraphRejectAttrPatch(removal.previousFormatting));
+    nextAttrs["_originalFormatting"] = paragraphRejectOriginalFormatting(
+      removal.previousFormatting,
+      nextAttrs["_originalFormatting"],
+    );
+  }
+  return nextAttrs;
+}
+
 /**
  * Compute the node attrs a block/structural node keeps once its suggested
  * revision markers are neutralized. Returns `null` when nothing changes.
  *
- * - a suggested `trDel` / `cellMarker` (insertion or deletion) is cleared so
- *   the row/cell serializes as though the proposed change never happened;
+ * - a suggested `trDel` / `cellMarker` (insertion or deletion) or paragraph
+ *   mark revision (`pPrMark`) is cleared so the node serializes as though the
+ *   proposed change never happened;
  *   merge markers never carry suggestion provenance (structurally excluded);
  * - suggested INSERT markers are handled by the caller, which drops the whole
  *   node instead of clearing an attr.
@@ -861,37 +896,22 @@ function stripSuggestedInlineMarks(
 function stripSuggestedNodeAttrs(node: PMNode): Record<string, unknown> | null {
   const name = node.type.name;
   if (name === "paragraph") {
-    const attrs = expectParagraphAttrs(node);
-    const propertyChanges = attrs._propertyChanges;
-    if (!Array.isArray(propertyChanges)) {
-      return null;
+    const stripped = stripSuggestedParagraphPropertyChanges(node);
+    // A suggested paragraph-mark revision (the join a suggested block
+    // deletion proposes) is a proposal like any other: the paragraph keeps
+    // its break until the suggestion is accepted.
+    // The applier stamps the provenance onto the mark's info at run time; the
+    // model type of that info does not declare it.
+    const markInfo: unknown = expectParagraphAttrs(node).pPrMark?.info;
+    const suggestedMark =
+      typeof markInfo === "object" &&
+      markInfo !== null &&
+      "provenance" in markInfo &&
+      markInfo.provenance === "suggested";
+    if (!suggestedMark) {
+      return stripped;
     }
-    if (!propertyChanges.some(({ info }) => info.provenance === "suggested")) {
-      return null;
-    }
-    const removal = removeParagraphPropertyChanges(
-      propertyChanges,
-      ({ info }) => info.provenance === "suggested",
-    );
-    if (removal.type === "unchanged") {
-      return null;
-    }
-    const nextAttrs: Record<string, unknown> = {
-      ...node.attrs,
-      _propertyChanges: removal.remaining.length > 0 ? removal.remaining : null,
-    };
-    // Only a trailing run of suggestions determines the live pPr. Suggested
-    // changes before a retained tracked entry instead rewrite that entry's
-    // previous snapshot above, so removing the proposal cannot overwrite the
-    // later authored state.
-    if (removal.type === "restore-previous") {
-      Object.assign(nextAttrs, paragraphRejectAttrPatch(removal.previousFormatting));
-      nextAttrs["_originalFormatting"] = paragraphRejectOriginalFormatting(
-        removal.previousFormatting,
-        nextAttrs["_originalFormatting"],
-      );
-    }
-    return nextAttrs;
+    return { ...(stripped ?? node.attrs), pPrMark: null };
   }
   if (name === "tableRow") {
     const rowAttrs = expectTableRowAttrs(node);
@@ -2449,6 +2469,38 @@ const sameRevisionLayer = (
   left.initials === right.initials &&
   left.outerWrapperCount === right.outerWrapperCount;
 
+type EnclosingInsertionAncestorsOptions = {
+  /** The insertion a deletion mark shares its text with, if any. */
+  insertionMark: Mark | undefined;
+  ancestors: readonly TrackedRevisionAncestor[];
+  node: PMNode;
+};
+
+/** The deletion's ancestor path, with the insertion it sits in as the outermost layer. */
+const enclosingInsertionAncestors = ({
+  insertionMark,
+  ancestors,
+  node,
+}: EnclosingInsertionAncestorsOptions): readonly TrackedRevisionAncestor[] => {
+  if (!insertionMark) {
+    return ancestors;
+  }
+  const attrs = expectTrackedChangeMarkAttrs(insertionMark);
+  if (ancestors.some(({ revisionId }) => revisionId === attrs.revisionId)) {
+    return ancestors;
+  }
+  const layer: TrackedRevisionAncestor = {
+    type: attrs.moveKind === "moveTo" ? "moveTo" : "insertion",
+    revisionId: attrs.revisionId,
+    author: attrs.author || "Unknown",
+    ...(attrs.date ? { date: attrs.date } : {}),
+    ...(attrs.utcDate ? { utcDate: attrs.utcDate } : {}),
+    ...(attrs.initials ? { initials: attrs.initials } : {}),
+    outerWrapperCount: attrs._docxOuterWrapperCount ?? inlineWrapperStackOf(node).length,
+  };
+  return [layer, ...ancestors];
+};
+
 const revisionInfoFromLayer = (layer: TrackedRevisionAncestor): TrackedChangeInfo => ({
   id: layer.revisionId,
   author: layer.author,
@@ -2878,11 +2930,20 @@ function extractParagraphContent(
       // Finish any current content
       flushCurrentInline();
 
-      const changeMark = insertionMark ?? deletionMark;
+      // Text both inserted and deleted (a tracked deletion over a pending
+      // insertion) is a deletion inside the insertion: `w:ins > w:del`, the
+      // shape the parser reads back as a deletion whose ancestor is the
+      // insertion. Written as the insertion alone, the deletion would be lost.
+      const changeMark = deletionMark ?? insertionMark;
       if (!changeMark) {
         return;
       }
       const changeAttrs = expectTrackedChangeMarkAttrs(changeMark);
+      const revisionAncestors = enclosingInsertionAncestors({
+        insertionMark: deletionMark ? insertionMark : undefined,
+        ancestors: changeAttrs._docxRevisionAncestors ?? [],
+        node,
+      });
       // Filter out the tracked change mark for text formatting extraction
       const otherMarks = node.marks.filter(
         (m) => m.type.name !== "insertion" && m.type.name !== "deletion",
@@ -2909,14 +2970,14 @@ function extractParagraphContent(
       // `w:del w:id="5"` from different reviewers would coincidentally
       // fuse into a phantom move pair.
       let type: TrackedRunWrapper["type"];
-      if (insertionMark) {
+      if (changeMark === insertionMark) {
         type = changeAttrs.moveKind === "moveTo" ? "moveTo" : "insertion";
       } else {
         type = changeAttrs.moveKind === "moveFrom" ? "moveFrom" : "deletion";
       }
       const outerWrapperCount =
         changeAttrs._docxOuterWrapperCount ?? inlineWrapperStackOf(node).length;
-      const trackedChangeKey = `${type}:${JSON.stringify(info)}:${outerWrapperCount}:${JSON.stringify(changeAttrs._docxRevisionAncestors ?? [])}`;
+      const trackedChangeKey = `${type}:${JSON.stringify(info)}:${outerWrapperCount}:${JSON.stringify(revisionAncestors)}`;
       if (linkMark) {
         const linkKey = getLinkKey(linkMark);
         if (
@@ -2928,7 +2989,7 @@ function extractParagraphContent(
           const hyperlink = createIndexedHyperlink(linkMark);
           const wrapper = createTrackedRunWrapper(type, info, hyperlink);
           revisionOuterWrapperCounts.set(wrapper, outerWrapperCount);
-          revisionAncestorsByWrapper.set(wrapper, changeAttrs._docxRevisionAncestors ?? []);
+          revisionAncestorsByWrapper.set(wrapper, revisionAncestors);
           content.push(wrapper);
           currentTrackedChange = {
             type: "hyperlink",
@@ -2977,7 +3038,7 @@ function extractParagraphContent(
       ) {
         const wrapper = createTrackedRunWrapper(type, info);
         revisionOuterWrapperCounts.set(wrapper, outerWrapperCount);
-        revisionAncestorsByWrapper.set(wrapper, changeAttrs._docxRevisionAncestors ?? []);
+        revisionAncestorsByWrapper.set(wrapper, revisionAncestors);
         content.push(wrapper);
         currentTrackedChange = { type: "direct", key: trackedChangeKey, wrapper };
       }
