@@ -49,6 +49,9 @@ export type TextContextAction =
   | "addComment"
   | "acceptChange"
   | "rejectChange"
+  | "restartNumbering"
+  | "continueNumbering"
+  | "setNumberingValue"
   | `custom:${string}`;
 
 /** Built-in actions — everything except host-provided `custom:*` entries. */
@@ -202,10 +205,13 @@ function getActionIcon(action: TextContextAction): React.ReactNode {
       return <MessageSquarePlusIcon size={ICON_SIZE} />;
     case "acceptChange":
     case "rejectChange":
+    case "restartNumbering":
+    case "continueNumbering":
+    case "setNumberingValue":
     case "separator":
-      // Tracked-change menu items use a different icon set rendered by
-      // the surrounding menu component; this dispatcher leaves them
-      // iconless.
+      // Tracked-change and list-numbering items use a different icon set
+      // rendered by the surrounding menu component; this dispatcher leaves
+      // them iconless.
       return null;
   }
 }
@@ -383,6 +389,9 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
         case "deleteColumn":
         case "tableBordersAll":
         case "tableBordersNone":
+        case "restartNumbering":
+        case "continueNumbering":
+        case "setNumberingValue":
           // Caller controls these enable states via the explicit
           // `disabled` field on TextContextMenuItem — fall through to
           // enabled.
@@ -768,6 +777,9 @@ export function getTextActionLabel(action: TextContextAction): string {
     addComment: "Comment",
     acceptChange: "Accept Change",
     rejectChange: "Reject Change",
+    restartNumbering: "Restart at 1",
+    continueNumbering: "Continue Numbering",
+    setNumberingValue: "Set Numbering Value…",
   } as const satisfies Record<BuiltInTextContextAction, string>;
   return isBuiltInAction(action) ? labels[action] : "";
 }
@@ -795,6 +807,9 @@ export function getTextActionShortcut(action: TextContextAction): string {
     addComment: "",
     acceptChange: "",
     rejectChange: "",
+    restartNumbering: "",
+    continueNumbering: "",
+    setNumberingValue: "",
   } as const satisfies Record<BuiltInTextContextAction, string>;
   return isBuiltInAction(action) ? shortcuts[action] : "";
 }
@@ -829,6 +844,9 @@ export function isTextActionAvailable(
       return hasSelection;
     case "acceptChange":
     case "rejectChange":
+    case "restartNumbering":
+    case "continueNumbering":
+    case "setNumberingValue":
       return true; // Visibility controlled by context menu builder
     case "selectAll":
       return true;

@@ -70,6 +70,8 @@ import {
   resolveAllChangesInHeadlessState,
 } from "../prosemirror/commands/comments";
 import { proseDocToBlocks, updateDocumentContent } from "../prosemirror/conversion/fromProseDoc";
+import { completeNumberingForDoc } from "../prosemirror/listInstanceReferences";
+import { storyListNumbering } from "../prosemirror/storyListNumbering";
 import {
   footnoteToProseDoc,
   headerFooterToProseDoc,
@@ -1338,9 +1340,10 @@ export class FolioDocxReviewer {
    * packages can be compared entry by entry.
    */
   readNumberingDefinitions(): FolioNumberingLevel[] {
-    return numberingLevelsOf(this.baseDocument.package.numbering).toSorted(
-      (left, right) => left.numId - right.numId || left.level - right.level,
-    );
+    // Including the lists operations started, which only their paragraphs define so far.
+    return numberingLevelsOf(
+      completeNumberingForDoc(this.baseDocument.package.numbering, this.state.doc),
+    ).toSorted((left, right) => left.numId - right.numId || left.level - right.level);
   }
 
   /** Return parsed package metadata without exposing the mutable document model. */
@@ -2702,6 +2705,11 @@ export class FolioDocxReviewer {
       if (entry.state === entry.initialState) {
         continue;
       }
+      // A list an operation started in this story is defined by its paragraphs.
+      const lists = storyListNumbering(entry.state, document.package.numbering);
+      if (lists.numbering) {
+        document.package.numbering = lists.numbering;
+      }
       if (entry.handle.type === "header" || entry.handle.type === "footer") {
         const source =
           entry.handle.type === "header"
@@ -2712,7 +2720,7 @@ export class FolioDocxReviewer {
         }
         const edited = {
           ...source,
-          content: proseDocToBlocks(entry.state.doc, source.content, document.package.styles),
+          content: proseDocToBlocks(lists.doc, source.content, document.package.styles),
         };
         if (entry.handle.type === "header") {
           headers ??= new Map(document.package.headers);
@@ -2733,7 +2741,7 @@ export class FolioDocxReviewer {
         }
         const edited = {
           ...source,
-          content: proseDocToBlocks(entry.state.doc, source.content, document.package.styles),
+          content: proseDocToBlocks(lists.doc, source.content, document.package.styles),
         };
         footnotes ??= [...(document.package.footnotes ?? [])];
         const index = footnotes.findIndex((note) => note.id === noteId);
@@ -2751,7 +2759,7 @@ export class FolioDocxReviewer {
       }
       const edited = {
         ...source,
-        content: proseDocToBlocks(entry.state.doc, source.content, document.package.styles),
+        content: proseDocToBlocks(lists.doc, source.content, document.package.styles),
       };
       endnotes ??= [...(document.package.endnotes ?? [])];
       const index = endnotes.findIndex((note) => note.id === noteId);

@@ -7,35 +7,40 @@
 
 import { panic } from "better-result";
 import { InputRule, inputRules, undoInputRule } from "prosemirror-inputrules";
-import type { Command, EditorState, Plugin, Transaction } from "prosemirror-state";
+import type { Node as PMNode } from "prosemirror-model";
+import { Plugin, type Command, type EditorState, type Transaction } from "prosemirror-state";
 
 import { expectParagraphAttrs } from "../../attrs";
 import {
-  hasSerializableParagraphPropertyChange,
-  PPR_CHANGE_SCOPED_ATTR_KEYS,
-} from "../../commands/propertyChangeScope";
-import { makeRevisionInfo, SUGGESTION_META } from "../../plugins/suggestionMode";
-import { CLEARED_LIST_RENDERING_ATTRS, LIST_RENDERING_ATTR_KEYS } from "../../listMarker";
-import { isBulletLevel } from "../../../docx/numberingParser";
-import { getDocumentNumbering } from "../../plugins/documentNumbering";
-import {
   NO_PARAGRAPH_NUMBERING,
   paragraphNumberingLevel,
-  paragraphNumberingReference,
   paragraphNumberingReferenceId,
 } from "../../../docx/numberingReference";
+import { LIST_MARKER_PATTERN, listRequestsForMarker } from "../../listAutoformatMarkers";
+import { CLEARED_LIST_RENDERING_ATTRS } from "../../listMarker";
+import {
+  applyParagraphUpdates,
+  continueNumbering,
+  listItemAttrs,
+  resolveListTarget,
+  type ListRequest,
+  restartNumbering,
+  setNumberingValue,
+} from "../../listNumbering";
 import { resolveListState, type ListType } from "../../listState";
 import { paragraphNumberingAttr, type ParagraphNumberingAttr } from "../../numberingAttr";
+import { getDocumentNumbering } from "../../plugins/documentNumbering";
+import {
+  makeRevisionInfo,
+  SUGGESTED_TEXT_INPUT_META,
+  suggestRangeDeletion,
+} from "../../plugins/suggestionMode";
 import { listLevelAttrPatch } from "../../styles/resolvedStyleAttrs";
 import { createExtension } from "../create";
 import { goToNextCell, goToPrevCell } from "../nodes/TableExtension";
 import { Priority } from "../types";
 import type { ExtensionRuntime } from "../types";
-import type {
-  ParagraphAttrs,
-  ParagraphAttrsPatch,
-  ParagraphPropertyChangeAttrs,
-} from "../../schema/nodes";
+import type { ParagraphAttrs, ParagraphAttrsPatch } from "../../schema/nodes";
 
 // ============================================================================
 // CHAIN COMMANDS HELPER
@@ -50,50 +55,6 @@ function chainCommands(...commands: Command[]): Command {
     }
     return false;
   };
-}
-
-// ============================================================================
-// TRACKED PARAGRAPH-PROPERTY CHANGE (suggesting mode)
-// ============================================================================
-
-function appendParagraphPropertyChange(
-  attrs: Record<string, unknown>,
-  existing: ParagraphPropertyChangeAttrs[] | undefined,
-  previousFormatting: Record<string, unknown>,
-  rev: { id: number; author: string; date: string },
-): Record<string, unknown> {
-  return {
-    ...attrs,
-    _propertyChanges: [
-      ...(existing ?? []),
-      {
-        type: "paragraphPropertyChange",
-        info: { id: rev.id, author: rev.author, date: rev.date },
-        previousFormatting,
-      },
-    ],
-  };
-}
-
-function getPreviousListFormatting(attrs: Record<string, unknown>): Record<string, unknown> {
-  const previousFormatting: Record<string, unknown> = {};
-  // Rejecting a pPrChange restores the stored record WHOLESALE within the
-  // CT_PPrBase scope (a scoped key absent from the record resets to null —
-  // see propertyChangeScope.ts). Snapshot every non-null in-scope attr so a
-  // reject cannot wipe formatting the list toggle never touched.
-  for (const key of PPR_CHANGE_SCOPED_ATTR_KEYS) {
-    const value = attrs[key];
-    if (value != null) {
-      previousFormatting[key] = value;
-    }
-  }
-  // List-rendering bookkeeping snapshots with explicit nulls: these attrs are
-  // outside the wholesale scope, so only recorded keys restore on reject.
-  previousFormatting["numPr"] = attrs["numPr"] ?? null;
-  for (const key of LIST_RENDERING_ATTR_KEYS) {
-    previousFormatting[key] = attrs[key] ?? null;
-  }
-  return previousFormatting;
 }
 
 function clearListAttrs(attrs: ParagraphAttrs): Record<string, unknown> {
@@ -125,36 +86,70 @@ function hasActiveListNumbering(attrs: ParagraphAttrs): attrs is ActiveListParag
 // LIST COMMANDS
 // ============================================================================
 
-/**
- * The numbering instances Folio mints for its own toolbar lists. They are the
- * ids the autoformat rules and the list buttons create; a document Folio did
- * not create numbers its lists however its author did, which is why nothing
- * reads a list's kind off its id any more.
- */
-const FOLIO_BULLET_NUM_ID = 1;
-const FOLIO_NUMBERED_NUM_ID = 2;
-
 type ActiveListType = Exclude<ListType, "none">;
 
-const targetNumIdForIntent = (
-  numbering: ReturnType<typeof getDocumentNumbering>,
-  preferredNumId: number,
-  ilvl: number,
-  intent: ActiveListType,
-): number => {
-  const matchesIntent = (numId: number): boolean => {
-    const level = numbering?.getLevel(numId, ilvl) ?? null;
-    return level !== null && (isBulletLevel(level) ? "bullet" : "numbered") === intent;
-  };
-  if (matchesIntent(preferredNumId)) {
-    return preferredNumId;
-  }
-  return (
-    numbering?.definitions.nums.find(({ numId }) => matchesIntent(numId))?.numId ?? preferredNumId
-  );
+type ParagraphInRange = { pos: number; node: PMNode };
+
+const paragraphsBetween = (doc: PMNode, from: number, to: number): ParagraphInRange[] => {
+  const paragraphs: ParagraphInRange[] = [];
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (node.type.name !== "paragraph") {
+      return true;
+    }
+    paragraphs.push({ pos, node });
+    return false;
+  });
+  return paragraphs;
 };
 
-function toggleList(numId: number, intent: ActiveListType): Command {
+type NumberParagraphsOptions = {
+  state: EditorState;
+  /** Positions `from` and `to` are in `tr.doc`. */
+  tr: Transaction;
+  from: number;
+  to: number;
+  requests: readonly ListRequest[];
+};
+
+/**
+ * Make every paragraph from `from` to `to` an item of one list: the list next
+ * to them when it matches, else a new one (see `listNumbering.ts`). One
+ * target for the whole range, so a selection of plain paragraphs becomes one
+ * list rather than one list apiece.
+ */
+const numberParagraphs = ({ state, tr, from, to, requests }: NumberParagraphsOptions): boolean => {
+  const target = resolveListTarget({
+    numbering: getDocumentNumbering(state),
+    $from: tr.doc.resolve(from),
+    $to: tr.doc.resolve(to),
+    requests,
+  });
+  if (!target) {
+    return false;
+  }
+  applyParagraphUpdates({
+    tr,
+    state,
+    updates: paragraphsBetween(tr.doc, from, to).map(({ pos, node }) => ({
+      pos,
+      node,
+      // The definition, not the id, says what the paragraph now renders: the
+      // full attr group, so the painter, the next command and the save all
+      // read the same level.
+      next: listItemAttrs(
+        node.attrs,
+        {
+          numId: target.numId,
+          ilvl: paragraphNumberingLevel(expectParagraphAttrs(node).numPr) ?? target.ilvl,
+        },
+        target.numbering,
+      ),
+    })),
+  });
+  return true;
+};
+
+function toggleList(intent: ActiveListType): Command {
   return (state, dispatch) => {
     const { $from, $to } = state.selection;
 
@@ -162,92 +157,40 @@ function toggleList(numId: number, intent: ActiveListType): Command {
     if (paragraph.type.name !== "paragraph") {
       return false;
     }
-
-    const numbering = getDocumentNumbering(state);
-    const isInSameList =
-      resolveListState(numbering, expectParagraphAttrs(paragraph).numPr).type === intent;
-
-    const rev = makeRevisionInfo(state);
-    if (rev) {
-      let hasPendingChange = false;
-      state.doc.nodesBetween($from.pos, $to.pos, (node) => {
-        if (
-          node.type.name === "paragraph" &&
-          hasSerializableParagraphPropertyChange(expectParagraphAttrs(node)._propertyChanges)
-        ) {
-          hasPendingChange = true;
-          return false;
-        }
-        return undefined;
-      });
-      if (hasPendingChange) {
-        return false;
-      }
-    }
-
     if (!dispatch) {
       return true;
     }
 
-    // Which kind of list this id names comes from the numbering definitions,
-    // not from the id: `numId === 1` meant bullets only in a document Folio
-    // had created itself. A document that defines no such level has nothing to
-    // read, and the command is then the only statement of what it is creating.
-    let tr = state.tr;
-    const seen = new Set<number>();
-
-    state.doc.nodesBetween($from.pos, $to.pos, (node, pos) => {
-      if (node.type.name === "paragraph" && !seen.has(pos)) {
-        seen.add(pos);
-
-        let nextAttrs: Record<string, unknown>;
-
-        if (isInSameList) {
-          nextAttrs = clearListAttrs(expectParagraphAttrs(node));
-        } else {
-          const ilvl = paragraphNumberingLevel(expectParagraphAttrs(node).numPr) ?? 0;
-          const targetNumId = targetNumIdForIntent(numbering, numId, ilvl, intent);
-          const definition = numbering?.getLevel(targetNumId, ilvl) ?? null;
-          const isBullet = definition === null ? intent === "bullet" : isBulletLevel(definition);
-          nextAttrs = {
-            ...node.attrs,
-            ...CLEARED_LIST_RENDERING_ATTRS,
-            numPr: paragraphNumberingAttr(
-              paragraphNumberingReference({ numId: targetNumId, ilvl }),
-            ),
-            listIsBullet: isBullet,
-            listNumFmt: isBullet ? null : (definition?.numFmt ?? "decimal"),
-          };
-        }
-
-        if (rev) {
-          const existing = expectParagraphAttrs(node)._propertyChanges;
-          nextAttrs = appendParagraphPropertyChange(
-            nextAttrs,
-            existing,
-            getPreviousListFormatting(node.attrs),
-            rev,
-          );
-        }
-
-        tr = tr.setNodeMarkup(pos, undefined, nextAttrs);
-      }
-    });
-
-    if (rev) {
-      tr.setMeta(SUGGESTION_META, true);
+    const numbering = getDocumentNumbering(state);
+    const isItemOfKind = (node: PMNode): boolean =>
+      resolveListState(numbering, expectParagraphAttrs(node).numPr).type === intent;
+    const tr = state.tr;
+    if (isItemOfKind(paragraph)) {
+      // Only the items of that kind leave it: a plain paragraph in the
+      // selection has nothing to clear and nothing to track.
+      applyParagraphUpdates({
+        tr,
+        state,
+        updates: paragraphsBetween(state.doc, $from.pos, $to.pos)
+          .filter(({ node }) => isItemOfKind(node))
+          .map(({ pos, node }) => ({
+            pos,
+            node,
+            next: clearListAttrs(expectParagraphAttrs(node)),
+          })),
+      });
+    } else {
+      numberParagraphs({ state, tr, from: $from.pos, to: $to.pos, requests: [{ kind: intent }] });
     }
-
     dispatch(tr.scrollIntoView());
     return true;
   };
 }
 
-export const toggleBulletList: Command = (state, dispatch) =>
-  toggleList(FOLIO_BULLET_NUM_ID, "bullet")(state, dispatch);
+export const toggleBulletList: Command = (state, dispatch) => toggleList("bullet")(state, dispatch);
 
 export const toggleNumberedList: Command = (state, dispatch) =>
-  toggleList(FOLIO_NUMBERED_NUM_ID, "numbered")(state, dispatch);
+  toggleList("numbered")(state, dispatch);
 
 const attrsForListLevel = (
   state: EditorState,
@@ -601,31 +544,22 @@ function insertTab(): Command {
 // AUTOFORMAT (list markers typed at the start of a paragraph)
 // ============================================================================
 
-/**
- * Word's as-you-type markers. Each ends in the space that triggers the rule.
- * `1.` starts a numbered list at one, like the toolbar button; another typed
- * number stays text rather than being silently renumbered.
- */
-const BULLET_AUTOFORMAT = /^[-*] $/u;
-const NUMBERED_AUTOFORMAT = /^1\. $/u;
-
-const captureTransaction = (command: Command, state: EditorState): Transaction | null => {
-  const captured: { transaction: Transaction | null } = { transaction: null };
-  command(state, (transaction) => {
-    captured.transaction = transaction;
-  });
-  return captured.transaction;
-};
+/** Whether a typed marker may become a list here at all. */
+const acceptsListMarker = (paragraph: PMNode): boolean =>
+  paragraph.type.name === "paragraph" &&
+  // Toggling a list that already carries numbering would change or remove it.
+  paragraphNumberingReferenceId(expectParagraphAttrs(paragraph).numPr) === undefined;
 
 /**
- * Replace a typed marker with the list the toolbar button produces. Running the
- * command itself (rather than writing `numPr` here) keeps an autoformatted list
- * identical to a clicked one, down to what the document saves.
+ * Replace a typed marker with the list the toolbar button produces: the same
+ * target resolution and the same attrs, so an autoformatted list saves exactly
+ * like a clicked one. The marker's format and value choose the list (see
+ * `listAutoformatMarkers.ts`).
  */
-const listAutoformat = (marker: RegExp, toggleCommand: Command): InputRule =>
-  new InputRule(marker, (state, _match, start, end) => {
+const listAutoformatRule = (): InputRule =>
+  new InputRule(LIST_MARKER_PATTERN, (state, match, start, end) => {
     const { $from } = state.selection;
-    if ($from.parent.type.name !== "paragraph") {
+    if (!acceptsListMarker($from.parent)) {
       return null;
     }
     // A rule matches a window of text ending at the caret, so `^` alone would
@@ -633,38 +567,63 @@ const listAutoformat = (marker: RegExp, toggleCommand: Command): InputRule =>
     if (start !== $from.start()) {
       return null;
     }
-    // Toggling a list that already carries this numbering would remove it.
-    if (paragraphNumberingReferenceId(expectParagraphAttrs($from.parent).numPr) !== undefined) {
-      return null;
-    }
-    // Suggesting mode rewrites typed text as a tracked insertion before any
-    // rule runs; autoformatting there would drop that transaction's metadata.
+    // While suggesting, the suggestion plugin claims the typed text first;
+    // `suggestedListAutoformat` converts the marker after it.
     if (makeRevisionInfo(state)) {
       return null;
     }
-
-    const toggled = captureTransaction(toggleCommand, state);
-    if (!toggled) {
+    const requests = listRequestsForMarker(match[0]);
+    if (!requests) {
       return null;
     }
-
     const tr = state.tr.delete(start, end);
-    for (const step of toggled.steps) {
-      const mapped = step.map(tr.mapping);
-      if (mapped) {
-        tr.step(mapped);
-      }
-    }
-    return tr;
+    return numberParagraphs({ state, tr, from: start, to: start, requests }) ? tr : null;
   });
 
-const listAutoformatRules = (): Plugin =>
-  inputRules({
-    rules: [
-      listAutoformat(BULLET_AUTOFORMAT, toggleBulletList),
-      listAutoformat(NUMBERED_AUTOFORMAT, toggleNumberedList),
-    ],
+/**
+ * List autoformat while suggesting. The suggestion plugin has already
+ * recorded the typed space as a tracked insertion; this follows it with the
+ * marker's removal (a retraction of the author's own typing, or a tracked
+ * deletion of text that was there before) and the list as a tracked
+ * paragraph-property change. The follow-up is appended to the typing
+ * transaction, so one undo reverts both, and it is stored as the input rule's
+ * last conversion, so Backspace puts the marker back as it does while editing.
+ */
+const suggestedListAutoformat = (autoformat: Plugin): Plugin =>
+  new Plugin({
+    appendTransaction(transactions, _oldState, state) {
+      if (!transactions.some((tr) => tr.getMeta(SUGGESTED_TEXT_INPUT_META) === " ")) {
+        return null;
+      }
+      const { $head, empty } = state.selection;
+      if (!empty || !makeRevisionInfo(state) || !acceptsListMarker($head.parent)) {
+        return null;
+      }
+      const requests = listRequestsForMarker(
+        $head.parent.textBetween(0, $head.parentOffset, null, "\ufffc"),
+      );
+      if (!requests) {
+        return null;
+      }
+      const start = $head.start();
+      const tr = state.tr;
+      if (!suggestRangeDeletion(state, tr, start, $head.pos)) {
+        return null;
+      }
+      const from = tr.mapping.map(start);
+      if (!numberParagraphs({ state, tr, from, to: from, requests })) {
+        return null;
+      }
+      const caret = tr.mapping.map($head.pos);
+      tr.setMeta(autoformat, { transform: tr, from: caret, to: caret, text: "" });
+      return tr;
+    },
   });
+
+const listAutoformatPlugins = (): Plugin[] => {
+  const autoformat = inputRules({ rules: [listAutoformatRule()] });
+  return [autoformat, suggestedListAutoformat(autoformat)];
+};
 
 // ============================================================================
 // EXTENSION
@@ -675,13 +634,16 @@ export const ListExtension = createExtension({
   priority: Priority.High, // Must be before base keymap
   onSchemaReady(): ExtensionRuntime {
     return {
-      plugins: [listAutoformatRules()],
+      plugins: listAutoformatPlugins(),
       commands: {
         toggleBulletList: () => toggleBulletList,
         toggleNumberedList: () => toggleNumberedList,
         increaseListLevel: () => increaseListLevel,
         decreaseListLevel: () => decreaseListLevel,
         removeList: () => removeList,
+        restartNumbering: () => restartNumbering,
+        continueNumbering: () => continueNumbering,
+        setNumberingValue: (value: number) => setNumberingValue(value),
       },
       keyboardShortcuts: {
         Tab: chainCommands(goToNextCell(), increaseListIndent(), insertTab()),
