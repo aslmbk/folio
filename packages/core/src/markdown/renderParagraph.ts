@@ -13,8 +13,8 @@
  */
 
 import { isQuoteStyle, resolveHeadingLevel } from "../docx/builtInStyles";
-import { bulletMarkerFontName, convertBulletToUnicode } from "../docx/bulletMarkers";
-import { resolveListTemplate } from "../prosemirror/listMarker";
+import { listLabelAttrsFromRendering } from "../prosemirror/listLabels";
+import type { ParagraphAttrs } from "../prosemirror/schema/nodes";
 import type { DocxPackage, ListRendering, Paragraph } from "../types/document";
 import { renderParagraphInline } from "./renderRuns";
 import type { RenderContext } from "./types";
@@ -31,48 +31,60 @@ export function renderParagraph(
   pkg: DocxPackage | undefined,
   para: Paragraph,
 ): string {
+  return renderParagraphBlock(ctx, pkg, para).markdown;
+}
+
+/** A rendered paragraph, and whether it is a Markdown list item. */
+export type RenderedParagraph = { markdown: string; isListItem: boolean };
+
+/**
+ * Render a paragraph. A list item is a paragraph that shows a marker, which is
+ * when the list counter gives it a label: a numbered heading renders as a
+ * heading, and a level that hides its marker (`w:vanish`) or that its list
+ * does not define as prose, as every other reader reads them.
+ */
+export function renderParagraphBlock(
+  ctx: RenderContext,
+  pkg: DocxPackage | undefined,
+  para: Paragraph,
+): RenderedParagraph {
+  // Every paragraph advances the list counter, whatever it renders as: the
+  // items after a numbered heading continue from its number.
+  const label = ctx.nextListLabel(listLabelAttrs(para));
   const inline = renderParagraphInline(ctx, pkg, para.content, para.paraId);
   const styleId = para.formatting?.styleId;
 
   const headingLevel = markdownHeadingLevel(ctx, para);
   if (headingLevel !== undefined) {
     // A numbered heading (`1. Scope`, through its style's `w:numPr` or its
-    // own) keeps its number, and advances the counters the list items after
-    // it continue from, so the reader sees the number the document shows.
-    const number = visibleListMarker(ctx, para.listRendering);
+    // own) keeps its number; a bulleted one its glyph, as a heading has no
+    // Markdown bullet syntax to borrow.
     if (!inline) {
-      return ""; // Drop empty headings — `#` alone is just literal text.
+      // Drop empty headings — `#` alone is just literal text.
+      return { markdown: "", isListItem: false };
     }
     const hashes = "#".repeat(Math.min(MAX_MARKDOWN_HEADING_LEVEL, headingLevel + 1));
-    return number ? `${hashes} ${number} ${inline}` : `${hashes} ${inline}`;
+    return {
+      markdown: label ? `${hashes} ${label} ${inline}` : `${hashes} ${inline}`,
+      isListItem: false,
+    };
   }
 
-  // A numbering level with `w:vanish` keeps `listRendering` but hides the
-  // marker, so render it as plain prose rather than a Markdown list item.
-  if (para.listRendering && !para.listRendering.markerHidden) {
-    return renderListItem(ctx, para.listRendering, inline);
+  if (para.listRendering && label !== undefined) {
+    return { markdown: renderListItem(para.listRendering, label, inline), isListItem: true };
   }
 
   if (isQuoteStyle(styleId, ctx.builtInStyles)) {
-    return inline
-      .split("\n")
-      .map((line) => `> ${line}`)
-      .join("\n");
+    return {
+      markdown: inline
+        .split("\n")
+        .map((line) => `> ${line}`)
+        .join("\n"),
+      isListItem: false,
+    };
   }
 
-  return escapeLeadingBlockMarker(inline);
-}
-
-/**
- * Whether the paragraph renders as a Markdown list item. A numbered heading
- * renders as a heading, and a hidden-marker (`w:vanish`) level as prose.
- */
-export function isMarkdownListItem(ctx: RenderContext, para: Paragraph): boolean {
-  return (
-    !!para.listRendering &&
-    !para.listRendering.markerHidden &&
-    markdownHeadingLevel(ctx, para) === undefined
-  );
+  return { markdown: escapeLeadingBlockMarker(inline), isListItem: false };
 }
 
 /** The paragraph's 0-based heading level, as `builtInStyles` classifies it. */
@@ -83,22 +95,16 @@ function markdownHeadingLevel(ctx: RenderContext, para: Paragraph): number | und
   );
 }
 
+const UNNUMBERED: ParagraphAttrs = Object.freeze({});
+
 /**
- * The marker a numbered heading shows, or `undefined` when it shows none (not
- * numbered, or its level hides the marker with `w:vanish`). A bullet renders
- * as its Unicode glyph: a heading has no Markdown bullet syntax to borrow.
+ * The attrs the page's list counter reads, projected from the paragraph the
+ * way the editor projects them (`toProseDoc`). A paragraph without a list
+ * rendering counts as unnumbered.
  */
-function visibleListMarker(
-  ctx: RenderContext,
-  list: ListRendering | undefined,
-): string | undefined {
-  if (!list || list.markerHidden) {
-    return undefined;
-  }
-  const marker = list.isBullet
-    ? convertBulletToUnicode(list.marker, bulletMarkerFontName(list.markerFormatting)).trim()
-    : resolveMarker(ctx, list);
-  return marker || undefined;
+function listLabelAttrs(para: Paragraph): ParagraphAttrs {
+  const list = para.listRendering;
+  return list ? listLabelAttrsFromRendering(list, para.formatting?.numPrFromStyle) : UNNUMBERED;
 }
 
 /**
@@ -121,49 +127,15 @@ function escapeLeadingBlockMarker(text: string): string {
     );
 }
 
-function renderListItem(ctx: RenderContext, list: ListRendering, inline: string): string {
+/**
+ * A list item line with the label the page shows (`1.`, `a)`, `i.`), counted
+ * in document order across the whole render, list items inside tables and
+ * block SDTs included. A bullet is Markdown's `-`.
+ */
+function renderListItem(list: ListRendering, label: string, inline: string): string {
   const indent = "  ".repeat(list.level);
   if (list.isBullet) {
     return `${indent}- ${inline}`.trimEnd();
   }
-  return `${indent}${resolveMarker(ctx, list)} ${inline}`.trimEnd();
-}
-
-/**
- * Preserve the document's exact marker (e.g. "1.", "a)", "i."). Strip trailing
- * whitespace from the marker but keep its punctuation intact.
- */
-function resolveMarker(ctx: RenderContext, list: ListRendering): string {
-  return list.marker.includes("%") ? resolveTemplateMarker(ctx, list) : list.marker.trim();
-}
-
-/**
- * Resolve a `lvlText`-style marker template ("%1.") against live counters, the
- * same way the layout engine paints it. Editor-emitted documents carry
- * templates rather than baked numbers, so the serializer must count items in
- * document order; counters live on the context (`listCounters`) so they span
- * the whole render, including list items inside tables and block SDTs.
- */
-function resolveTemplateMarker(ctx: RenderContext, list: ListRendering): string {
-  const counters = ctx.listCounters.get(list.numId) ?? Array.from({ length: 9 }, () => 0);
-  const level = list.level;
-  const seenKey = `${list.numId}:${level}`;
-  if (!ctx.listSeenLevels.has(seenKey)) {
-    ctx.listSeenLevels.add(seenKey);
-    if (list.startOverride !== undefined) {
-      counters[level] = list.startOverride - 1;
-    }
-  }
-  counters[level] = (counters[level] ?? 0) + 1;
-  for (let i = level + 1; i < counters.length; i += 1) {
-    counters[i] = 0;
-  }
-  ctx.listCounters.set(list.numId, counters);
-  const levelFormats = list.levelNumFmts ?? (list.numFmt ? [list.numFmt] : undefined);
-  return resolveListTemplate({
-    template: list.marker,
-    counters,
-    levelFormats,
-    forceDecimal: list.isLegal,
-  }).trim();
+  return `${indent}${label} ${inline}`.trimEnd();
 }

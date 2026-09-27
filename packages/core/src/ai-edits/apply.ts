@@ -16,7 +16,11 @@ import {
   paragraphNumberingReference,
   paragraphNumberingReferenceId,
 } from "../docx/numberingReference";
-import { paragraphNumberingAttr, readParagraphNumberingAttr } from "../prosemirror/numberingAttr";
+import {
+  paragraphNumberingAttr,
+  readParagraphNumberingAttr,
+  removedNumberingAttr,
+} from "../prosemirror/numberingAttr";
 import { directParagraphAlignment } from "../prosemirror/paragraphAlignment";
 import {
   directParagraphIndentation,
@@ -50,7 +54,11 @@ import {
   type SelectedRunFormattingCarrierRepresentation,
 } from "../prosemirror/runFormattingInlineCarriers";
 import type { ParagraphPropertyChangeAttrs } from "../prosemirror/schema/nodes";
-import { listLevelAttrPatch } from "../prosemirror/styles/resolvedStyleAttrs";
+import {
+  listAttrsFromNumbering,
+  listLevelAttrPatch,
+} from "../prosemirror/styles/resolvedStyleAttrs";
+import { isStyleSourcedParagraphNumbering } from "../internal/paragraphFormattingSerialization";
 import { markStructuralChange } from "../prosemirror/extensions/features/ParagraphChangeTrackerExtension";
 import { requestDeterministicParaIds } from "../prosemirror/extensions/features/ParaIdAllocatorExtension";
 import {
@@ -581,7 +589,7 @@ const paragraphPropertiesPatch = ({
   }
   if (properties.numbering !== undefined) {
     if (properties.numbering === null) {
-      patch["numPr"] = null;
+      patch["numPr"] = removedNumberingAttr(attrs.numPrFromStyle);
       Object.assign(patch, CLEARED_LIST_RENDERING_ATTRS);
     } else {
       const listReference = concreteListReference(properties.numbering);
@@ -604,7 +612,7 @@ const paragraphPropertiesPatch = ({
     }
   } else if (properties.listLevel !== undefined) {
     if (properties.listLevel === null) {
-      patch["numPr"] = null;
+      patch["numPr"] = removedNumberingAttr(attrs.numPrFromStyle);
       Object.assign(patch, CLEARED_LIST_RENDERING_ATTRS);
     } else {
       const numId = paragraphNumberingReferenceId(
@@ -2258,6 +2266,48 @@ const withRotatedAddedFinalBreaks = ({
   return { transaction: next, nextRevisionId, synthesizedRevisions };
 };
 
+/**
+ * The list attrs of a paragraph inserted with a style of its own, from the
+ * anchor attrs it copied. Numbering the anchor's style supplied leaves with
+ * that style and the new style's numbering, if any, takes its place; numbering
+ * the anchor stated itself stays. Either way the attrs render what the save
+ * writes, so the paragraph reads the same before and after a reopen.
+ */
+type RestyledListAttrsOptions = {
+  /** The attrs copied from the anchor, with the operation's numbering applied. */
+  attrs: Record<string, unknown>;
+  /** The numbering the paragraph's new style supplies. */
+  styleNumbering: ParagraphFormatting["numPr"];
+  /** Whether the operation took the paragraph out of every list. */
+  removesNumbering: boolean;
+  numbering: NumberingMap | null;
+};
+
+const restyledListAttrs = ({
+  attrs,
+  styleNumbering,
+  removesNumbering,
+  numbering,
+}: RestyledListAttrsOptions): Record<string, unknown> => {
+  const stated = readParagraphNumberingAttr(attrs["numPr"]);
+  const statedByOldStyle = isStyleSourcedParagraphNumbering(
+    stated,
+    readParagraphNumberingAttr(attrs["numPrFromStyle"]),
+  );
+  const fromStyle = styleNumbering === undefined ? null : paragraphNumberingAttr(styleNumbering);
+  const kept = stated !== null && !statedByOldStyle ? stated : fromStyle;
+  // Out of every list, the new style's included.
+  const numPr = removesNumbering ? removedNumberingAttr(fromStyle) : kept;
+  return {
+    ...CLEARED_LIST_RENDERING_ATTRS,
+    ...(numPr?.kind === "reference" &&
+      listAttrsFromNumbering({ numId: numPr.numId, ilvl: numPr.ilvl ?? 0 }, numbering)),
+    // As stated: an absent `w:ilvl` stays absent.
+    numPr,
+    numPrFromStyle: fromStyle,
+  };
+};
+
 const buildInsertedParagraphs = ({
   item,
   schema,
@@ -2348,7 +2398,7 @@ const buildInsertedParagraphs = ({
     const listLevel = operation.listLevel;
     if (formatsParagraph) {
       if (explicitNumbering === null) {
-        attrs["numPr"] = null;
+        attrs["numPr"] = removedNumberingAttr(readParagraphNumberingAttr(attrs["numPrFromStyle"]));
         Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
       } else if (explicitNumbering !== undefined) {
         Object.assign(
@@ -2369,7 +2419,7 @@ const buildInsertedParagraphs = ({
           attrs["numPrFromStyle"] = null;
         }
       } else if (listLevel === null) {
-        attrs["numPr"] = null;
+        attrs["numPr"] = removedNumberingAttr(readParagraphNumberingAttr(attrs["numPrFromStyle"]));
         Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
       } else if (typeof listLevel === "number") {
         const numId = paragraphNumberingReferenceId(
@@ -2393,7 +2443,18 @@ const buildInsertedParagraphs = ({
     if (formatsParagraph && operation.styleId !== undefined) {
       attrs["styleId"] = operation.styleId;
       if (operation.inheritFormatting !== false && operation.styleId !== null) {
-        Object.assign(attrs, CLEARED_LIST_RENDERING_ATTRS);
+        Object.assign(
+          attrs,
+          restyledListAttrs({
+            attrs,
+            styleNumbering: formattingFromStyle?.numPr,
+            // `listLevel: null` beside a numbering reference states an absent
+            // `w:ilvl`, not a removal.
+            removesNumbering:
+              explicitNumbering === null || (explicitNumbering === undefined && listLevel === null),
+            numbering,
+          }),
+        );
       }
     }
     if (
