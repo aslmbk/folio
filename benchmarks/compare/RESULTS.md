@@ -118,8 +118,8 @@ above roughly a thousand blocks, and that is the first thing to profile.
    about 4% of the comparison, and needs a second block projection that
    must agree with the first byte for byte. Apply was the larger cost.
 
-4. **Accepting all changes is O(changes x blocks).** Now the largest single
-   cost on a large structural comparison, and measured rather than guessed:
+4. ~~**Accepting all changes is O(changes x blocks).**~~ Done; see "Whole-story
+   resolution" below. Previously the largest single cost on a large structural comparison:
    of `prose/l/structural`'s 8.9s, the apply stage is 8.3s, and 3.3s of that
    is one `readReviewedStory({ view: "final" })` on the redlined base — of
    which 3.28s is `acceptAllChanges` and 0.05s is everything else. The same
@@ -748,3 +748,136 @@ All three are now closed.
 Everything else passes every invariant: the round-trip algebra in both
 directions, self-comparison, and byte determinism, across all nine classes at
 both sizes.
+
+## Whole-story resolution
+
+Accept-all and reject-all now rebuild the story in fixed tree passes and apply
+one serializable step. Paragraph, run, row, and cell revisions share that path
+in the editor and headless readers. Position maps and dirty-paragraph lookups
+are indexed; applying the transaction no longer scans the document per change.
+Individual, ID, and range commands retain their granular steps. Transported or
+rebased steps replay those granular edits; local application and undo reuse the
+already-built document.
+
+Tree construction uses fixed linear passes; indexed mapping and table-width
+removal add logarithmic factors. The per-change fragment copies are gone.
+
+The corrected granular reference and optimized implementation ran consecutively
+under the machine-wide benchmark lock, one process at a time. Each case's before
+run immediately precedes its after run. The batch waited for host load below 40;
+load fell from 38.04 to 14.90 during measurement on eight logical CPUs, with no
+competing benchmark workers detected at the boundaries. CPU time is the primary
+comparison on this shared host. Earlier overlapping samples and the partial run
+that failed its load guard are discarded.
+
+`packages/core/scripts/benchmark-resolve-all.ts` measures the editor command plus
+transaction application with history and paragraph tracking enabled. There are
+two changes per paragraph. Results below are the upper median of four samples
+after one warm-up; wall and process CPU (user + system) are summarized separately.
+
+| Paragraphs | Command | CPU before (ms) | CPU after (ms) | Wall before (ms) | Wall after (ms) | Steps before → after |
+| ---------- | ------- | --------------- | -------------- | ---------------- | --------------- | -------------------- |
+| 250        | accept  | 29.6            | 18.2           | 17.0             | 9.1             | 500 → 1              |
+| 250        | reject  | 17.0            | 12.1           | 17.0             | 5.8             | 500 → 1              |
+| 1,000      | accept  | 198.0           | 46.3           | 241.6            | 32.1            | 2,000 → 1            |
+| 1,000      | reject  | 182.0           | 37.6           | 176.8            | 23.3            | 2,000 → 1            |
+| 2,200      | accept  | 674.8           | 53.6           | 796.1            | 58.2            | 4,400 → 1            |
+| 2,200      | reject  | 636.7           | 40.8           | 706.6            | 91.5            | 4,400 → 1            |
+| 4,400      | accept  | 2,676.0         | 80.7           | 3,064.9          | 84.7            | 8,800 → 1            |
+| 4,400      | reject  | 3,167.6         | 76.6           | 4,834.4          | 113.7           | 8,800 → 1            |
+
+The comparison benchmark uses `--quick`: median of three measurements after one
+warm-up. Both products retain identical digests and pass all applicable invariants.
+
+| Configuration        | Apply wall before (ms) | Apply wall after (ms) | Total wall before (ms) | Total wall after (ms) |
+| -------------------- | ---------------------- | --------------------- | ---------------------- | --------------------- |
+| `prose/l/structural` | 3,971.1                | 1,015.2               | 4,183.1                | 1,869.4               |
+| `prose/l/heavy`      | 3,208.4                | 2,562.4               | 3,897.9                | 5,831.9               |
+
+Whole-command `/usr/bin/time -l` includes warm-up, measurements, invariant checks,
+and child processes, so its CPU totals are not per-comparison medians:
+
+| Configuration        | Command CPU before (s) | Command CPU after (s) | Command wall before (s) | Command wall after (s) |
+| -------------------- | ---------------------- | --------------------- | ----------------------- | ---------------------- |
+| `prose/l/structural` | 39.15                  | 27.89                 | 43.45                   | 28.21                  |
+| `prose/l/heavy`      | 51.96                  | 45.49                 | 71.65                   | 51.76                  |
+
+CPU totals improve in both cases, but the heavy comparison's median wall time
+increases. These shared-host samples do not establish a consistent end-to-end
+wall-time improvement. The direct command measurements and step counts isolate
+the bulk-resolution gain.
+
+The focused suite passes 169 tests. Its equivalence test exercises all 69
+applicable small-corpus configurations, including body, headers, footers,
+footnotes, and endnotes. It compares resolved documents and serialized-step
+replay with the retained range commands. Focused properties cover tracker state,
+selection, undo, paragraph joins, table topology, required-content fitting, and
+nested revisions.
+
+The corrected granular and bulk resolver runs match every buffer and change-list
+digest across all 207 applicable corpus configurations. All applicable invariants
+pass, including Open XML SDK validation with .NET 8. The 117 other configurations
+are inapplicable; only the 27 identical-input cases skip the difference check.
+
+The reference and optimized runs include the same separate note, graphic, field,
+fixture-schema, and bookmark repairs. The refreshed digest manifest is isolated
+in #1101; it updates 173 stale entries without adding or removing cases.
+
+### Heavy comparison follow-up
+
+A lower-load interleaved main/branch/main/branch run reproduced a smaller wall
+regression. All four runs held one FIFO benchmark lock, started below load 16,
+and used four warm-ups plus nine measurements. Load fell from 13.91 to 6.67;
+no competing benchmark workers were detected. The reference was main
+`05a61a35e`; the branch was `4b60e7414`.
+
+| Run       | Median comparison wall (ms) | Whole-command CPU (s) | Max RSS (MiB) | Page faults |
+| --------- | --------------------------- | --------------------- | ------------- | ----------- |
+| Main A1   | 2,046.7                     | 62.56                 | 1,588.6       | 5,277       |
+| Branch B1 | 2,176.9                     | 64.84                 | 1,678.8       | 3,371       |
+| Main A2   | 1,797.7                     | 54.59                 | 1,636.0       | 3,312       |
+| Branch B2 | 1,928.5                     | 61.36                 | 1,699.9       | 3,294       |
+
+Wall time rose 6.4% and 7.3% within the two pairs; CPU also rose. RSS was 4–6%
+higher, while page faults did not increase. The original 50% wall increase was
+not reproduced. Whole-command CPU includes separate stage measurements,
+warm-ups, and invariant checks; it is not the CPU counterpart of the single
+comparison wall median.
+
+Separate diagnostic profiles found GC self time of 1.28 s on main versus 2.41 s
+on the branch, and whole-story resolution grew from 1.85 to 2.50 s. The structural
+pass rebuilt unchanged paragraphs and containers before discarding equal results.
+It now reuses those nodes, avoiding attribute/fragment allocation and preserving
+identity for downstream consumers. Joined paragraphs and changed containers still
+rebuild. No new sleep, timer, or asynchronous wait occurs in the resolver. Retained
+heap was similar (25.1 versus 25.5 MiB), pointing to temporary allocation rather
+than a retained-memory leak. Profile timings are diagnostic, not benchmark samples.
+
+The sharing properties fail before this fix and pass afterward. The 40 focused
+tests also cover all 69 small-corpus configurations, granular replay, joins, and
+table position maps. Every heavy follow-up run retains identical digests and
+passes all seven invariants, including Open XML SDK validation.
+
+Two further main/fixed-branch pairs used the same lock and four-warm-up,
+nine-sample policy. Both compared the same main revision with `4b60e7414` plus
+the unchanged-node sharing fix; unrelated main updates were excluded.
+
+| Pair                       | Median wall main → fixed (ms) | Command CPU main → fixed (s) | Max RSS main → fixed (MiB) | Page faults main → fixed |
+| -------------------------- | ----------------------------- | ---------------------------- | -------------------------- | ------------------------ |
+| Uninstrumented             | 2,178.1 → 2,710.1             | 70.58 → 69.21                | 1,557.9 → 1,642.2          | 5,265 → 3,344            |
+| Same-sample CPU diagnostic | 3,902.7 → 2,784.2             | 75.36 → 75.08                | 1,661.1 → 1,726.8          | 3,298 → 3,329            |
+
+Load ranged from 12.54 to 16.61 in the first pair and 12.11 to 17.04 in the
+diagnostic pair, with no competing benchmark worker detected. The diagnostic
+records CPU and wall for each individual comparison: median sample CPU was
+3,155.2 ms on main and 2,686.4 ms on the fixed branch. A main sample took
+5,502.4 ms wall but 3,290.5 ms CPU, with zero major faults and 11,708 involuntary
+context switches. Scheduling interference therefore materially affects these
+wall samples even below the agreed load guard. They are retained here as
+diagnostics, not used to claim a speedup or a remaining wall regression.
+
+The original repeatable 6–7% regression exposed real unnecessary allocation,
+which is fixed. The post-fix wall differences reverse direction between pairs;
+this shared-host follow-up does not establish a stable end-to-end wall result.
+RSS remains about 4–5% higher. No timer or major-page-fault stall was found, and
+the remaining wall-time uncertainty must not be presented as a measured gain.
