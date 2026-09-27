@@ -446,18 +446,17 @@ const batchAgainstOneAtATime = async (
     ),
   );
   // Tracked, a merge into a block the batch deletes joins across that block's
-  // deleted mark as well, into the block after it: that is what the marks
-  // say. Applied directly, the pair is refused.
+  // deleted mark as well, into the block after it — and across every deleted
+  // block that follows, to the first one the batch keeps: that is what the
+  // marks say. Applied directly, the pair is refused.
+  const deletes = (block: number) =>
+    applied.some(({ operation }) => operation.kind === "deleteBlock" && operation.block === block);
   for (const { operation } of applied) {
-    const joinsAcross =
-      mode !== "direct" &&
-      operation.kind === "mergeBlockWithNext" &&
-      applied.some(
-        ({ operation: other }) =>
-          other.kind === "deleteBlock" && other.block === operation.block + 1,
-      );
-    if (joinsAcross) {
-      named.add(operation.block + 2);
+    if (mode === "direct" || operation.kind !== "mergeBlockWithNext") {
+      continue;
+    }
+    for (let joined = operation.block + 1; deletes(joined); joined++) {
+      named.add(joined + 1);
     }
   }
   if (mode !== "direct") {
@@ -529,6 +528,77 @@ describe("a batch of two operations on one block or its neighbours", () => {
       expect(problems).toEqual([]);
     }, 240_000);
   }
+});
+
+describe("a batch that deletes the story's last paragraph and inserts after it", () => {
+  // Deleted alone, the last paragraph keeps its mark and stays a paragraph to
+  // format. The insertion after it lands first, so the deletion then takes
+  // its mark as well, and its properties with it: formatting it is refused,
+  // whichever of the three comes last.
+  const last = BLOCK_COUNT - 1;
+  const trio: readonly GeneratedOperation[] = [
+    { kind: "deleteBlock", block: last },
+    { kind: "insertAfterBlock", block: last },
+    { kind: "setBlockParagraphProperties", block: last },
+  ];
+  const orders = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+  ].map((order) => order.flatMap((index) => trio[index] ?? []));
+
+  for (const mode of MODES) {
+    test(`refuses the conflict and applies the rest as one at a time would (${mode})`, async () => {
+      const problems: string[] = [];
+      // The counterexample the random batch below found.
+      const found: GeneratedOperation[] = [
+        { kind: "deleteBlock", block: last },
+        { kind: "insertAfterBlock", block: last },
+        { kind: "splitBlock", block: 0, before: 1 },
+        { kind: "setBlockParagraphProperties", block: last },
+      ];
+      for (const generated of [...orders, found]) {
+        problems.push(...(await batchAgainstOneAtATime(generated, mode)));
+      }
+      expect(problems).toEqual([]);
+    });
+  }
+
+  test("refuses the paragraph properties once the insertion follows the deletion", async () => {
+    const session = await freshSession();
+    const blockId = session.snapshot().blocks[last]?.id ?? "";
+    const result = session.apply("tracked-changes", [
+      { id: "delete", type: "deleteBlock", blockId },
+      { id: "insert", type: "insertAfterBlock", blockId, text: "Added." },
+      {
+        id: "center",
+        type: "setBlockParagraphProperties",
+        blockId,
+        properties: { alignment: "center" },
+      },
+    ]);
+    expect(result.skipped).toEqual([
+      {
+        id: "center",
+        reason: "overlappingOperation",
+        message: 'operation "delete", earlier in this batch, already claims its target.',
+      },
+    ]);
+  });
+});
+
+describe("a tracked merge into a run of blocks the batch deletes", () => {
+  test("joins across every deleted mark, as one at a time would", async () => {
+    const generated: GeneratedOperation[] = [
+      { kind: "deleteBlock", block: 1 },
+      { kind: "mergeBlockWithNext", block: 0 },
+      { kind: "deleteBlock", block: 2 },
+    ];
+    expect(await batchAgainstOneAtATime(generated, "tracked-changes")).toEqual([]);
+  });
 });
 
 const spanArbitrary = fc
