@@ -10,7 +10,7 @@
 import type { Node as PMNode } from "prosemirror-model";
 
 import { parseFieldInstruction } from "../../../docx/fieldParser";
-import { expectFieldAttrs } from "../../attrs";
+import { expectFieldAttrs, isValidEmptyFieldResultRuns } from "../../attrs";
 import { createNodeExtension } from "../create";
 
 type StructuredFieldOptions = {
@@ -30,25 +30,48 @@ const createFieldAttrs = () => ({
   // Whether `displayText` is a rendering fallback folio synthesized rather
   // than authored content (see `ComplexField.fieldResultIsFallback`).
   fieldResultIsFallback: { default: null },
+  _docxEmptyResultRuns: { default: null },
 });
 
 /** A `data-` flag a pasted field carried: absent states nothing. */
 const statedFlag = (value: string | undefined): boolean | null =>
   value === undefined ? null : value === "true";
 
-const readFieldDomAttrs = (dom: HTMLElement) => ({
-  fieldType: dom.dataset["fieldType"] ?? "UNKNOWN",
-  instruction: dom.dataset["instruction"] ?? "",
-  displayText: dom.textContent ?? "",
-  fieldKind: dom.dataset["fieldKind"] ?? "simple",
-  fldLock: statedFlag(dom.dataset["fldLock"]),
-  dirty: statedFlag(dom.dataset["dirty"]),
-  fieldResultIsFallback: statedFlag(dom.dataset["fieldResultIsFallback"]),
-});
+const readEmptyResultRuns = (value: string | undefined) => {
+  if (value === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isValidEmptyFieldResultRuns(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const readFieldDomAttrs = (dom: HTMLElement) => {
+  const emptyResultRuns = readEmptyResultRuns(dom.dataset["emptyResultRuns"]);
+  return {
+    fieldType: dom.dataset["fieldType"] ?? "UNKNOWN",
+    instruction: dom.dataset["instruction"] ?? "",
+    displayText:
+      (emptyResultRuns === null ? undefined : dom.dataset["displayText"]) ?? dom.textContent ?? "",
+    fieldKind: dom.dataset["fieldKind"] ?? "simple",
+    fldLock: statedFlag(dom.dataset["fldLock"]),
+    dirty: statedFlag(dom.dataset["dirty"]),
+    fieldResultIsFallback: statedFlag(dom.dataset["fieldResultIsFallback"]),
+    _docxEmptyResultRuns: emptyResultRuns,
+  };
+};
 
 const getFieldDomAttrs = (node: PMNode) => {
-  const { fieldType, instruction, fieldKind, fldLock, dirty, fieldResultIsFallback } =
-    expectFieldAttrs(node);
+  const {
+    fieldType,
+    instruction,
+    fieldKind,
+    fldLock,
+    dirty,
+    fieldResultIsFallback,
+    _docxEmptyResultRuns,
+  } = expectFieldAttrs(node);
   return {
     class: `docx-field docx-field-${fieldType.toLowerCase()}`,
     "data-field-type": fieldType,
@@ -59,6 +82,9 @@ const getFieldDomAttrs = (node: PMNode) => {
     ...(fieldResultIsFallback === undefined
       ? {}
       : { "data-field-result-is-fallback": String(fieldResultIsFallback) }),
+    ...(_docxEmptyResultRuns === undefined
+      ? {}
+      : { "data-empty-result-runs": JSON.stringify(_docxEmptyResultRuns) }),
     style:
       "outline: 1px solid var(--doc-field-outline, rgba(200,200,200,0.4)); padding: 0 1px; border-radius: 2px;",
   };
@@ -103,7 +129,15 @@ export const FieldExtension = createNodeExtension({
       },
     ],
     toDOM(node) {
-      return ["span", getFieldDomAttrs(node), getFieldVisibleText(node)];
+      const { displayText, _docxEmptyResultRuns } = expectFieldAttrs(node);
+      return [
+        "span",
+        {
+          ...getFieldDomAttrs(node),
+          ...(_docxEmptyResultRuns ? { "data-display-text": displayText } : {}),
+        },
+        getFieldVisibleText(node),
+      ];
     },
   },
 });
