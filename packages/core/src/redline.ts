@@ -14,6 +14,7 @@ import { panic, TaggedError } from "better-result";
 
 import {
   FolioDocxReviewer,
+  getFolioDocxComparisonAccess,
   isFolioResolvedReviewedView,
   type FolioDocumentStoryHandle,
   type FolioResolvedReviewedView,
@@ -21,6 +22,7 @@ import {
 import { createFolioAITextRangeHandle, trailingBodyBlockId } from "./ai-edits/snapshot";
 import type {
   FolioAIBlock,
+  FolioAIBlockParagraphProperties,
   FolioAIEditAppliedOperation,
   FolioAIEditOperation,
   FolioAIEditSkippedOperation,
@@ -41,6 +43,7 @@ import {
   GenerateRedlineDocxOperationLimitError,
   MAX_GENERATED_REDLINE_OPERATIONS,
 } from "./redlineOperationLimit";
+import type { NumberingDefinitions } from "./types/document";
 import { alignFolioBlocks, type FolioAlignedBlockEvent } from "./version-comparison";
 
 /** Options for {@link generateRedlineDocx}. */
@@ -175,13 +178,14 @@ const buildRedlineOperations = ({
   const events = alignFolioBlocks(baseSnapshot.blocks, revisedBlocks);
   const anchorIds = nextBaseBlockIdByIndex(events);
   const operations: FolioAIEditOperation[] = [];
-  const trailingAdditions: { text: string; styleId?: string }[] = [];
+  const trailingAdditions: FolioAIBlock[] = [];
   // The last BODY-LEVEL paragraph, which the format guarantees exists: a table
   // may not be the last child of a body. Anchoring to the last block put the
   // anchor inside a table whenever the story ended with one, and an insertion
   // anchored there escapes to the table's boundary with no mark able to
   // express the break it added.
   const lastBaseBlockId = trailingBodyBlockId(baseSnapshot);
+  const baseBlocksById = new Map(baseSnapshot.blocks.map((block) => [block.id, block]));
 
   events.forEach((event, eventIndex) => {
     if (event.type === "pair") {
@@ -213,10 +217,7 @@ const buildRedlineOperations = ({
     }
     const anchorId = anchorIds[eventIndex] ?? null;
     if (anchorId === null) {
-      trailingAdditions.push({
-        text: event.block.text,
-        ...(event.block.styleId !== undefined && { styleId: event.block.styleId }),
-      });
+      trailingAdditions.push(event.block);
       return;
     }
     operations.push({
@@ -224,7 +225,7 @@ const buildRedlineOperations = ({
       type: "insertBeforeBlock",
       blockId: anchorId,
       text: event.block.text,
-      ...(event.block.styleId !== undefined && { styleId: event.block.styleId }),
+      ...insertedParagraphProperties(event.block, baseBlocksById.get(anchorId)),
     });
   });
 
@@ -237,11 +238,120 @@ const buildRedlineOperations = ({
       type: "insertAfterBlock",
       blockId: lastBaseBlockId ?? "redline-unanchored",
       text: addition.text,
-      ...(addition.styleId !== undefined && { styleId: addition.styleId }),
+      ...insertedParagraphProperties(
+        addition,
+        lastBaseBlockId === null ? undefined : baseBlocksById.get(lastBaseBlockId),
+      ),
     });
   }
 
   return operations;
+};
+
+type InsertedListReference = { numId: number; level: number };
+
+/**
+ * The revised value, or `null` to clear one the anchor would pass on, or
+ * `undefined` when neither has one: an explicit `null` costs a restyle pass.
+ */
+const statedOrCleared = <Value>(
+  revised: Value | undefined,
+  anchor: Value | undefined,
+): Value | null | undefined => revised ?? (anchor === undefined ? undefined : null);
+
+/**
+ * The paragraph properties an inserted block states. An insertion that says
+ * nothing takes the properties of its anchor, which is whichever base block
+ * happens to follow it, so whatever the anchor states and the revised block
+ * does not is cleared: a list item keeps its numbering, and a plain paragraph
+ * beside a list item stays plain.
+ */
+const insertedParagraphProperties = (
+  block: FolioAIBlock,
+  anchor: FolioAIBlock | undefined,
+): FolioAIBlockParagraphProperties => {
+  const properties: FolioAIBlockParagraphProperties = {};
+  const styleId = statedOrCleared(block.styleId, anchor?.styleId);
+  if (styleId !== undefined) properties.styleId = styleId;
+  const alignment = statedOrCleared(block.directAlignment, anchor?.directAlignment);
+  if (alignment !== undefined) properties.alignment = alignment;
+  const spacing = statedOrCleared(block.directSpacing, anchor?.directSpacing);
+  if (spacing !== undefined) properties.spacing = spacing;
+  const indentation = statedOrCleared(block.directIndentation, anchor?.directIndentation);
+  if (indentation !== undefined) properties.indentation = indentation;
+  if (
+    block.listReference !== undefined ||
+    anchor?.listReference !== undefined ||
+    anchor?.listLevel !== undefined
+  ) {
+    properties.numbering = block.listReference ?? null;
+    properties.listLevel = block.listLevel ?? null;
+  } else if (block.listLevel !== undefined) {
+    properties.listLevel = block.listLevel;
+  }
+  return properties;
+};
+
+const insertedNumbering = (operation: FolioAIEditOperation): InsertedListReference | null => {
+  if (operation.type !== "insertBeforeBlock" && operation.type !== "insertAfterBlock") {
+    return null;
+  }
+  const numbering = operation.numbering;
+  return numbering && !("start" in numbering) ? numbering : null;
+};
+
+/** The `w:numId`s whose `w:num` and abstract definition both exist. */
+const definedNumIds = (numbering: NumberingDefinitions | null | undefined): Set<number> => {
+  const abstractIds = new Set(numbering?.abstractNums.map((entry) => entry.abstractNumId));
+  return new Set(
+    (numbering?.nums ?? [])
+      .filter((entry) => abstractIds.has(entry.abstractNumId))
+      .map((entry) => entry.numId),
+  );
+};
+
+/**
+ * Rebind every inserted list item to numbering the redline package defines.
+ * The redline is the base package, where the revised version's `w:numId` may
+ * name nothing, or another list: the referenced definitions are copied in,
+ * under a fresh id wherever the base uses that one for different numbering.
+ * A reference the revised package cannot resolve shows no number there
+ * either, and is inserted without one.
+ */
+const bindInsertedNumbering = (
+  baseReviewer: FolioDocxReviewer,
+  revisedReviewer: FolioDocxReviewer,
+  operationsByStory: readonly (readonly FolioAIEditOperation[])[],
+): FolioAIEditOperation[][] => {
+  const baseAccess = getFolioDocxComparisonAccess(baseReviewer);
+  const revisedNumbering = getFolioDocxComparisonAccess(revisedReviewer).numberingDefinitions();
+  const resolvable = definedNumIds(revisedNumbering);
+  const references = operationsByStory.flatMap((operations) =>
+    operations.flatMap((operation) => {
+      const numbering = insertedNumbering(operation);
+      return numbering && resolvable.has(numbering.numId) ? [numbering] : [];
+    }),
+  );
+  const remapped =
+    baseAccess.planTargetNumberingReferences(revisedNumbering, references) ??
+    panic("Resolvable revised numbering references could not be planned");
+  baseAccess.stageTargetNumbering(revisedNumbering, references, remapped);
+  // Staging is all or nothing; whatever it could not define is dropped here
+  // rather than written as a dangling reference.
+  const defined = definedNumIds(baseAccess.numberingDefinitions());
+  return operationsByStory.map((operations) =>
+    operations.map((operation) => {
+      const numbering = insertedNumbering(operation);
+      if (numbering === null) {
+        return operation;
+      }
+      const numId = remapped.get(numbering.numId) ?? numbering.numId;
+      if (!resolvable.has(numbering.numId) || !defined.has(numId)) {
+        return { ...operation, numbering: null, listLevel: null };
+      }
+      return { ...operation, numbering: { numId, level: numbering.level } };
+    }),
+  );
 };
 
 const resolveInputView = (
@@ -298,6 +408,11 @@ export const generateRedlineDocx = async (
     return `redline-${++operationSequence}`;
   };
 
+  const plannedStories: {
+    story: FolioDocumentStoryHandle;
+    snapshot: FolioAIEditSnapshot;
+    operations: FolioAIEditOperation[];
+  }[] = [];
   for (const pair of pairFolioDocumentStories(baseStories, revisedStories)) {
     if (!pair.baseStory) {
       unprocessedStories.push({
@@ -329,9 +444,20 @@ export const generateRedlineDocx = async (
     if (operations.length === 0) {
       continue;
     }
+    plannedStories.push({ story: pair.baseStory, snapshot: baseSnapshot, operations });
+  }
+
+  // Numbering is package-wide: bind every story's inserted list items at once.
+  const boundOperations = bindInsertedNumbering(
+    baseReviewer,
+    revisedReviewer,
+    plannedStories.map(({ operations }) => operations),
+  );
+  for (const [index, { story, snapshot }] of plannedStories.entries()) {
+    const operations = boundOperations[index] ?? panic("A planned story lost its operations");
     const result = baseReviewer.applyDocumentOperationsToStory({
-      story: pair.baseStory,
-      snapshot: baseSnapshot,
+      story,
+      snapshot,
       batch: {
         version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
         mode: "tracked-changes",
