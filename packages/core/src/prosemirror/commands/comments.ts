@@ -11,7 +11,6 @@ import { Mapping } from "prosemirror-transform";
 import { panic } from "better-result";
 
 import { sameStatedParagraphNumbering } from "../../docx/numberingReference";
-import { joinProseParagraphsWithRightPropertySource } from "../../docx/paragraphPropertySource";
 
 import {
   appendHeadlessInlineResolution,
@@ -62,6 +61,7 @@ import { getDocumentStyleResolver } from "../plugins/documentStyles";
 import { paragraphRunStyleContextAt } from "../runStyleFormatting";
 import { reconstructRejectedRunFormattingMarks } from "../runPropertyChangeResolution";
 import { holdsNoContent } from "../zeroWidthAnchors";
+import { joinAtParagraphMark } from "../paragraphMarkJoin";
 import { rejoinRunsAt } from "../rejoinRunCarriers";
 import {
   getFolioNodeRevisionCarriers,
@@ -588,107 +588,10 @@ function resolveChange(
         }
       }
 
-      // Process paragraph-mark ops from end → start so earlier positions stay
-      // valid as later paragraphs collapse. Map every position through the
-      // accumulated transaction so the inline deletes above don't desync the
-      // attr writes or joins below.
-      pPrMarkOps.sort((a, b) => b.paragraphPos - a.paragraphPos);
-      for (const op of pPrMarkOps) {
-        const mappedPos = tr.mapping.map(op.paragraphPos);
-        const paragraph = tr.doc.nodeAt(mappedPos);
-        if (!paragraph || paragraph.type.name !== "paragraph") {
-          continue;
-        }
-        if (op.action === "clear") {
-          tr.setNodeAttribute(mappedPos, "pPrMark", null);
-          continue;
-        }
-        const joinPos = mappedPos + paragraph.nodeSize;
-        const nextNode = joinPos < tr.doc.content.size ? tr.doc.nodeAt(joinPos) : null;
-        const joinable = nextNode?.type.name === paragraph.type.name;
-        if (!joinable) {
-          // Nothing to join with: the next sibling is a table, or the paragraph
-          // ends its container — a body, a cell, a header, a note or a text box
-          // each end with one, and the position then lands on a boundary where
-          // `join` would merge the containers and silently lose rows.
-          //
-          // A paragraph before a TABLE is still gone once its break and its
-          // content are both resolved away: it is simply not there any more, so
-          // it is removed rather than left blank.
-          //
-          // At the container's END the two directions part. A break that was
-          // ADDED there added the paragraph it ends, so taking the addition
-          // back removes the paragraph and the container ends where it did
-          // before. A break that was REMOVED there cannot be honoured at all:
-          // it says "join with the paragraph after this one" and there is
-          // none, so the paragraph keeps its place and loses only the mark's
-          // revision. That is also what makes a redline that deleted such a
-          // mark fail its own round trip rather than resolve into a document
-          // no consumer would have reached from it.
-          //
-          // A container must contain a paragraph either way, so its parent's
-          // only child stays blank whatever its mark says.
-          //
-          // Section properties belong to the paragraph mark being resolved.
-          // Removing that mark removes its section endpoint; transferring the
-          // properties backward would retain the section the revision deleted.
-          const resolved = tr.doc.resolve(mappedPos);
-          const endsItsContainer = paragraphEndsItsContainer(resolved, paragraph.type.name);
-          const canGo = op.markWasAdded || !endsItsContainer;
-          if (holdsNoContent(paragraph) && canGo && resolved.parent.childCount > 1) {
-            if (ownsSectionEndpoint(paragraph)) {
-              removedSectionEndpointCount++;
-              removedSectionReferences.push(...sectionReferencesOf(paragraph));
-            }
-            tr.delete(mappedPos, mappedPos + paragraph.nodeSize);
-            continue;
-          }
-          tr.setNodeAttribute(mappedPos, "pPrMark", null);
-          continue;
-        }
-        // The inline sweep above has already run, so a paragraph that is empty
-        // here is one whose whole content was resolved away: a deleted
-        // paragraph being accepted, or an inserted one being rejected. Nothing
-        // of it survives but the join, and the paragraph the reader is left
-        // with is the NEXT one — which keeps its own mark, and in OOXML a
-        // paragraph's properties live on its mark. PM's `join` keeps the
-        // first node's attrs, so they are restored explicitly; otherwise a
-        // deleted heading would hand its style to the paragraph below it.
-        const emptyFirstParagraph = holdsNoContent(paragraph);
-        // The next paragraph's own `pPrMark` travels with its attrs: it is a
-        // different revision, and resolving this one must not resolve it.
-        //
-        // Section properties live on the paragraph mark. Resolving that mark
-        // away removes its section endpoint, so the joined paragraph keeps
-        // only a section endpoint already owned by the following paragraph.
-        const formattingOwner = emptyFirstParagraph ? nextNode : paragraph;
-        const joinedAttrs = {
-          ...formattingOwner.attrs,
-          pPrMark: nextNode.attrs["pPrMark"],
-          _sectionProperties: nextNode.attrs["_sectionProperties"],
-        };
-        try {
-          if (emptyFirstParagraph) {
-            joinProseParagraphsWithRightPropertySource({
-              attrs: joinedAttrs,
-              pos: joinPos,
-              transaction: tr,
-            });
-          } else {
-            tr.join(joinPos);
-            tr.setNodeMarkup(mappedPos, undefined, joinedAttrs);
-          }
-          if (ownsSectionEndpoint(paragraph)) {
-            removedSectionEndpointCount++;
-            removedSectionReferences.push(...sectionReferencesOf(paragraph));
-          }
-        } catch {
-          // PM rejects the join if the two blocks aren't structurally
-          // compatible (e.g. paragraph followed by a table). Leaving the
-          // marker is the safe fallback.
-        }
-      }
-
+      // Invariant: table rows and cells resolve BEFORE paragraph marks. A join
+      // must see the sibling the resolved document has, so a table this
+      // resolution removes cannot stand between a break and the paragraph it
+      // joins (a rejected split around a rejected inserted table).
       tableRowStructuralOps.sort((left, right) => right.rowPos - left.rowPos);
       let resolvedTableRowStructure = false;
       for (const op of tableRowStructuralOps) {
@@ -756,6 +659,92 @@ function resolveChange(
       }
       if (resolvedTableCellStructure) {
         markStructuralChange(tr);
+      }
+
+      // Process paragraph-mark ops from end → start so earlier positions stay
+      // valid as later paragraphs collapse. Map every position through the
+      // accumulated transaction so the inline deletes above don't desync the
+      // attr writes or joins below.
+      pPrMarkOps.sort((a, b) => b.paragraphPos - a.paragraphPos);
+      for (const op of pPrMarkOps) {
+        const mappedPos = tr.mapping.map(op.paragraphPos);
+        const paragraph = tr.doc.nodeAt(mappedPos);
+        if (!paragraph || paragraph.type.name !== "paragraph") {
+          continue;
+        }
+        if (op.action === "clear") {
+          tr.setNodeAttribute(mappedPos, "pPrMark", null);
+          continue;
+        }
+        const joinPos = mappedPos + paragraph.nodeSize;
+        const nextNode = joinPos < tr.doc.content.size ? tr.doc.nodeAt(joinPos) : null;
+        const joinable = nextNode?.type.name === paragraph.type.name;
+        if (!joinable) {
+          // Nothing to join with: the next sibling is a table, or the paragraph
+          // ends its container — a body, a cell, a header, a note or a text box
+          // each end with one, and the position then lands on a boundary where
+          // `join` would merge the containers and silently lose rows.
+          //
+          // A paragraph before a TABLE is still gone once its break and its
+          // content are both resolved away: it is simply not there any more, so
+          // it is removed rather than left blank.
+          //
+          // At the container's END the two directions part. A break that was
+          // ADDED there added the paragraph it ends, so taking the addition
+          // back removes the paragraph and the container ends where it did
+          // before. A break that was REMOVED there cannot be honoured at all:
+          // it says "join with the paragraph after this one" and there is
+          // none, so the paragraph keeps its place and loses only the mark's
+          // revision. That is also what makes a redline that deleted such a
+          // mark fail its own round trip rather than resolve into a document
+          // no consumer would have reached from it.
+          //
+          // A container must contain a paragraph either way, so its parent's
+          // only child stays blank whatever its mark says.
+          //
+          // Section properties belong to the paragraph mark being resolved.
+          // Removing that mark removes its section endpoint; transferring the
+          // properties backward would retain the section the revision deleted.
+          const resolved = tr.doc.resolve(mappedPos);
+          const endsItsContainer = paragraphEndsItsContainer(resolved, paragraph.type.name);
+          const canGo = op.markWasAdded || !endsItsContainer;
+          if (holdsNoContent(paragraph) && canGo && resolved.parent.childCount > 1) {
+            if (ownsSectionEndpoint(paragraph)) {
+              removedSectionEndpointCount++;
+              removedSectionReferences.push(...sectionReferencesOf(paragraph));
+            }
+            tr.delete(mappedPos, mappedPos + paragraph.nodeSize);
+            continue;
+          }
+          tr.setNodeAttribute(mappedPos, "pPrMark", null);
+          continue;
+        }
+        // The inline sweep above has already run, so a paragraph that is empty
+        // here is one whose whole content was resolved away: a deleted
+        // paragraph being accepted, or an inserted one being rejected. Nothing
+        // of it survives but the join, and the paragraph the reader is left
+        // with is the NEXT one — which keeps its own mark, and in OOXML a
+        // paragraph's properties live on its mark. PM's `join` keeps the
+        // first node's attrs, so they are restored explicitly; otherwise a
+        // deleted heading would hand its style to the paragraph below it.
+        //
+        // The next paragraph's own `pPrMark` travels with its attrs: it is a
+        // different revision, and resolving this one must not resolve it.
+        //
+        // Section properties live on the paragraph mark. Resolving that mark
+        // away removes its section endpoint, so the joined paragraph keeps
+        // only a section endpoint already owned by the following paragraph.
+        try {
+          joinAtParagraphMark({ tr, paragraphPos: mappedPos, paragraph, next: nextNode });
+          if (ownsSectionEndpoint(paragraph)) {
+            removedSectionEndpointCount++;
+            removedSectionReferences.push(...sectionReferencesOf(paragraph));
+          }
+        } catch {
+          // PM rejects the join if the two blocks aren't structurally
+          // compatible (e.g. paragraph followed by a table). Leaving the
+          // marker is the safe fallback.
+        }
       }
 
       if (bulkInlineChangeTracking) {

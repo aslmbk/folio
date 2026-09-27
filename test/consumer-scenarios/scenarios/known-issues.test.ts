@@ -11,7 +11,6 @@ import { describe } from "node:test";
 import { createReviewerBridge, executeFolioToolCallUntyped } from "@stll/folio-agents";
 import { fromMarkdown } from "@stll/folio-core/markdown";
 import {
-  createFolioAITextRangeHandle,
   FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
   generateRedlineDocx,
   paragraph,
@@ -159,54 +158,6 @@ describe("findings not yet filed", () => {
   );
 
   expectedFailure(
-    "COMMENT_ANCHOR_DRIFT",
-    "a comment's anchored text reads the same before and after a save when its text is replaced",
-    /anchored text/u,
-    async () => {
-      const reviewer = await openReviewer(await plainDocument());
-      const text = "The Supplier delivers the goods on time and in good order.";
-      const target = reviewer.getContent().find((block) => block.text === text);
-      assert.ok(target);
-      const start = text.indexOf("good order");
-      const range = createFolioAITextRangeHandle({
-        blockId: target.id,
-        text,
-        startOffset: start,
-        endOffset: start + "good".length,
-      });
-      assert.ok(range);
-      reviewer.applyDocumentOperations({
-        version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
-        mode: "tracked-changes",
-        operations: [
-          { id: "comment", type: "commentOnRange", range, comment: { text: "Which standard?" } },
-        ],
-      });
-      // Before the save the comment covers "good" and the replacement text;
-      // after it, "good order." and the replacement text.
-      reviewer.applyDocumentOperations({
-        version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
-        mode: "tracked-changes",
-        operations: [
-          {
-            id: "replace",
-            type: "replaceBlock",
-            blockId: target.id,
-            text: "The Supplier delivers promptly.",
-          },
-        ],
-      });
-      const before = reviewer.getComments().map((comment) => comment.anchoredText);
-      const { reopened } = await saveAndReopen(reviewer, "comment anchor");
-      assert.deepEqual(
-        reopened.getComments().map((comment) => comment.anchoredText),
-        before,
-        "the anchored text changed across the save",
-      );
-    },
-  );
-
-  expectedFailure(
     "COMPARE_INSERTED_LIST_ITEMS",
     "accepting a redline keeps an inserted bullet a bullet",
     /inserted list item/u,
@@ -220,42 +171,6 @@ describe("findings not yet filed", () => {
         await labelsOf(new Uint8Array(await reviewer.toBuffer())),
         ["· Intro.", "• new bullet", "· Outro."],
         "the inserted list item lost its bullet",
-      );
-    },
-  );
-
-  expectedFailure(
-    "REJECT_SPLIT_AROUND_INSERTED_TABLE",
-    "rejecting a split with a table inserted between its halves joins them again",
-    /split/u,
-    async () => {
-      const reviewer = await openReviewer(await plainDocument());
-      const text = "The Supplier delivers the goods on time and in good order.";
-      const target = reviewer.getContent().find((block) => block.text === text);
-      assert.ok(target);
-      reviewer.applyDocumentOperations({
-        version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
-        mode: "tracked-changes",
-        operations: [
-          {
-            id: "split",
-            type: "splitBlock",
-            blockId: target.id,
-            offset: text.indexOf("good order"),
-          },
-        ],
-      });
-      reviewer.applyDocumentOperations({
-        version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
-        mode: "tracked-changes",
-        operations: [
-          { id: "table", type: "insertTable", blockId: target.id, rows: [["Term", "Value"]] },
-        ],
-      });
-      reviewer.rejectAll();
-      assert.ok(
-        reviewer.getContent().some((block) => block.text === text),
-        "the split is still there after rejecting every change",
       );
     },
   );
@@ -277,37 +192,6 @@ describe("findings not yet filed", () => {
         reviewer.getContent().at(-1)?.text,
         "Referenced.1",
         "the note reference reads as its id",
-      );
-    },
-  );
-
-  expectedFailure(
-    "REJECT_ALL_JOIN_INTO_INSERTED_PARAGRAPH",
-    "rejectAll undoes a merge of a split's second half into an inserted paragraph",
-    /out of range|nodeSize/u,
-    async () => {
-      const reviewer = await openReviewer(await plainDocument());
-      const apply = (operation: Record<string, unknown>) =>
-        reviewer.applyDocumentOperations({
-          version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
-          mode: "tracked-changes",
-          operations: [{ id: "1", ...operation }],
-        } as never);
-      const last = () => {
-        const block = reviewer.getContent().find(({ text }) => text.startsWith("Signed"));
-        assert.ok(block);
-        return block;
-      };
-      apply({ type: "insertAfterBlock", blockId: last().id, text: "Inserted clause." });
-      apply({ type: "splitBlock", blockId: last().id, offset: "Signed in ".length });
-      const blocks = reviewer.getContent();
-      const secondHalf = blocks[blocks.findIndex(({ id }) => id === last().id) + 1];
-      assert.ok(secondHalf);
-      apply({ type: "mergeBlockWithNext", blockId: secondHalf.id, separator: " " });
-      reviewer.rejectAll();
-      assert.deepEqual(
-        reviewer.getContent().map(({ text }) => text),
-        (await openReviewer(await plainDocument())).getContent().map(({ text }) => text),
       );
     },
   );

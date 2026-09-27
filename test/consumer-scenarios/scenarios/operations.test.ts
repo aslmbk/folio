@@ -9,10 +9,13 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION } from "@stll/folio-core/server";
+import {
+  createFolioAITextRangeHandle,
+  FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+} from "@stll/folio-core/server";
 
 import { FIXTURE_NAMES, FIXTURES, openReviewer, plainDocument } from "../support/documents.ts";
-import { assertHealthy, visibleState } from "../support/invariants.ts";
+import { assertHealthy, saveAndReopen, visibleState } from "../support/invariants.ts";
 import { type Block, coreBatch, GENERATORS, MODES, supports } from "../support/operations.ts";
 import { createRandom } from "../support/random.ts";
 import { expectedFailure, KNOWN_FAILING_OPERATION_RUNS } from "../support/known-issues.ts";
@@ -69,21 +72,20 @@ describe("applyDocumentOperations", () => {
           reviewer.acceptAll();
         }
         const { bytes: after } = await assertHealthy(reviewer, `${name} / ${mode} final`);
-        // Resolving lands on the same words. Block boundaries are left out:
+        // Rejecting gives the document back, block for block. Accepting lands
+        // on the words a reader saw; block boundaries are left out there, as
         // a reader shows a pending join or split as the blocks it has now,
-        // and rejecting a split that has a table inserted after its first
-        // half leaves it split (REJECT_SPLIT_AROUND_INSERTED_TABLE).
-        // Whitespace is left out too: a merge's separator belongs to neither
-        // block until the join is accepted.
+        // and so is whitespace: a merge's separator belongs to neither block
+        // until the join is accepted.
         const words = (blocks: string[]) =>
           blocks
             .map((block) => block.replace(/^\w+: /u, ""))
             .join("")
             .replace(/\s+/gu, "");
         if (mode === "tracked-changes") {
-          assert.equal(
-            words(await resolvedText(after, "reject")),
-            words(await resolvedText(before, "reject")),
+          assert.deepEqual(
+            await resolvedText(after, "reject"),
+            await resolvedText(before, "reject"),
             `${name} / ${mode}: rejecting every change does not give the document back`,
           );
         }
@@ -124,6 +126,75 @@ describe("a batch that splits a block and deletes it", () => {
     assert.ok(
       texts.includes(text.slice(0, 20)) && texts.includes(text.slice(20)),
       `the split block's two halves: ${JSON.stringify(texts)}`,
+    );
+  });
+});
+
+describe("resolving tracked edits that build on pending ones", () => {
+  const SUPPLIER = "The Supplier delivers the goods on time and in good order.";
+  const tracked = async () => {
+    const reviewer = await openReviewer(await plainDocument());
+    const apply = (operation: Record<string, unknown>) =>
+      reviewer.applyDocumentOperations({
+        version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+        mode: "tracked-changes",
+        operations: [{ id: "1", ...operation }],
+      } as never);
+    const block = (prefix: string) => {
+      const found = reviewer.getContent().find(({ text }) => text.startsWith(prefix));
+      assert.ok(found, `no block starts with "${prefix}"`);
+      return found;
+    };
+    return { reviewer, apply, block };
+  };
+  const originalText = async () =>
+    (await openReviewer(await plainDocument())).getContent().map(({ text }) => text);
+
+  test("rejectAll undoes a merge of a split's second half into an inserted paragraph", async () => {
+    const { reviewer, apply, block } = await tracked();
+    apply({ type: "insertAfterBlock", blockId: block("Signed").id, text: "Inserted clause." });
+    apply({ type: "splitBlock", blockId: block("Signed").id, offset: "Signed in ".length });
+    apply({ type: "mergeBlockWithNext", blockId: block("two copies").id, separator: " " });
+    reviewer.rejectAll();
+    assert.deepEqual(
+      reviewer.getContent().map(({ text }) => text),
+      await originalText(),
+    );
+  });
+
+  test("rejecting a split with a table inserted between its halves joins them again", async () => {
+    const { reviewer, apply, block } = await tracked();
+    const target = block("The Supplier");
+    apply({ type: "splitBlock", blockId: target.id, offset: SUPPLIER.indexOf("good order") });
+    apply({ type: "insertTable", blockId: target.id, rows: [["Term", "Value"]] });
+    reviewer.rejectAll();
+    assert.deepEqual(
+      reviewer.getContent().map(({ text }) => text),
+      await originalText(),
+    );
+  });
+
+  test("a comment's anchored text reads the same before and after a save when its text is replaced", async () => {
+    const { reviewer, apply, block } = await tracked();
+    const target = block("The Supplier");
+    const start = SUPPLIER.indexOf("good order");
+    const range = createFolioAITextRangeHandle({
+      blockId: target.id,
+      text: SUPPLIER,
+      startOffset: start,
+      endOffset: start + "good".length,
+    });
+    assert.ok(range);
+    apply({ type: "commentOnRange", range, comment: { text: "Which standard?" } });
+    apply({ type: "replaceBlock", blockId: target.id, text: "The Supplier delivers promptly." });
+    const before = reviewer.getComments().map((comment) => comment.anchoredText);
+    // The removed word, and the new one that takes its place.
+    assert.deepEqual(before, ["goodpromptly"]);
+    const { reopened } = await saveAndReopen(reviewer, "comment anchor");
+    assert.deepEqual(
+      reopened.getComments().map((comment) => comment.anchoredText),
+      before,
+      "the anchored text changed across the save",
     );
   });
 });

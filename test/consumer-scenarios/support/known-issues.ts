@@ -19,18 +19,10 @@ export const OPEN_ISSUES = {
 export const FINDINGS = {
   STALE_LIST_LABELS:
     "after an operation adds, removes or renumbers list items, the reviewer's getContent() / snapshot labels keep the numbers read at open until a save and reopen",
-  COMMENT_ANCHOR_DRIFT:
-    "a comment whose range an edit splits or replaces reads a different anchoredText before the save (the marked text) than after it (everything between the range markers)",
   NOTE_REFERENCE_TEXT:
     'getContent(), the snapshot and read_document render a footnote/endnote reference as its w:id ("7"), while the page shows its number ("1", or "i" for an endnote)',
   COMPARE_INSERTED_LIST_ITEMS:
     "generateRedlineDocx inserts a paragraph the revised version has as a list item as a plain paragraph (the insertion carries only its style), so accepting the redline loses the bullet or number",
-  REJECT_SPLIT_AROUND_INSERTED_TABLE:
-    "rejecting every change leaves a tracked split in place when a tracked table was inserted after the split's first half (the join is attempted while the table still stands between the halves)",
-  SUGGESTED_ACCEPT_ALL_LOSES_INSERTS:
-    "after a run of suggested edits that includes a table column and list inserts, acceptAll keeps the inserted paragraphs in the reviewer but the save drops them (found by fuzz; no smaller repro yet)",
-  REJECT_ALL_JOIN_INTO_INSERTED_PARAGRAPH:
-    "rejectAll throws (`Index 6 out of range`) when a tracked merge joined a tracked split's second half into a tracked inserted paragraph: the bulk resolution works with positions past the end of the resolved document",
   UNMARKED_LIST_ITEM_KIND:
     "a paragraph whose numbering names a level its instance does not define shows no marker, but getContent(), the snapshot and read_document call it a listItem while docxToMarkdown renders plain text",
 } as const;
@@ -49,23 +41,13 @@ export const KNOWN_FAILING_OPERATION_RUNS: readonly {
   fixture: string;
   mode: string;
   finding: Finding;
-}[] = [
-  {
-    fixture: "comments",
-    mode: "tracked-changes",
-    finding: "REJECT_ALL_JOIN_INTO_INSERTED_PARAGRAPH",
-  },
-];
+}[] = [];
 
 /**
  * Seeded flows (support/fuzz.ts) that reproduce a finding. The default fuzz
  * run skips them and known-issues.test.ts runs them as expected failures.
  */
-export const KNOWN_FAILING_FLOWS: readonly { seed: number; steps: number; finding: Finding }[] = [
-  { seed: 20_260_933, steps: 10, finding: "SUGGESTED_ACCEPT_ALL_LOSES_INSERTS" },
-  { seed: 99, steps: 15, finding: "SUGGESTED_ACCEPT_ALL_LOSES_INSERTS" },
-  { seed: 101, steps: 15, finding: "SUGGESTED_ACCEPT_ALL_LOSES_INSERTS" },
-];
+export const KNOWN_FAILING_FLOWS: readonly { seed: number; steps: number; finding: Finding }[] = [];
 
 export const expectedFailure = (
   issue: OpenIssue | Finding,
