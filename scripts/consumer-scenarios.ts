@@ -13,14 +13,22 @@
 //   --keep             keep the staged consumer and print its path
 //   --typecheck        also run `tsc --noEmit` over the scenarios in the stage
 //   --only <pattern>   pass `--test-name-pattern` to node --test
+//   --coverage-out <file>  where to write the coverage ledger summary
+//                      (default: test-results/consumer-scenarios-coverage.json)
 //   -- <files>         scenario files to run (default: all)
+//
+// Coverage: every scenario process records which operation types met which
+// stories, modes, target features and sessions (support/coverage.ts). The
+// runner merges them, prints the table, writes the summary, and, when every
+// scenario ran, fails if a cell test/consumer-scenarios/coverage-expectations.json
+// requires was never applied or an unreachable cell was attempted.
 //
 // Environment: FOLIO_SCENARIO_SEED (fuzz seed; fixed by default, `random` to
 // explore; always printed), FOLIO_SCENARIO_FUZZ_RUNS / FOLIO_SCENARIO_FUZZ_STEPS
 // (fuzz size; 12 runs of 10 steps by default), FOLIO_SCENARIO_COLLISION_RUNS
 // (collision flows; 8 by default), FOLIO_ORACLE_GAPS=1 (print the operations
 // the requested-outcome oracle could not model).
-// Exits non-zero on any failure. Run via `bun run test:consumer-scenarios`.
+// Exits non-zero on any failure, including missing required or hit unreachable coverage cells. Run via `bun run test:consumer-scenarios`.
 
 import { panic } from "better-result";
 import { $ } from "bun";
@@ -29,6 +37,15 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  type Expectations,
+  describePattern,
+  formatLedger,
+  hitUnreachableCells,
+  mergeLedgers,
+  missingCells,
+  summarize,
+} from "../test/consumer-scenarios/support/coverage";
 import { buildAndPack, repoRoot } from "./packaged-consumer-lib";
 
 const scenarioSrc = path.join(repoRoot, "test", "consumer-scenarios");
@@ -51,6 +68,7 @@ type Args = {
   keep: boolean;
   typecheck: boolean;
   only: string | null;
+  coverageOut: string;
   files: string[];
 };
 
@@ -61,6 +79,7 @@ const parseArgs = (argv: readonly string[]): Args => {
     keep: false,
     typecheck: false,
     only: null,
+    coverageOut: path.join(repoRoot, "test-results", "consumer-scenarios-coverage.json"),
     files: [],
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -71,6 +90,7 @@ const parseArgs = (argv: readonly string[]): Args => {
     else if (arg === "--keep") args.keep = true;
     else if (arg === "--typecheck") args.typecheck = true;
     else if (arg === "--only") args.only = value();
+    else if (arg === "--coverage-out") args.coverageOut = path.resolve(value());
     else if (arg === "--") args.files.push(...argv.slice(index + 1));
     else panic(`consumer-scenarios: unknown argument ${arg}`);
     if (arg === "--") break;
@@ -282,6 +302,59 @@ const stageConsumer = async (
   return consumerDir;
 };
 
+/**
+ * Merge the scenario processes' ledgers, print the table, write the summary,
+ * and, when `enforce` (every scenario ran), check required and unreachable
+ * cells. Returns the failure message, or null.
+ */
+const reportCoverage = async (
+  coverageDir: string,
+  out: string,
+  enforce: boolean,
+): Promise<string | null> => {
+  const expectations = JSON.parse(
+    await readFile(path.join(scenarioSrc, "coverage-expectations.json"), "utf8"),
+  ) as Expectations;
+  const merged = mergeLedgers(coverageDir);
+  console.log(`\n${formatLedger(merged)}`);
+  await mkdir(path.dirname(out), { recursive: true });
+  await writeFile(out, `${JSON.stringify(summarize(merged, expectations), null, 2)}\n`);
+  console.log(`\n→ coverage ledger written to ${path.relative(repoRoot, out)}`);
+  if (!enforce) {
+    console.log("→ a subset ran; coverage expectations are not enforced");
+    return null;
+  }
+  const missing = missingCells(merged, expectations);
+  const unexpected = hitUnreachableCells(merged, expectations);
+  const failures: string[] = [];
+  if (missing.length === 0) {
+    console.log(`✓ every required coverage cell was applied (${expectations.required.length})`);
+  } else {
+    console.error(missing.map((cell) => `  no hits: ${cell}`).join("\n"));
+    failures.push(
+      `✗ consumer-scenarios: ${missing.length} required coverage cell(s) had no applied operation (coverage-expectations.json).`,
+    );
+  }
+  if (unexpected.length === 0) {
+    console.log(
+      `✓ every declared unreachable coverage cell had zero hits (${expectations.unreachable.length})`,
+    );
+  } else {
+    console.error(
+      unexpected
+        .map(
+          ({ cell, reason, applied, refused }) =>
+            `  unexpected hits: ${describePattern(cell)} (${applied} applied, ${refused} refused; ${reason})`,
+        )
+        .join("\n"),
+    );
+    failures.push(
+      `✗ consumer-scenarios: ${unexpected.length} declared unreachable coverage cell(s) had hits (coverage-expectations.json).`,
+    );
+  }
+  return failures.length === 0 ? null : failures.join("\n");
+};
+
 const args = parseArgs(process.argv.slice(2));
 
 if (args.packOnly !== null) {
@@ -333,13 +406,20 @@ try {
             .map((file) => path.join("scenarios", file));
     const nameFilter = args.only === null ? [] : ["--test-name-pattern", args.only];
     console.log(`→ node --test over ${files.length} scenario files (seed ${seed})`);
+    const coverageDir = path.join(consumerDir, "coverage");
     const run = await $`node --test --test-reporter=spec ${nameFilter} ${files}`
       .cwd(consumerDir)
-      .env({ ...process.env, FOLIO_SCENARIO_SEED: seed })
+      .env({ ...process.env, FOLIO_SCENARIO_SEED: seed, FOLIO_SCENARIO_COVERAGE_DIR: coverageDir })
       .nothrow();
     if (run.exitCode !== 0) {
       failure = `✗ consumer-scenarios: scenarios failed (FOLIO_SCENARIO_SEED=${seed} reproduces the fuzz runs).`;
     }
+    const coverageFailure = await reportCoverage(
+      coverageDir,
+      args.coverageOut,
+      args.files.length === 0 && args.only === null,
+    );
+    failure ??= coverageFailure;
   }
 } finally {
   if (packRoot !== "") {
