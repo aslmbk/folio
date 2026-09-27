@@ -4477,6 +4477,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
                         document={history.state}
                         documentIO={documentIO}
                         documentIdentity={loadedDocumentIdentity}
+                        markupView={displayMode}
                         {...(fonts !== undefined ? { fonts } : {})}
                         theme={history.state.package.theme || theme || null}
                         sectionProperties={effectiveSectionProperties ?? null}
