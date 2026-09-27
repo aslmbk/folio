@@ -15,7 +15,6 @@ import { COLLISION_FIXTURES, FIXTURES, openReviewer, plainDocument } from "../su
 import { assertHealthy, saveAndReopen } from "../support/invariants.ts";
 import {
   expectedFailure,
-  FINDING_SYMPTOMS,
   KNOWN_FAILING_COLLISIONS,
   KNOWN_FAILING_FOLLOW_UPS,
 } from "../support/known-issues.ts";
@@ -371,11 +370,8 @@ describe("a style an operation names is a paragraph style of the saved package, 
 });
 
 describe("findings the oracle pins", () => {
-  expectedFailure(
-    "SAME_BLOCK_PROPERTIES_FIRST_WINS",
-    "two paragraph-property operations on one block in one direct batch: the later one holds",
-    FINDING_SYMPTOMS.SAME_BLOCK_PROPERTIES_FIRST_WINS,
-    async () => {
+  for (const mode of ["direct", "tracked-changes"] as const) {
+    test(`two paragraph-property operations on one block in one batch: the later one is refused (${mode})`, async () => {
       const reviewer = await openReviewer(await plainDocument());
       const block = blocksOf(reviewer).at(-1) as Block;
       const align = (alignment: string): Operation => ({
@@ -383,29 +379,37 @@ describe("findings the oracle pins", () => {
         blockId: block.id,
         properties: { alignment },
       });
-      await applyChecked(reviewer, [align("center"), align("right")], "direct", "alignment twice");
-    },
-  );
+      const { applied, issues } = await applyChecked(
+        reviewer,
+        [align("center"), align("right")],
+        mode,
+        `alignment twice (${mode})`,
+      );
+      assert.deepEqual(applied, ["op-1"]);
+      assert.deepEqual(issues, ["op-2: overlappingOperation"]);
+    });
+  }
 
-  expectedFailure(
-    "READER_KEEPS_INSERTION_IN_DELETED_ROW",
-    "a suggested row deletion over a suggested word leaves the reader no text of that row",
-    FINDING_SYMPTOMS.READER_KEEPS_INSERTION_IN_DELETED_ROW,
-    async () => {
+  for (const mode of ["tracked-changes", "suggested"] as const) {
+    test(`a row deletion over a pending word leaves the reader no text of that row (${mode})`, async () => {
       const reviewer = await openReviewer(await ALL_FIXTURES.tables());
       const cell = blocksOf(reviewer).find((block) => block.text === "Price") as Block;
       await applyChecked(
         reviewer,
         [{ type: "replaceInBlock", blockId: cell.id, find: "Price", replace: "amended" }],
-        "suggested",
-        "suggest a word",
+        mode,
+        "a pending word",
       );
       await applyChecked(
         reviewer,
         [{ type: "deleteTableRow", blockId: cell.id }],
-        "suggested",
+        mode,
         "then its row's deletion",
       );
-    },
-  );
+      assert.ok(
+        !blocksOf(reviewer).some((block) => block.text.includes("amended")),
+        "the reader still lists the deleted row's pending word",
+      );
+    });
+  }
 });
