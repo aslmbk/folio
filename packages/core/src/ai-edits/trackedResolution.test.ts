@@ -149,6 +149,146 @@ describe("a tracked deletion of a paragraph that is a pending insertion", () => 
   });
 });
 
+test("a blank final paragraph deletes like a direct edit and rejects to the blank source", async () => {
+  const lastBlockId = (reviewer: FolioDocxReviewer): string => {
+    const last = reviewer.getContent().at(-1);
+    if (!last) throw new Error("no last block");
+    return last.id;
+  };
+  const source = await open();
+  const lastId = idOf(source, "Signed");
+  const blanked = source.applyDocumentOperations({
+    version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+    mode: "direct",
+    operations: [{ id: "blank", type: "replaceBlock", blockId: lastId, text: "" }],
+  });
+  expect(blanked.applied).toHaveLength(1);
+  const blankSource = await source.toBuffer();
+
+  const direct = await open(blankSource);
+  const tracked = await open(blankSource);
+  const directResult = direct.applyDocumentOperations({
+    version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+    mode: "direct",
+    operations: [{ id: "delete", type: "deleteBlock", blockId: lastBlockId(direct) }],
+  });
+  const trackedResult = tracked.applyDocumentOperations({
+    version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+    mode: "tracked-changes",
+    operations: [{ id: "delete", type: "deleteBlock", blockId: lastBlockId(tracked) }],
+  });
+  expect(directResult.applied).toHaveLength(1);
+  expect(trackedResult.applied).toHaveLength(1);
+  tracked.acceptAll();
+  expect(texts(await reopen(tracked))).toEqual(texts(await reopen(direct)));
+
+  const rejecting = await open(blankSource);
+  const rejected = rejecting.applyDocumentOperations({
+    version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+    mode: "tracked-changes",
+    operations: [{ id: "delete", type: "deleteBlock", blockId: lastBlockId(rejecting) }],
+  });
+  expect(rejected.applied).toHaveLength(1);
+  rejecting.rejectAll();
+  expect(texts(await reopen(rejecting))).toEqual(texts(await open(blankSource)));
+});
+
+describe("inserting after a deleted final paragraph", () => {
+  test("rejecting a later insertion after the deleted paragraph restores the source", async () => {
+    const reviewer = await open();
+    const signedId = idOf(reviewer, "Signed");
+    const headingId = idOf(reviewer, "Service Agreement");
+    const apply = applier(reviewer);
+    apply({ type: "deleteBlock", blockId: signedId });
+    apply({ type: "insertAfterBlock", blockId: headingId, text: "Inserted clause." });
+    apply({ type: "insertAfterBlock", blockId: signedId, text: "Inserted clause." });
+    reviewer.rejectAll();
+    expect(texts(reviewer)).toEqual(ORIGINAL);
+  });
+
+  test("accepting keeps the insertion on its own paragraph", async () => {
+    const reviewer = await open();
+    const signedId = idOf(reviewer, "Signed");
+    const headingId = idOf(reviewer, "Service Agreement");
+    const buyerId = idOf(reviewer, "The Buyer");
+    const apply = applier(reviewer);
+    apply({ type: "deleteBlock", blockId: signedId });
+    apply({ type: "insertAfterBlock", blockId: headingId, text: "Inserted clause." });
+    apply({ type: "insertAfterBlock", blockId: buyerId, text: "Inserted clause." });
+
+    reviewer.acceptAll();
+    expect(texts(reviewer).slice(-2)).toEqual([
+      "The Buyer pays each invoice within thirty days.",
+      "Inserted clause.",
+    ]);
+    expect(texts(await reopen(reviewer))).toEqual(texts(reviewer));
+  });
+});
+
+describe("successive trailing paragraph deletions", () => {
+  test("an earlier insertion keeps the accepted trailing deletion chain compact", async () => {
+    const runSequence = async (mode: FolioDocumentOperationMode) => {
+      const reviewer = await open();
+      const apply = applier(reviewer, mode);
+      apply({ type: "deleteBlock", blockId: idOf(reviewer, "Signed") });
+      apply({ type: "deleteBlock", blockId: idOf(reviewer, "The Buyer") });
+      apply({
+        type: "insertAfterBlock",
+        blockId: idOf(reviewer, "Service Agreement"),
+        text: "Inserted clause.",
+      });
+      return reviewer;
+    };
+
+    const direct = await runSequence("direct");
+    const tracked = await runSequence("tracked-changes");
+    tracked.acceptAll();
+    expect(texts(tracked)).toEqual(texts(direct));
+  });
+
+  for (const count of [2, 3, 4]) {
+    for (const batching of ["separate", "together"] as const) {
+      test(`${count} adjacent deletions ${batching} resolve like direct edits`, async () => {
+        const targets = ORIGINAL.slice(-count);
+        const runChain = async (mode: FolioDocumentOperationMode) => {
+          const reviewer = await open();
+          if (batching === "separate") {
+            const apply = applier(reviewer, mode);
+            for (const text of targets) {
+              apply({ type: "deleteBlock", blockId: idOf(reviewer, text) });
+            }
+          } else {
+            const result = reviewer.applyDocumentOperations({
+              version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+              mode,
+              operations: targets.map(
+                (text, index) =>
+                  ({
+                    id: String(index),
+                    type: "deleteBlock",
+                    blockId: idOf(reviewer, text),
+                  }) as const,
+              ),
+            });
+            expect(result.applied).toHaveLength(count);
+          }
+          return reviewer;
+        };
+
+        const direct = await runChain("direct");
+        const tracked = await runChain("tracked-changes");
+        const rejecting = await reopen(tracked);
+        rejecting.rejectAll();
+        expect(texts(rejecting)).toEqual(ORIGINAL);
+
+        tracked.acceptAll();
+        expect(texts(tracked)).toEqual(texts(direct));
+        expect(texts(await reopen(tracked))).toEqual(texts(direct));
+      });
+    }
+  }
+});
+
 describe("rejecting a split with an inserted table after its first half", () => {
   test("joins the halves again once the table is gone", async () => {
     const reviewer = await open();
@@ -235,6 +375,27 @@ describe("a comment on words a tracked replacement removes", () => {
 });
 
 describe("accepting every suggestion", () => {
+  test("keeps an insertion after a deleted final paragraph beside a later insertion", async () => {
+    const reviewer = await open();
+    const signedId = idOf(reviewer, "Signed");
+    const headingId = idOf(reviewer, "Service Agreement");
+    const apply = applier(reviewer, "suggested");
+    apply({ type: "insertAfterBlock", blockId: signedId, text: "Inserted clause." });
+    apply({ type: "deleteBlock", blockId: signedId });
+    apply({ type: "insertAfterBlock", blockId: headingId, text: "Inserted clause." });
+
+    const direct = await open();
+    const directSignedId = idOf(direct, "Signed");
+    const directHeadingId = idOf(direct, "Service Agreement");
+    const applyDirect = applier(direct, "direct");
+    applyDirect({ type: "insertAfterBlock", blockId: directSignedId, text: "Inserted clause." });
+    applyDirect({ type: "deleteBlock", blockId: directSignedId });
+    applyDirect({ type: "insertAfterBlock", blockId: directHeadingId, text: "Inserted clause." });
+
+    reviewer.acceptAll();
+    expect(texts(reviewer)).toEqual(texts(direct));
+  });
+
   test("keeps each suggested paragraph when one of them cannot become a tracked change", async () => {
     const reviewer = await open();
     const apply = applier(reviewer, "suggested");

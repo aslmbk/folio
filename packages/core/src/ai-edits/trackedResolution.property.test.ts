@@ -272,15 +272,10 @@ const runDirectly = async (steps: readonly Step[]): Promise<FolioDocxReviewer | 
       // two paragraphs where the direct run has one.
       return null;
     }
-    if (
-      operation.type === "deleteBlock" &&
-      (direct.getContent().at(-1)?.id === mapped || beforeTable)
-    ) {
-      // Tracked, the story's final paragraph loses its words and keeps its
-      // mark (nothing follows it to join); directly, it goes. Deliberately
-      // different: see `deleteBlock` in apply.ts. So does a paragraph before
-      // a table whose break is itself a pending insertion: a mark cannot say
-      // inserted and deleted at once, and there is no paragraph to join.
+    if (operation.type === "deleteBlock" && beforeTable) {
+      // A paragraph before a table whose break is itself a pending insertion
+      // cannot carry an inserted and deleted mark at once, and there is no
+      // paragraph to join.
       return null;
     }
     let counterpart: Operation;
@@ -335,56 +330,57 @@ let comparedWithDirect = 0;
 describe("resolving random tracked work", () => {
   test("reject restores, accept equals direct, and both survive a save", async () => {
     const original = read(await open());
-    await fc.assert(
-      fc.asyncProperty(caseArbitrary, async ({ mode, intents }) => {
-        const reviewer = await open();
-        const steps = run(reviewer, mode, intents);
-        const pending = read(reviewer);
+    const resolutionProperty = fc.asyncProperty(caseArbitrary, async ({ mode, intents }) => {
+      const reviewer = await open();
+      const steps = run(reviewer, mode, intents);
+      const pending = read(reviewer);
 
-        // A pending tracked document survives its own save; a suggested one
-        // saves without its suggestions, so it is only resolved live.
-        let reopened: FolioDocxReviewer | null = null;
-        if (mode === "tracked-changes") {
-          const before = anchors(reviewer);
-          reopened = await reopen(reviewer);
-          expect(read(reopened)).toEqual(pending);
-          expect(anchors(reopened)).toEqual(before);
-        }
+      // A pending tracked document survives its own save; a suggested one
+      // saves without its suggestions, so it is only resolved live.
+      let reopened: FolioDocxReviewer | null = null;
+      if (mode === "tracked-changes") {
+        const before = anchors(reviewer);
+        reopened = await reopen(reviewer);
+        expect(read(reopened)).toEqual(pending);
+        expect(anchors(reopened)).toEqual(before);
+      }
 
-        // Rejecting: on a replay of the same intents, and on the reopened save.
-        const replay = await open();
-        run(replay, mode, intents);
-        expect(read(replay)).toEqual(pending);
-        replay.rejectAll();
-        expect(read(replay)).toEqual(original);
-        const savedRejected = await reopen(replay);
-        expect(read(savedRejected)).toEqual(original);
-        expect(anchors(savedRejected)).toEqual(anchors(replay));
-        if (mode === "tracked-changes") {
-          const rejecting = await reopen(reviewer);
-          rejecting.rejectAll();
-          expect(read(rejecting)).toEqual(original);
-        }
+      // Rejecting: on a replay of the same intents, and on the reopened save.
+      const replay = await open();
+      run(replay, mode, intents);
+      expect(read(replay)).toEqual(pending);
+      replay.rejectAll();
+      expect(read(replay)).toEqual(original);
+      const savedRejected = await reopen(replay);
+      expect(read(savedRejected)).toEqual(original);
+      expect(anchors(savedRejected)).toEqual(anchors(replay));
+      if (mode === "tracked-changes") {
+        const rejecting = await reopen(reviewer);
+        rejecting.rejectAll();
+        expect(read(rejecting)).toEqual(original);
+      }
 
-        // Accepting: equal to the direct run, and the same after a save.
-        const direct = await runDirectly(steps);
-        reviewer.acceptAll();
-        const accepted = read(reviewer);
-        const acceptedAnchors = anchors(reviewer);
-        const savedAccepted = await reopen(reviewer);
-        expect(read(savedAccepted)).toEqual(accepted);
-        expect(anchors(savedAccepted)).toEqual(acceptedAnchors);
-        if (direct) {
-          comparedWithDirect++;
-          expect(accepted).toEqual(read(direct));
-        }
-        if (reopened) {
-          reopened.acceptAll();
-          expect(read(reopened)).toEqual(accepted);
-        }
-      }),
-      propertyConfig({ numRuns: 100 }),
-    );
+      // Accepting: equal to the direct run, and the same after a save.
+      const direct = await runDirectly(steps);
+      reviewer.acceptAll();
+      const accepted = read(reviewer);
+      const acceptedAnchors = anchors(reviewer);
+      const savedAccepted = await reopen(reviewer);
+      expect(read(savedAccepted)).toEqual(accepted);
+      expect(anchors(savedAccepted)).toEqual(acceptedAnchors);
+      if (direct) {
+        comparedWithDirect++;
+        expect(accepted).toEqual(read(direct));
+      }
+      if (reopened) {
+        reopened.acceptAll();
+        expect(read(reopened)).toEqual(accepted);
+      }
+    });
+    await fc.assert(resolutionProperty, propertyConfig({ numRuns: 100, seed: 2055257210 }));
+    await fc.assert(resolutionProperty, propertyConfig({ numRuns: 100, seed: -1401551044 }));
+    await fc.assert(resolutionProperty, propertyConfig({ numRuns: 100, seed: -304239210 }));
+    await fc.assert(resolutionProperty, propertyConfig({ numRuns: 100 }));
     // The direct comparison must not pass vacuously.
     expect(comparedWithDirect).toBeGreaterThan(0);
   });

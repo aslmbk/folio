@@ -188,6 +188,14 @@ const planArbitrary: fc.Arbitrary<OperationPlan> = fc.record({
   valueCount: fc.option(fc.integer({ min: 0, max: 5 }), { nil: undefined }),
 });
 
+/**
+ * One operation, or two in one batch: each is resolved against the document
+ * as it was read, and the batch applies them from the end backwards, so a
+ * second operation at the first one's boundary checks that neither lands on
+ * what the other moved.
+ */
+const batchArbitrary = fc.array(planArbitrary, { minLength: 1, maxLength: 2 });
+
 /** A cell of the spec, and the snapshot table it is read from (0 outer, 1 nested). */
 type AnchorCell = { cell: TableSpecCell; tableIndex: number; siblings: readonly TableSpecCell[] };
 
@@ -218,6 +226,7 @@ const buildOperation = (
   spec: TableSpec,
   plan: OperationPlan,
   blocks: readonly FolioAIBlock[],
+  id: string,
 ): PlannedOperation => {
   const anchors = anchorCells(spec);
   const anchor = anchors[plan.anchor % anchors.length]!;
@@ -236,7 +245,7 @@ const buildOperation = (
     return block.id;
   };
   const blockId = blockIdAt(anchor.tableIndex, anchor.cell);
-  const values = Array.from({ length: plan.valueCount ?? 0 }, (_, index) => `v${index}v`);
+  const values = Array.from({ length: plan.valueCount ?? 0 }, (_, index) => `${id}v${index}v`);
   const planned = (operation: FolioDocumentOperation, supplied: string[] = []) => ({
     operation,
     values: supplied,
@@ -248,7 +257,7 @@ const buildOperation = (
     case "insertTableColumn":
       return planned(
         {
-          id: "op",
+          id,
           type: plan.kind,
           blockId,
           position: plan.position,
@@ -260,42 +269,59 @@ const buildOperation = (
     case "deleteTableColumn":
     case "splitTableCell":
     case "deleteBlock":
-      return planned({ id: "op", type: plan.kind, blockId });
+      return planned({ id, type: plan.kind, blockId });
     case "mergeTableCells":
       return planned({
-        id: "op",
+        id,
         type: plan.kind,
         blockId,
         endBlockId: blockIdAt(anchor.tableIndex, other),
       });
-    case "replaceBlock":
-      return planned({ id: "op", type: plan.kind, blockId, text: "replacedv" }, ["replacedv"]);
-    case "insertAfterBlock":
-      return planned({ id: "op", type: plan.kind, blockId, text: "insertedv" }, ["insertedv"]);
+    case "replaceBlock": {
+      const text = `${id}replacedv`;
+      return planned({ id, type: plan.kind, blockId, text }, [text]);
+    }
+    case "insertAfterBlock": {
+      const text = `${id}insertedv`;
+      return planned({ id, type: plan.kind, blockId, text }, [text]);
+    }
   }
 };
 
 const open = (bytes: ArrayBuffer) => FolioDocxReviewer.fromBuffer(bytes, { author: "Tester" });
 
-type Run = PlannedOperation & {
+type Run = {
+  planned: PlannedOperation[];
   reviewer: FolioDocxReviewer;
   result: FolioDocumentOperationResult;
 };
 
+/** The plans as one batch, each resolved against the document as it was read. */
 const run = async (
   base: ArrayBuffer,
   spec: TableSpec,
-  plan: OperationPlan,
+  plans: readonly OperationPlan[],
   mode: "direct" | "tracked-changes",
 ): Promise<Run> => {
   const reviewer = await open(base);
-  const planned = buildOperation(spec, plan, reviewer.getContent());
+  const blocks = reviewer.getContent();
+  const planned = plans.map((plan, index) => buildOperation(spec, plan, blocks, `op${index}`));
   const result = reviewer.applyDocumentOperations({
     version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
     mode,
-    operations: [planned.operation],
+    operations: planned.map(({ operation }) => operation),
   });
-  return { ...planned, reviewer, result };
+  return { planned, reviewer, result };
+};
+
+const appliedIds = ({ result }: Run): Set<string> => new Set(result.applied.map(({ id }) => id));
+
+const readTablesAt = async (stage: string, reviewer: FolioDocxReviewer): Promise<TableReading> => {
+  try {
+    return await readReviewerTables(reviewer);
+  } catch (cause) {
+    throw new Error(`Table property failed while reading ${stage}`, { cause });
+  }
 };
 
 const resolve = async (
@@ -308,7 +334,7 @@ const resolve = async (
   } else {
     reopened.rejectAll();
   }
-  return readReviewerTables(reopened);
+  return readTablesAt(resolution, reopened);
 };
 
 /** What a caller sees of a document: its blocks' text and every table's cells. */
@@ -384,27 +410,29 @@ const trackedRefusalIsExpected = (planned: PlannedOperation, plan: OperationPlan
   }
 };
 
-const checkCase = async (spec: TableSpec, plan: OperationPlan): Promise<void> => {
+const checkCase = async (spec: TableSpec, plans: readonly OperationPlan[]): Promise<void> => {
   const base = await buildTableDocx(spec);
-  const original = await readReviewerTables(await open(base));
+  const original = await readTablesAt("original", await open(base));
   expect(tableReadingProblems(original)).toEqual([]);
 
-  const direct = await run(base, spec, plan, "direct");
-  const tracked = await run(base, spec, plan, "tracked-changes");
-  const directApplied = direct.result.applied.length > 0;
-  const trackedApplied = tracked.result.applied.length > 0;
+  const direct = await run(base, spec, plans, "direct");
+  const tracked = await run(base, spec, plans, "tracked-changes");
+  const directApplied = appliedIds(direct);
+  const trackedApplied = appliedIds(tracked);
 
-  const directReading = await readReviewerTables(direct.reviewer);
+  const directReading = await readTablesAt("direct", direct.reviewer);
   expect(tableReadingProblems(directReading)).toEqual([]);
-  if (directApplied) {
-    // (a) Every supplied value landed.
+  if (directApplied.size > 0) {
+    // (a) Every value an applied operation supplied landed.
     const text = directReading.texts.join("\n");
-    for (const value of direct.values) {
-      expect(text).toContain(value);
+    for (const { operation, values } of direct.planned) {
+      for (const value of directApplied.has(operation.id) ? values : []) {
+        expect(text).toContain(value);
+      }
     }
   } else {
-    // A refused operation leaves the document alone, and says why.
-    expect(direct.result.issues).toHaveLength(1);
+    // A refused batch leaves the document alone, and says why.
+    expect(direct.result.issues).toHaveLength(plans.length);
     expect(visible(directReading)).toEqual(visible(original));
   }
 
@@ -413,30 +441,58 @@ const checkCase = async (spec: TableSpec, plan: OperationPlan): Promise<void> =>
   // (c) Whatever tracked mode did, rejecting it restores the original.
   expect(visible(rejected)).toEqual(visible(original));
 
-  if (directApplied !== trackedApplied) {
-    // (b) Both modes agree on whether the operation is allowed, bar the
+  const disagreeing = tracked.planned.flatMap((planned, index) =>
+    directApplied.has(planned.operation.id) === trackedApplied.has(planned.operation.id)
+      ? []
+      : [{ planned, plan: plans[index]! }],
+  );
+  if (disagreeing.length > 0) {
+    // (b) Both modes agree on whether each operation is allowed, bar the
     // refusals the tracked vocabulary forces.
-    expect({
-      plan,
-      direct: direct.result.skipped,
-      tracked: tracked.result.skipped,
-      expected:
-        directApplied &&
-        tracked.result.skipped.every(({ reason }) => reason === "unsupportedBlock") &&
-        trackedRefusalIsExpected(tracked, plan),
-    }).toMatchObject({ expected: true });
-    return;
+    for (const { planned, plan } of disagreeing) {
+      const id = planned.operation.id;
+      expect({
+        plans,
+        direct: direct.result.skipped,
+        tracked: tracked.result.skipped,
+        expected:
+          directApplied.has(id) &&
+          tracked.result.skipped.some(
+            (skip) => skip.id === id && skip.reason === "unsupportedBlock",
+          ) &&
+          trackedRefusalIsExpected(planned, plan),
+      }).toMatchObject({ expected: true });
+    }
   }
-  if (!trackedApplied) {
-    expect(direct.result.skipped.map(({ reason }) => reason)).toEqual(
-      tracked.result.skipped.map(({ reason }) => reason),
-    );
+  if (trackedApplied.size === 0) {
+    if (disagreeing.length === 0) {
+      expect(direct.result.skipped.map(({ reason }) => reason)).toEqual(
+        tracked.result.skipped.map(({ reason }) => reason),
+      );
+    }
     return;
   }
   const accepted = await resolve(tracked.reviewer, "accept");
   expect(tableReadingProblems(accepted)).toEqual([]);
-  // (b) Accepting the tracked result is the direct result.
-  expect(visible(accepted)).toEqual(visible(directReading));
+  // (b) Accepting the tracked result is the direct result for the operations
+  // both modes applied, even when tracked mode refused another operation.
+  if (disagreeing.length === 0) {
+    expect(visible(accepted)).toEqual(visible(directReading));
+    return;
+  }
+  const shared = await open(base);
+  const sharedOperations = direct.planned
+    .filter(({ operation }) => trackedApplied.has(operation.id))
+    .map(({ operation }) => operation);
+  const sharedResult = shared.applyDocumentOperations({
+    version: FOLIO_DOCUMENT_OPERATION_CONTRACT_VERSION,
+    mode: "direct",
+    operations: sharedOperations,
+  });
+  expect(new Set(sharedResult.applied.map(({ id }) => id))).toEqual(trackedApplied);
+  const sharedReading = await readTablesAt("direct shared", shared);
+  expect(tableReadingProblems(sharedReading)).toEqual([]);
+  expect(visible(accepted)).toEqual(visible(sharedReading));
 };
 
 describe("table operations on merged tables", () => {
@@ -444,7 +500,23 @@ describe("table operations on merged tables", () => {
     "keep every value, agree across modes and readers, and reject cleanly",
     async () => {
       await fc.assert(
-        fc.asyncProperty(documentArbitrary, planArbitrary, checkCase),
+        fc.asyncProperty(documentArbitrary, batchArbitrary, checkCase),
+        propertyConfig({ numRuns: 150, seed: -1930932135 }),
+      );
+      await fc.assert(
+        fc.asyncProperty(documentArbitrary, batchArbitrary, checkCase),
+        propertyConfig({ numRuns: 150, seed: 58022172 }),
+      );
+      await fc.assert(
+        fc.asyncProperty(documentArbitrary, batchArbitrary, checkCase),
+        propertyConfig({ numRuns: 150, seed: -324071034 }),
+      );
+      await fc.assert(
+        fc.asyncProperty(documentArbitrary, batchArbitrary, checkCase),
+        propertyConfig({ numRuns: 150, seed: -1330713042 }),
+      );
+      await fc.assert(
+        fc.asyncProperty(documentArbitrary, batchArbitrary, checkCase),
         propertyConfig({ numRuns: 150 }),
       );
     },
