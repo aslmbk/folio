@@ -18,12 +18,13 @@
  * 11. Assemble final Document
  */
 
-import { TaggedError } from "better-result";
+import { panic, TaggedError } from "better-result";
 
 import type {
   Document,
   DocxPackage,
   DocumentBody,
+  BlockContent,
   Theme,
   Footnote,
   Endnote,
@@ -59,6 +60,7 @@ import { parseFootnotes, parseEndnotes } from "./footnoteParser";
 import { parseHeader, parseFooter } from "./headerFooterParser";
 import {
   assignHeaderFooterVerbatimXml,
+  canReplayHeaderFooterVerbatim,
   refreshHeaderFooterVerbatimFingerprint,
 } from "./headerFooterVerbatim";
 import {
@@ -85,6 +87,14 @@ import { assignDocumentParagraphPropertySourceContract } from "./paragraphProper
 import type { NumberingMap } from "./numberingParser";
 import { countDanglingRelationshipReferences } from "./danglingRelationshipReferences";
 import {
+  ALT_CHUNK_PLAIN_TEXT_LIMIT_BYTES,
+  getAltChunkRelationshipId,
+  isAltChunkMarkup,
+} from "./altChunk";
+import { countOpaqueRevisionWrappers } from "./opaqueCarrier";
+import { getEntryUncompressedSize, unzipDocx, getMediaMimeType, mediaToDataUrl } from "./unzip";
+import { getAttribute, getChildElements, getLocalName, parseXmlDocument } from "./xmlParser";
+import {
   UNNUMBERED_PARAGRAPH_WARNING,
   UNNUMBERED_STYLE_WARNING,
   normalizeNumberingReferences,
@@ -101,7 +111,6 @@ import {
   normalizeTrackedMoveRanges,
 } from "./trackedMoveRangeNormalization";
 import { DocxEncryptionError } from "./encryption/errors";
-import { unzipDocx, getMediaMimeType, mediaToDataUrl } from "./unzip";
 import type { DocxUnzipOptions, RawDocxContent } from "./unzip";
 import { FOLIO_XML_RESOURCE_LIMITS } from "./xmlResourceLimits";
 
@@ -162,6 +171,179 @@ export type ParseOptions = {
 // ============================================================================
 // MAIN PARSER
 // ============================================================================
+
+const countAltChunks = (blocks: readonly BlockContent[]): number => {
+  let count = 0;
+  for (const block of blocks) {
+    switch (block.type) {
+      case "preservedBlock":
+        count += isAltChunkMarkup(block.xml) ? 1 : 0;
+        break;
+      case "table":
+        for (const row of block.rows) {
+          for (const cell of row.cells) count += countAltChunks(cell.content);
+        }
+        break;
+      case "blockSdt":
+      case "blockCustomXml":
+        count += countAltChunks(block.content);
+        break;
+      case "paragraph":
+      case "bookmarkStart":
+      case "bookmarkEnd":
+        break;
+      default: {
+        const unsupported: never = block;
+        panic(`Unsupported block while counting altChunks: ${JSON.stringify(unsupported)}`);
+      }
+    }
+  }
+  return count;
+};
+
+const ALT_CHUNK_RELATIONSHIP_TYPE =
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk";
+const ALT_CHUNK_STRICT_RELATIONSHIP_TYPE =
+  "http://purl.oclc.org/ooxml/officeDocument/relationships/aFChunk";
+const CONTENT_TYPES_NAMESPACE_URI = "http://schemas.openxmlformats.org/package/2006/content-types";
+
+const contentTypeOf = (contentTypesXml: string | null, partPath: string): string | undefined => {
+  if (!contentTypesXml) {
+    return undefined;
+  }
+  const root = parseXmlDocument(contentTypesXml);
+  if (!root || root.namespaceUri !== CONTENT_TYPES_NAMESPACE_URI) {
+    return undefined;
+  }
+  const extension = partPath.slice(partPath.lastIndexOf(".") + 1).toLowerCase();
+  let defaultContentType: string | undefined;
+  for (const child of getChildElements(root)) {
+    if (child.namespaceUri !== CONTENT_TYPES_NAMESPACE_URI) {
+      continue;
+    }
+    const name = getLocalName(child.name);
+    const contentType = getAttribute(child, null, "ContentType");
+    if (name === "Override" && getAttribute(child, null, "PartName") === `/${partPath}`) {
+      return contentType ?? undefined;
+    }
+    if (name === "Default" && getAttribute(child, null, "Extension")?.toLowerCase() === extension) {
+      defaultContentType = contentType ?? undefined;
+    }
+  }
+  return defaultContentType;
+};
+
+type AltChunkTextContext = {
+  relationships: RelationshipMap;
+  relationshipsPath: string;
+  raw: RawDocxContent;
+  budget: { remainingBytes: number };
+};
+
+const extractAltChunkPlainText = async (
+  xml: string,
+  context: AltChunkTextContext,
+): Promise<string | undefined> => {
+  const relationshipId = getAltChunkRelationshipId(xml);
+  const relationship =
+    relationshipId === undefined ? undefined : context.relationships.get(relationshipId);
+  if (
+    !relationship ||
+    relationship.targetMode === "External" ||
+    (relationship.type !== ALT_CHUNK_RELATIONSHIP_TYPE &&
+      relationship.type !== ALT_CHUNK_STRICT_RELATIONSHIP_TYPE)
+  ) {
+    return undefined;
+  }
+  const partPath = resolveRelativePath(context.relationshipsPath, relationship.target);
+  if (
+    contentTypeOf(context.raw.contentTypesXml, partPath)?.split(";")[0]?.trim().toLowerCase() !==
+    "text/plain"
+  ) {
+    return undefined;
+  }
+  const file = context.raw.originalZip.file(partPath);
+  if (!file) {
+    return undefined;
+  }
+  const declaredSize = getEntryUncompressedSize(file);
+  if (declaredSize === null || declaredSize > context.budget.remainingBytes) return undefined;
+  const bytes = await file.async("uint8array");
+  if (bytes.byteLength > context.budget.remainingBytes) {
+    return undefined;
+  }
+  context.budget.remainingBytes -= bytes.byteLength;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+};
+
+const attachAltChunkPlainText = async (
+  blocks: BlockContent[],
+  context: AltChunkTextContext,
+): Promise<void> => {
+  for (const block of blocks) {
+    if (block.type === "preservedBlock" && isAltChunkMarkup(block.xml)) {
+      const readerText = await extractAltChunkPlainText(block.xml, context);
+      if (readerText !== undefined) block.readerText = readerText;
+      continue;
+    }
+    if (block.type === "table") {
+      for (const row of block.rows) {
+        for (const cell of row.cells) {
+          await attachAltChunkPlainText(cell.content, context);
+        }
+      }
+      continue;
+    }
+    if (block.type === "blockSdt" || block.type === "blockCustomXml") {
+      await attachAltChunkPlainText(block.content, context);
+    }
+  }
+};
+
+const countOpaqueRevisionCarriers = (blocks: readonly BlockContent[]): number => {
+  let count = 0;
+  for (const block of blocks) {
+    switch (block.type) {
+      case "preservedBlock":
+        count += countOpaqueRevisionWrappers(block.xml);
+        break;
+      case "table":
+        count +=
+          block.preserved?.children?.reduce(
+            (total, child) => total + countOpaqueRevisionWrappers(child.xml),
+            0,
+          ) ?? 0;
+        for (const row of block.rows) {
+          count +=
+            row.preserved?.children?.reduce(
+              (total, child) => total + countOpaqueRevisionWrappers(child.xml),
+              0,
+            ) ?? 0;
+          for (const cell of row.cells) {
+            count += countOpaqueRevisionCarriers(cell.content);
+          }
+        }
+        break;
+      case "blockSdt":
+      case "blockCustomXml":
+        count += countOpaqueRevisionCarriers(block.content);
+        break;
+      case "paragraph":
+      case "bookmarkStart":
+      case "bookmarkEnd":
+        break;
+      default: {
+        const unsupported: never = block;
+        panic(`Unsupported block while counting opaque revisions: ${JSON.stringify(unsupported)}`);
+      }
+    }
+  }
+  return count;
+};
 
 /**
  * Parse a DOCX file into a complete Document model
@@ -577,6 +759,97 @@ export async function parseDocxWithPreviewBudget(
       ...(templateVariables !== undefined ? { templateVariables } : {}),
       ...(requiredFonts.length > 0 ? { requiredFonts } : {}),
     };
+    const altChunkBudget = { remainingBytes: ALT_CHUNK_PLAIN_TEXT_LIMIT_BYTES };
+    await attachAltChunkPlainText(pkg.document.content, {
+      relationships: rels,
+      relationshipsPath: DOCUMENT_RELATIONSHIPS_PATH,
+      raw,
+      budget: altChunkBudget,
+    });
+    const altChunkContextForPart = (partPath: string): AltChunkTextContext => {
+      const relationshipsPath = getRelationshipsPathForPart(partPath);
+      const relationshipsXml = getMapCaseInsensitive(raw.allXml, relationshipsPath);
+      return {
+        relationships: relationshipsXml ? parseRelationships(relationshipsXml) : new Map(),
+        relationshipsPath,
+        raw,
+        budget: altChunkBudget,
+      };
+    };
+    for (const [rId, header] of pkg.headers ?? []) {
+      const relationship = rels.get(rId);
+      if (relationship?.target) {
+        const replayable = canReplayHeaderFooterVerbatim(header);
+        await attachAltChunkPlainText(
+          header.content,
+          altChunkContextForPart(getRelationshipPartPath(relationship.target)),
+        );
+        if (replayable) refreshHeaderFooterVerbatimFingerprint(header);
+      }
+    }
+    for (const [rId, footer] of pkg.footers ?? []) {
+      const relationship = rels.get(rId);
+      if (relationship?.target) {
+        const replayable = canReplayHeaderFooterVerbatim(footer);
+        await attachAltChunkPlainText(
+          footer.content,
+          altChunkContextForPart(getRelationshipPartPath(relationship.target)),
+        );
+        if (replayable) refreshHeaderFooterVerbatimFingerprint(footer);
+      }
+    }
+    const footnoteContext = altChunkContextForPart("word/footnotes.xml");
+    for (const footnote of pkg.footnotes ?? []) {
+      await attachAltChunkPlainText(footnote.content, footnoteContext);
+    }
+    const endnoteContext = altChunkContextForPart("word/endnotes.xml");
+    for (const endnote of pkg.endnotes ?? []) {
+      await attachAltChunkPlainText(endnote.content, endnoteContext);
+    }
+    const altChunkCount =
+      countAltChunks(pkg.document.content) +
+      [...(pkg.headers?.values() ?? [])].reduce(
+        (total, part) => total + countAltChunks(part.content),
+        0,
+      ) +
+      [...(pkg.footers?.values() ?? [])].reduce(
+        (total, part) => total + countAltChunks(part.content),
+        0,
+      ) +
+      (pkg.footnotes ?? []).reduce((total, part) => total + countAltChunks(part.content), 0) +
+      (pkg.endnotes ?? []).reduce((total, part) => total + countAltChunks(part.content), 0);
+    if (altChunkCount > 0) {
+      parseContext.warn({
+        code: PARSE_WARNING_CODES.altChunkUnsupported,
+        element: "w:altChunk",
+        count: altChunkCount,
+      });
+    }
+    const opaqueRevisionCount =
+      countOpaqueRevisionCarriers(pkg.document.content) +
+      [...(pkg.headers?.values() ?? [])].reduce(
+        (total, part) => total + countOpaqueRevisionCarriers(part.content),
+        0,
+      ) +
+      [...(pkg.footers?.values() ?? [])].reduce(
+        (total, part) => total + countOpaqueRevisionCarriers(part.content),
+        0,
+      ) +
+      (pkg.footnotes ?? []).reduce(
+        (total, part) => total + countOpaqueRevisionCarriers(part.content),
+        0,
+      ) +
+      (pkg.endnotes ?? []).reduce(
+        (total, part) => total + countOpaqueRevisionCarriers(part.content),
+        0,
+      );
+    if (opaqueRevisionCount > 0) {
+      parseContext.warn({
+        code: PARSE_WARNING_CODES.revisionCarrierOpaque,
+        element: "w:ins/w:del/w:moveFrom/w:moveTo",
+        count: opaqueRevisionCount,
+      });
+    }
     assignDocumentParagraphPropertySourceContract(document, await paragraphPropertySourceDigest);
     previews.enforce(previewBudget);
 
