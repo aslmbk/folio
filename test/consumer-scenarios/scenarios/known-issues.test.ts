@@ -1,8 +1,7 @@
 /**
  * The open issues and unfiled findings, each as the smallest public-API
- * scenario that shows it. Every one runs as an expected failure: when a fix
- * lands, its scenario passes, the expected failure fails, and the marker comes
- * off so the scenario guards the fix.
+ * scenario that shows it. Open defects run as expected failures; after a fix,
+ * the scenario stays as a passing regression without that marker.
  */
 
 import assert from "node:assert/strict";
@@ -259,78 +258,59 @@ describe("findings of the metamorphic relations (support/metamorphic.ts) and the
     );
   };
 
-  expectedFailure(
-    "LIVE_STALE_BLOCK_FIELDS",
-    "a restyled paragraph previews its new style before a save",
-    /previewRuns/u,
-    async () => {
-      const reviewer = await openReviewer(await plainDocument());
-      const text = "The Buyer pays each invoice within thirty days.";
-      apply(reviewer, "direct", [
-        {
-          type: "setBlockParagraphProperties",
-          blockId: blockId(reviewer, text),
-          properties: { styleId: "Heading2" },
-        },
-      ]);
-      await assertFieldKept(reviewer, text, "previewRuns");
-    },
-  );
+  test("a restyled paragraph previews its new style before a save", async () => {
+    const reviewer = await openReviewer(await plainDocument());
+    const text = "The Buyer pays each invoice within thirty days.";
+    apply(reviewer, "direct", [
+      {
+        type: "setBlockParagraphProperties",
+        blockId: blockId(reviewer, text),
+        properties: { styleId: "Heading2" },
+      },
+    ]);
+    await assertFieldKept(reviewer, text, "previewRuns");
+  });
 
-  expectedFailure(
-    "LIVE_STALE_BLOCK_FIELDS",
-    "a paragraph inserted after a bold heading previews its own direct bold off before a save",
-    /previewRuns/u,
-    async () => {
-      const reviewer = await openReviewer(await styleNumberedDocument());
-      apply(reviewer, "direct", [
-        { type: "insertAfterBlock", blockId: blockId(reviewer, "Definitions"), text: "Inserted." },
-      ]);
-      await assertFieldKept(reviewer, "Inserted.", "previewRuns");
-    },
-  );
+  test("a paragraph inserted after a bold heading previews its own direct bold off before a save", async () => {
+    const reviewer = await openReviewer(await styleNumberedDocument());
+    apply(reviewer, "direct", [
+      { type: "insertAfterBlock", blockId: blockId(reviewer, "Definitions"), text: "Inserted." },
+    ]);
+    await assertFieldKept(reviewer, "Inserted.", "previewRuns");
+  });
 
-  expectedFailure(
-    "LIVE_STALE_BLOCK_FIELDS",
-    "a paragraph inserted with a numbered heading style reads its indentation before a save",
-    /directIndentation/u,
-    async () => {
-      const reviewer = await openReviewer(await styleNumberedDocument());
-      apply(reviewer, "direct", [
-        {
-          type: "insertAfterBlock",
-          blockId: blockId(reviewer, "The Buyer pays on delivery."),
-          text: "Inserted.",
-          styleId: "Heading2",
-        },
-      ]);
-      await assertFieldKept(reviewer, "Inserted.", "directIndentation");
-    },
-  );
+  test("a paragraph inserted with a numbered heading style reads its indentation before a save", async () => {
+    const reviewer = await openReviewer(await styleNumberedDocument());
+    apply(reviewer, "direct", [
+      {
+        type: "insertAfterBlock",
+        blockId: blockId(reviewer, "The Buyer pays on delivery."),
+        text: "Inserted.",
+        styleId: "Heading2",
+      },
+    ]);
+    await assertFieldKept(reviewer, "Inserted.", "previewRuns");
+    await assertFieldKept(reviewer, "Inserted.", "directIndentation");
+  });
 
-  expectedFailure(
-    "LIVE_REPLY_RANGES",
-    "a reply reads the same in toMarkdown before and after a save",
-    /toMarkdown/u,
-    async () => {
-      const reviewer = await openReviewer(await plainDocument());
-      apply(reviewer, "direct", [
-        {
-          type: "commentOnBlock",
-          blockId: blockId(reviewer, "The Buyer pays each invoice within thirty days."),
-          comment: { text: "Why thirty?" },
-        },
-      ]);
-      const [comment] = reviewer.getComments();
-      assert.ok(comment);
-      reviewer.replyTo(comment, { text: "Market standard." });
-      assert.equal(
-        toMarkdown((await reopen(reviewer)).toDocument()),
-        toMarkdown(reviewer.toDocument()),
-        "toMarkdown reads otherwise after the save",
-      );
-    },
-  );
+  test("a reply reads the same in toMarkdown before and after a save", async () => {
+    const reviewer = await openReviewer(await plainDocument());
+    apply(reviewer, "direct", [
+      {
+        type: "commentOnBlock",
+        blockId: blockId(reviewer, "The Buyer pays each invoice within thirty days."),
+        comment: { text: "Why thirty?" },
+      },
+    ]);
+    const [comment] = reviewer.getComments();
+    assert.ok(comment);
+    reviewer.replyTo(comment, { text: "Market standard." });
+    assert.equal(
+      toMarkdown((await reopen(reviewer)).toDocument()),
+      toMarkdown(reviewer.toDocument()),
+      "toMarkdown reads otherwise after the save",
+    );
+  });
 
   test("deleting the last paragraph tracked and accepting it leaves what deleting it directly does", async () => {
     const texts: Record<string, string[]> = {};

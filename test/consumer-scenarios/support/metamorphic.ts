@@ -232,17 +232,6 @@ const assertSame = (actual: unknown, expected: unknown, message: string): void =
   if (found.length > 0) throw new Error(`${message}:\n    ${found.join("\n    ")}`);
 };
 
-/** `value` with every property named in `keys` left out, at any depth. */
-const withoutKeys = (value: unknown, keys: readonly string[]): unknown => {
-  if (Array.isArray(value)) return value.map((item) => withoutKeys(item, keys));
-  if (typeof value !== "object" || value === null) return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key]) => !keys.includes(key))
-      .map(([key, item]) => [key, withoutKeys(item, keys)]),
-  );
-};
-
 // ---------------------------------------------------------------------------
 // Tolerances
 // ---------------------------------------------------------------------------
@@ -263,12 +252,6 @@ type Tolerance<T> = { name: ToleranceName; apply: (value: T) => T };
 
 /** Every tolerance, with how many comparisons it let pass that would have failed without it. */
 const ABSORBED = new Map<ToleranceName, number>();
-
-const tolerate = <T>(finding: Finding, what: string, apply: (value: T) => T): Tolerance<T> => {
-  const name = { finding, what };
-  ABSORBED.set(name, 0);
-  return { name, apply };
-};
 
 /**
  * Where `a` and `b` differ once `tolerances` are applied to both. A pair the
@@ -292,26 +275,6 @@ const tolerantDifferences = <T>(a: T, b: T, tolerances: readonly Tolerance<T>[])
   }
   return found;
 };
-
-const STALE_LIVE_FIELDS = tolerate<unknown>(
-  "LIVE_STALE_BLOCK_FIELDS",
-  "previewRuns and directIndentation left out of getContent and the snapshot",
-  (value) => withoutKeys(value, ["previewRuns", "directIndentation"]),
-);
-
-/** A reply's range is written only on save, which shifts the editor positions after it. */
-const REPLY_POSITIONS = tolerate<unknown>(
-  "LIVE_REPLY_RANGES",
-  "snapshot from/to positions left out",
-  (value) => withoutKeys(value, ["from", "to"]),
-);
-
-/** Comment anchors are compared through getComments. */
-const REPLY_COMMENT_TAGS = tolerate<unknown>(
-  "LIVE_REPLY_RANGES",
-  "comment tags stripped from toMarkdown",
-  (value) => String(value).replace(/<\/?comment\b[^>]*>/gu, ""),
-);
 
 type BlocksView = { blocks: readonly { text: string; table?: unknown }[] };
 
@@ -720,8 +683,9 @@ const cloneReviewer = (reviewer: Reviewer): Reviewer => {
     if (!descriptor) continue;
     const value = descriptor.value;
     let cloned = value;
-    if (key === "state") cloned = value.apply(value.tr);
-    else if (key === "secondaryStoryStates") {
+    if (key === "state") {
+      cloned = value.apply(value.tr);
+    } else if (key === "secondaryStoryStates") {
       cloned = new Map(
         [...value].map(([storyKey, entry]) => [
           storyKey,
@@ -732,9 +696,13 @@ const cloneReviewer = (reviewer: Reviewer): Reviewer => {
           },
         ]),
       );
-    } else if (value instanceof Map) cloned = new Map(value);
-    else if (value instanceof Set) cloned = new Set(value);
-    else if (Array.isArray(value)) cloned = [...value];
+    } else if (value instanceof Map) {
+      cloned = new Map(value);
+    } else if (value instanceof Set) {
+      cloned = new Set(value);
+    } else if (Array.isArray(value)) {
+      cloned = [...value];
+    }
     Object.defineProperty(copy, key, {
       ...descriptor,
       value: cloned,
@@ -861,11 +829,11 @@ export const startRelations = async ({
     const copy = cloneReviewer(pre);
     const preRows = rowsOf(copy, story);
     const preState = exactState(copy);
-    const apply = (candidateReviewer: Reviewer, operations: Batch): Result =>
+    const applyToCopy = (target: Reviewer, operations: Batch): Result =>
       story.type === "main"
-        ? candidateReviewer.applyDocumentOperations(operations)
-        : candidateReviewer.applyDocumentOperationsToStory({ story, batch: operations });
-    const again = apply(copy, structuredClone(batch));
+        ? target.applyDocumentOperations(operations)
+        : target.applyDocumentOperationsToStory({ story, batch: operations });
+    const again = applyToCopy(copy, structuredClone(batch));
     const applied = operationsOf(batch).filter((operation) => appliedIds(again).has(operation.id));
     assert.deepEqual(
       [...appliedIds(again)].sort(),
@@ -911,7 +879,7 @@ export const startRelations = async ({
         skipped("batchSequential", "an operation does not re-resolve one at a time");
         return;
       }
-      const alone = apply(oneByOne, batchOf(batch, batchMode, restated as AnyOperation[]));
+      const alone = applyToCopy(oneByOne, batchOf(batch, batchMode, restated as AnyOperation[]));
       for (const { id, reason } of alone.skipped) {
         if (reason !== "noopOperation") problems.push(`${id} refused one at a time: ${reason}`);
       }
@@ -944,9 +912,9 @@ export const startRelations = async ({
       getComments: target.getComments() as unknown,
     });
     const tolerances: Record<keyof ReturnType<typeof views>, Tolerance<unknown>[]> = {
-      getContent: [STALE_LIVE_FIELDS],
-      snapshot: [STALE_LIVE_FIELDS, REPLY_POSITIONS],
-      toMarkdown: [REPLY_COMMENT_TAGS],
+      getContent: [],
+      snapshot: [],
+      toMarkdown: [],
       getChanges: [],
       getComments: [],
     };
