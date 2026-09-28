@@ -771,6 +771,31 @@ const paragraphPropertiesPatch = ({
 
 const REVISION_MARK_NAMES: ReadonlySet<string> = new Set(["insertion", "deletion"]);
 
+const hasOrdinaryTextRevision = (block: PMNode): boolean => {
+  let found = false;
+  block.descendants((node) => {
+    if (
+      node.marks.some(
+        (mark) =>
+          REVISION_MARK_NAMES.has(mark.type.name) && mark.attrs["provenance"] !== "suggested",
+      )
+    ) {
+      found = true;
+      return false;
+    }
+    return true;
+  });
+  return found;
+};
+
+const hasOrdinaryParagraphMarkRevision = (block: PMNode): boolean => {
+  const mark: unknown = block.attrs["pPrMark"];
+  if (typeof mark !== "object" || mark === null || !("info" in mark)) return false;
+  const info: unknown = mark.info;
+  if (typeof info !== "object" || info === null) return false;
+  return !("provenance" in info) || info.provenance !== "suggested";
+};
+
 /**
  * Strip insertion and deletion marks from the zero-width anchors the batch
  * touched.
@@ -4177,6 +4202,21 @@ const applyFolioAIEditOperationsInternal = ({
       }
       case "insertAfterBlock":
       case "insertBeforeBlock": {
+        if (
+          isSuggested &&
+          isPendingDeletion(
+            tr.doc,
+            item.blockFrom,
+            item.blockNode,
+            buildCleanBlockText(item.blockNode, item.blockFrom, {
+              fieldResults: "text",
+              noteReferences,
+            }).text,
+          )
+        ) {
+          skipped.push({ id: item.operation.id, reason: "pendingDeletion" });
+          continue;
+        }
         const built = buildInsertedParagraphs({
           item,
           schema: view.state.schema,
@@ -4463,6 +4503,16 @@ const applyFolioAIEditOperationsInternal = ({
         break;
       }
       case "deleteBlock": {
+        if (
+          isSuggested &&
+          (hasOrdinaryTextRevision(item.blockNode) ||
+            hasOrdinaryParagraphMarkRevision(item.blockNode))
+        ) {
+          // A whole-block deletion can replace ordinary text revisions or
+          // retract an inserted paragraph break before the proposal is accepted.
+          skipped.push({ id: item.operation.id, reason: "unsupportedMode" });
+          continue;
+        }
         if (mode === "direct") {
           // A container has to END with a paragraph: a body, a cell, a header,
           // a note and a text box each do, and one left ending in a table is a
@@ -4486,6 +4536,12 @@ const applyFolioAIEditOperationsInternal = ({
           ? null
           : pendingParagraphRetraction(tr.doc, item.blockFrom);
         if (retraction) {
+          if (isSuggested && !isSuggestedParagraphInsert(item.blockNode)) {
+            // Retracting another author's tracked insertion would remove it
+            // from the saved package before this suggestion is accepted.
+            skipped.push({ id: item.operation.id, reason: "unsupportedMode" });
+            continue;
+          }
           // Deleting a paragraph that is itself a pending insertion retracts
           // it, as deleting inserted text does: accepting and rejecting both
           // leave it out, so it goes now. Marked deleted instead, its break
