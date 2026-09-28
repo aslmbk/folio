@@ -16,8 +16,8 @@
     "instantiations": 140121
   },
   "cli": {
-    "types": 163752,
-    "instantiations": 226850
+    "types": 172716,
+    "instantiations": 238404
   },
   "editor-web": {
     "types": 187458,
@@ -28,8 +28,8 @@
     "instantiations": 920985
   },
   "nuxt": {
-    "types": 137937,
-    "instantiations": 165993
+    "types": 145543,
+    "instantiations": 174564
   },
   "playground": {
     "types": 189064,
