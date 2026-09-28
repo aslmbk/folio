@@ -28,6 +28,7 @@ import {
 import { type Block, COLLISIONS, MODES, type Mode, type Operation } from "../support/operations.ts";
 import {
   applyChecked,
+  compareComments,
   compareWithModel,
   EXPECTATIONS,
   expectOperation,
@@ -118,6 +119,160 @@ describe("the requested-outcome oracle", () => {
     expectOperation(model, { type: "mergeTableCells", blockId: "left", endBlockId: "right" });
     assert.deepEqual(model.tableGaps, []);
     assert.match(compareTableGeometry(model.tables, cells).join("\n"), /geometry/u);
+  });
+
+  test("requires comments while any anchored character survives a text edit", () => {
+    const text = "abcdef";
+    for (let anchorStart = 0; anchorStart < text.length; anchorStart += 1) {
+      for (let anchorEnd = anchorStart + 1; anchorEnd <= text.length; anchorEnd += 1) {
+        for (let editStart = 0; editStart < text.length; editStart += 1) {
+          for (let editEnd = editStart + 1; editEnd <= text.length; editEnd += 1) {
+            const model = modelOf([row("b", text)]);
+            expectOperation(model, {
+              type: "replaceRange",
+              range: { blockId: "b", startOffset: editStart, endOffset: editEnd },
+              replace: "",
+            });
+            const comment = {
+              id: 1,
+              text: "review",
+              anchor: text.slice(anchorStart, anchorEnd),
+              blockId: "b",
+            };
+            const removed = editStart <= anchorStart && editEnd >= anchorEnd;
+            const problems = compareComments(model, [comment], []);
+            assert.equal(
+              problems.length === 0,
+              removed,
+              JSON.stringify({ anchorStart, anchorEnd, editStart, editEnd }),
+            );
+            assert.equal(
+              compareComments(model, [comment], [comment]).length === 0,
+              !removed,
+              JSON.stringify({ anchorStart, anchorEnd, editStart, editEnd }),
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test("preserves a comment when a split or a different block changes its quoted text", () => {
+    const comment = { id: 1, text: "review", anchor: "bcd", blockId: "b" };
+    const split = modelOf([row("b", "abcdef")]);
+    expectOperation(split, { type: "splitBlock", blockId: "b", offset: 3 });
+    assert.equal(compareComments(split, [comment], []).length, 1);
+    const elsewhere = modelOf([row("a", "bcd"), row("b", "abcdef")]);
+    expectOperation(elsewhere, {
+      type: "replaceRange",
+      range: { blockId: "a", startOffset: 0, endOffset: 3 },
+      replace: "",
+    });
+    assert.equal(compareComments(elsewhere, [comment], []).length, 1);
+  });
+
+  test("does not guess which repeated quote a comment anchored", () => {
+    const comment = { id: 1, text: "review", anchor: "foo", blockId: "b" };
+    const model = modelOf([row("b", "foo foo")]);
+    expectOperation(model, {
+      type: "replaceRange",
+      range: { blockId: "b", startOffset: 0, endOffset: 3 },
+      replace: "",
+    });
+    assert.deepEqual(compareComments(model, [comment], []), []);
+    assert.deepEqual(compareComments(model, [comment], [comment]), []);
+  });
+
+  test("a nonempty replacement carries a comment, while an empty one removes it", () => {
+    const comment = { id: 1, text: "review", anchor: "Signed", blockId: "b" };
+    const replaced = modelOf([row("b", "Signed")]);
+    expectOperation(replaced, { type: "replaceBlock", blockId: "b", text: "Written" });
+    assert.deepEqual(compareComments(replaced, [comment], [{ ...comment, anchor: "Written" }]), []);
+    assert.match(
+      compareComments(replaced, [comment], [{ ...comment, anchor: "Unrelated" }]).join("\n"),
+      /no comment/u,
+    );
+    assert.equal(compareComments(replaced, [comment], []).length, 1);
+
+    const emptied = modelOf([row("b", "Signed")]);
+    expectOperation(emptied, { type: "replaceBlock", blockId: "b", text: "" });
+    assert.deepEqual(compareComments(emptied, [comment], []), []);
+    assert.equal(compareComments(emptied, [comment], [comment]).length, 1);
+  });
+
+  test("a deleted comment cannot satisfy a new comment with the same text", () => {
+    const old = { id: 1, text: "same note", anchor: "Old", blockId: "a" };
+    const model = modelOf([row("a", "Old"), row("b", "New")]);
+    expectOperation(model, { type: "deleteBlock", blockId: "a" });
+    expectOperation(model, {
+      type: "commentOnBlock",
+      blockId: "b",
+      comment: { text: "same note" },
+    });
+    assert.deepEqual(
+      compareComments(model, [old], [{ id: 2, text: "same note", anchor: "New", blockId: "b" }]),
+      [],
+    );
+    const problems = compareComments(model, [old], [{ ...old, anchor: "New", blockId: "b" }]);
+    assert.match(problems.join("\n"), /no comment/u);
+    assert.match(problems.join("\n"), /outlived the block it anchored/u);
+  });
+
+  test("uses live anchors and ids when an accepted pending join moves one of three equal comments", () => {
+    const a = { id: 1, text: "same note", anchor: "First", blockId: "a" };
+    const moved = { id: 2, text: "same note", anchor: "Signed", blockId: "c" };
+    const c = { id: 3, text: "same note", anchor: "Last", blockId: "c" };
+    const model = modelOf([row("a", "First"), row("b", "Signed"), row("c", "Signed Last")]);
+    expectOperation(model, { type: "deleteBlock", blockId: "b" });
+    const live = [a, { ...moved, blockId: "b" }, c];
+    assert.deepEqual(compareComments(model, [a, moved, c], [a, c], live), []);
+    assert.match(
+      compareComments(model, [a, moved, c], [a, moved, c], live).join("\n"),
+      /outlived the block it anchored/u,
+    );
+  });
+
+  test("a comment on a pending join survives an edit to another block", () => {
+    const joined = { id: 1, text: "review", anchor: "Signed", blockId: "b" };
+    const model = modelOf(
+      [row("a", "First Signed"), row("c", "Other")],
+      [row("a", "First"), row("b", "Signed"), row("c", "Other")],
+    );
+    expectOperation(model, { type: "replaceBlock", blockId: "c", text: "Revised" });
+    assert.deepEqual(compareComments(model, [joined], [joined], [joined]), []);
+    assert.equal(compareComments(model, [joined], [], [joined]).length, 1);
+    expectOperation(model, { type: "deleteBlock", blockId: "b" });
+    assert.deepEqual(compareComments(model, [joined], [], [joined]), []);
+    assert.match(
+      compareComments(model, [joined], [joined], [joined]).join("\n"),
+      /outlived the block it anchored/u,
+    );
+  });
+
+  test("an explicit block deletion removes a live comment even when accepted text differs", () => {
+    const comment = { id: 1, text: "review", anchor: "Live quote", blockId: "b" };
+    const model = modelOf([row("b", "Accepted text")], [row("b", "Live quote")]);
+    expectOperation(model, { type: "deleteBlock", blockId: "b" });
+    assert.deepEqual(compareComments(model, [comment], [], [comment]), []);
+    assert.match(
+      compareComments(model, [comment], [comment], [comment]).join("\n"),
+      /outlived the block it anchored/u,
+    );
+  });
+
+  test("deleting the first block of a spanning comment keeps its surviving anchor", () => {
+    const comment = { id: 1, text: "review", anchor: "FirstSecond", blockId: "b" };
+    const model = modelOf([row("b", "First"), row("c", "Second")]);
+    expectOperation(model, { type: "deleteBlock", blockId: "b" });
+    assert.deepEqual(compareComments(model, [comment], [comment]), []);
+    assert.equal(compareComments(model, [comment], []).length, 1);
+  });
+
+  test("a suggested block deletion leaves the live comment in place", () => {
+    const comment = { id: 1, text: "review", anchor: "Signed", blockId: "b" };
+    const model = modelOf([row("b", "Signed")]);
+    expectOperation(model, { type: "deleteBlock", blockId: "b" });
+    assert.deepEqual(compareComments(model, [comment], [comment], [comment], "suggested"), []);
   });
 });
 

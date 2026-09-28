@@ -123,11 +123,14 @@ export const resolvedState = async (
   };
 };
 
-type Comment = { text: string; anchor: string };
+type Comment = { id: number; text: string; anchor: string; blockId: string | null };
 const commentsOf = (reviewer: Reviewer): Comment[] =>
-  reviewer
-    .getComments()
-    .map((comment) => ({ text: comment.text, anchor: comment.anchoredText ?? "" }));
+  reviewer.getComments().map((comment) => ({
+    id: comment.id,
+    text: comment.text,
+    anchor: comment.anchoredText ?? "",
+    blockId: comment.blockId ?? null,
+  }));
 
 // ---------------------------------------------------------------------------
 // The model
@@ -174,6 +177,10 @@ export type Model = {
   tableGaps: string[];
   /** Existing paragraphs reveal style-derived kind, levels and effective run formatting. */
   styleExamples: Map<string, Row>;
+  /** Text of the live blocks an operation can name, before the batch. */
+  liveTextById: ReadonlyMap<string, string>;
+  /** Live blocks explicitly deleted by applied operations, including pending joins. */
+  deletedBlockIds: Set<string>;
   /** Paragraph style ids the saved package must define. */
   styles: Set<string>;
   /** Comments that must exist, with their anchored text when it is known. */
@@ -220,6 +227,8 @@ export const modelOf = (rows: readonly Row[], live: readonly Row[] = rows): Mode
         row.styleId !== undefined && row.text.length > 0 ? [[row.styleId, row] as const] : [],
       ),
     ),
+    liveTextById: new Map(live.map(({ id, text }) => [id, text])),
+    deletedBlockIds: new Set(),
     styles: new Set(),
     comments: [],
     unmodelled: [],
@@ -700,6 +709,9 @@ export const OPERATION_TYPES: readonly string[] = FOLIO_DOCUMENT_OPERATION_TYPES
 
 /** Apply one applied operation's expectation to `model`. */
 export const expectOperation = (model: Model, operation: Operation): void => {
+  if (operation.type === "deleteBlock" && typeof operation["blockId"] === "string") {
+    model.deletedBlockIds.add(operation["blockId"]);
+  }
   if (
     model.mode === "suggested" &&
     ["deleteTable", "deleteTableRow", "deleteTableColumn"].includes(operation.type)
@@ -892,27 +904,108 @@ export const compareWithModel = (model: Model, actual: readonly Row[]): string[]
   return problems;
 };
 
-const compareComments = (
+type AnchorDisposition = "kept" | "removed" | "ambiguous";
+
+/** Decide whether the model removed the anchor, accounting for repeated text. */
+const anchorDisposition = (model: Model, entry: Comment): AnchorDisposition => {
+  if (entry.blockId === null) return "kept";
+  const row = model.rows.find((candidate) => candidate.pre?.id === entry.blockId);
+  const explicitlyDeleted = model.deletedBlockIds.has(entry.blockId);
+  if (explicitlyDeleted || (row?.removed && !row.pendingJoin)) {
+    const liveText = model.liveTextById.get(entry.blockId);
+    return entry.anchor === "" || (liveText !== undefined && liveText.includes(entry.anchor))
+      ? "removed"
+      : "kept";
+  }
+  // A pending join is already absent from the accepted pre-state; its live
+  // block has not been removed by this batch.
+  if (!row?.pre || row.removed || entry.anchor === "") return "kept";
+  const starts: number[] = [];
+  for (let start = 0; start <= row.pre.text.length - entry.anchor.length; start += 1) {
+    if (row.pre.text.startsWith(entry.anchor, start)) starts.push(start);
+  }
+  if (starts.length === 0) return "kept";
+  const removed = [
+    ...row.edits
+      .filter(({ replace }) => replace.length === 0)
+      .map(({ start, end }) => ({ start, end })),
+    ...row.splits.map(({ offset, consumed }) => ({ start: offset, end: offset + consumed })),
+  ];
+  const removedPlacements = starts.map((start) =>
+    Array.from({ length: entry.anchor.length }, (_, index) => start + index).every((offset) =>
+      removed.some((cut) => cut.start <= offset && offset < cut.end),
+    ),
+  );
+  if (removedPlacements.every(Boolean)) return "removed";
+  return removedPlacements.some(Boolean) ? "ambiguous" : "kept";
+};
+
+/** A full-block anchor has an exact replacement when one edit rewrites the block. */
+const expectedKeptAnchor = (model: Model, entry: Comment): string | undefined => {
+  const row = model.rows.find((candidate) => candidate.pre?.id === entry.blockId);
+  if (!row?.pre || row.removed || row.pendingJoin || row.splits.length > 0) return undefined;
+  if (entry.anchor === "" || entry.anchor !== row.pre.text || row.edits.length !== 1) {
+    return undefined;
+  }
+  const edit = row.edits[0];
+  if (!edit || edit.start !== 0 || edit.end !== row.pre.text.length || edit.replace === "") {
+    return undefined;
+  }
+  return edit.replace.includes("\n") ? undefined : edit.replace;
+};
+
+export const compareComments = (
   model: Model,
   before: readonly Comment[],
   after: readonly Comment[],
+  liveBefore: readonly Comment[] = before,
+  mode: Mode = "direct",
 ): string[] => {
   const problems: string[] = [];
   const remaining = [...after];
-  const expected = [
-    ...before.map((entry) => ({ text: entry.text, anchor: undefined })),
-    ...model.comments.map((comment) => ({ text: comment.text, anchor: comment.anchor?.() })),
-  ];
-  for (const comment of expected) {
+  const kept: Comment[] = [];
+  const gone: Comment[] = [];
+  for (const entry of before) {
+    const live = liveBefore.find(({ id }) => id === entry.id);
+    const disposition = mode === "suggested" ? "kept" : anchorDisposition(model, live ?? entry);
+    if (disposition === "removed") gone.push(entry);
+    else if (disposition === "kept") kept.push(entry);
+  }
+  for (const comment of kept) {
+    const anchor = expectedKeptAnchor(model, comment);
     const index = remaining.findIndex(
-      (candidate) =>
-        candidate.text === comment.text &&
-        (comment.anchor === undefined || candidate.anchor === comment.anchor),
+      ({ id, text, anchor: actualAnchor }) =>
+        id === comment.id &&
+        text === comment.text &&
+        (anchor === undefined || actualAnchor === anchor),
     );
     if (index === -1) {
       problems.push(`no comment ${JSON.stringify(comment)} among ${JSON.stringify(after)}`);
     } else {
       remaining.splice(index, 1);
+    }
+  }
+  const beforeIds = new Set(before.map(({ id }) => id));
+  for (const comment of model.comments) {
+    const anchor = comment.anchor?.();
+    const index = remaining.findIndex(
+      (candidate) =>
+        !beforeIds.has(candidate.id) &&
+        candidate.text === comment.text &&
+        (anchor === undefined || candidate.anchor === anchor),
+    );
+    if (index === -1) {
+      problems.push(
+        `no comment ${JSON.stringify({ text: comment.text, anchor })} among ${JSON.stringify(after)}`,
+      );
+    } else {
+      remaining.splice(index, 1);
+    }
+  }
+  // Only what no expectation claimed can be the removed comment itself.
+  for (const entry of gone) {
+    if (remaining.some(({ id }) => id === entry.id)) {
+      problems.push(`comment ${JSON.stringify(entry)} outlived the block it anchored`);
     }
   }
   return problems;
@@ -947,6 +1040,7 @@ export type Pre = {
   liveRows: Row[];
   comments: Comment[];
   links: LinkSnapshot;
+  liveComments: Comment[];
   rejected?: Row[];
   /** The story the operations target; the body by default. */
   story: Story;
@@ -1032,6 +1126,7 @@ export const capture = async (
   { story = MAIN, step = "fresh" }: CaptureOptions = {},
 ): Promise<Pre> => {
   const live = liveState(reviewer, story);
+  const liveComments = commentsOf(reviewer);
   const context = { story, step, targets: featureIndex(reviewer, story) };
   if (mode === "suggested") {
     const rows = rowsOf(reviewer, story);
@@ -1040,7 +1135,8 @@ export const capture = async (
       live,
       rows,
       liveRows: rows,
-      comments: commentsOf(reviewer),
+      comments: liveComments,
+      liveComments,
       links: captureLinks(reviewer),
       ...context,
     };
@@ -1054,6 +1150,7 @@ export const capture = async (
     liveRows: rowsOf(reviewer, story),
     comments: accepted.comments,
     links: accepted.links,
+    liveComments,
     ...(mode === "tracked-changes"
       ? { rejected: (await resolvedState(bytes, "reject", story)).rows }
       : {}),
@@ -1169,7 +1266,7 @@ export const assertRequestedOutcome = async (
     ...(predictable ? compareWithModel(model, rows) : []),
     ...(model.tableGaps.length === 0 ? compareTableGeometry(model.tables, rows) : []),
     ...comparePreservedLinks({ before: pre.links, after: links, afterRows: rows }).problems,
-    ...compareComments(model, pre.comments, comments),
+    ...compareComments(model, pre.comments, comments, pre.liveComments, pre.mode),
     ...(bytes ? await compareStyles(model, bytes) : []),
   ];
   if (process.env["FOLIO_ORACLE_GAPS"] && (!predictable || model.tableGaps.length > 0)) {
