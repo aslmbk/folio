@@ -954,6 +954,27 @@ const expectedKeptAnchor = (model: Model, entry: Comment): string | undefined =>
   return edit.replace.includes("\n") ? undefined : edit.replace;
 };
 
+/** Pending markup may interleave the old text and insertion in one range. */
+const containsInOrder = (text: string, expected: string): boolean => {
+  let offset = 0;
+  for (const character of expected) {
+    const index = text.indexOf(character, offset);
+    if (index === -1) return false;
+    offset = index + character.length;
+  }
+  return true;
+};
+
+const pendingAnchorMatches = (actual: string, old: string, replacement: string): boolean => {
+  if (!containsInOrder(actual, old) || !containsInOrder(actual, replacement)) return false;
+  // A retained character can serve both texts. With disjoint characters, the
+  // deleted text must precede the insertion in the live tracked range.
+  const replacementCharacters = new Set(replacement);
+  return [...old].some((character) => replacementCharacters.has(character))
+    ? true
+    : containsInOrder(actual, old + replacement);
+};
+
 export const compareComments = (
   model: Model,
   before: readonly Comment[],
@@ -977,7 +998,10 @@ export const compareComments = (
       ({ id, text, anchor: actualAnchor }) =>
         id === comment.id &&
         text === comment.text &&
-        (anchor === undefined || actualAnchor === anchor),
+        (anchor === undefined ||
+          (mode === "suggested"
+            ? pendingAnchorMatches(actualAnchor, comment.anchor, anchor)
+            : actualAnchor === anchor)),
     );
     if (index === -1) {
       problems.push(`no comment ${JSON.stringify(comment)} among ${JSON.stringify(after)}`);
