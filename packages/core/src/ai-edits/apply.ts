@@ -78,6 +78,10 @@ import {
 import { isStyleSourcedParagraphNumbering } from "../internal/paragraphFormattingSerialization";
 import { sectionPropertiesOf } from "../prosemirror/sectionCarrier";
 import { markStructuralChange } from "../prosemirror/extensions/features/ParagraphChangeTrackerExtension";
+import {
+  removeRowsWithoutCellsAfterBatch,
+  type RowsEmptiedInBatch,
+} from "../prosemirror/tableGridMutation";
 import { requestDeterministicParaIds } from "../prosemirror/extensions/features/ParaIdAllocatorExtension";
 import {
   addedBreakCarrierBefore,
@@ -3693,6 +3697,10 @@ const applyFolioAIEditOperationsInternal = ({
   };
   const date = revisionStamp?.date ?? new Date().toISOString();
   const insertedColumnCounts = new Map<string, number>();
+  // Rows a direct column deletion leaves without cells close once the batch
+  // is done, so a column the batch inserts beside them keeps them, as
+  // accepting the same batch tracked does.
+  const emptiedRows: RowsEmptiedInBatch = { pending: false };
 
   // A tracked deletion can retract a split's inserted paragraph mark while
   // the split halves are adjacent. If this batch also places a table after
@@ -4453,6 +4461,7 @@ const applyFolioAIEditOperationsInternal = ({
           deletion,
           insertedColumnCount: insertedColumnCounts.get(columnKey) ?? 0,
           revision,
+          emptiedRows,
         });
         if (result.type === "unsupported") {
           skipped.push({
@@ -5329,6 +5338,8 @@ const applyFolioAIEditOperationsInternal = ({
       ...(suggestionId !== null && { suggestionId }),
     });
   }
+
+  removeRowsWithoutCellsAfterBatch(tr, emptiedRows);
 
   if (tr.docChanged || deferredNoopFinalDeletions.size > 0) {
     const batchRevisionIds = new Set(applied.flatMap(({ revisionIds }) => revisionIds ?? []));
