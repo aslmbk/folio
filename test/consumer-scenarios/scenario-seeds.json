@@ -130,6 +130,13 @@
       "kind": "random",
       "generation": "targeted",
       "title": "emphasis ending mid-word reads back from markdown"
+    },
+    {
+      "seed": 764128770,
+      "steps": 10,
+      "kind": "random",
+      "generation": "targeted",
+      "title": "table insertion inside a comment"
     }
   ]
 }
