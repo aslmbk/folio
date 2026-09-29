@@ -123,6 +123,13 @@
       "kind": "random",
       "generation": "targeted",
       "title": "an edit inside a pending insertion reads the same after save"
+    },
+    {
+      "seed": 1056657126,
+      "steps": 10,
+      "kind": "random",
+      "generation": "targeted",
+      "title": "emphasis ending mid-word reads back from markdown"
     }
   ]
 }
