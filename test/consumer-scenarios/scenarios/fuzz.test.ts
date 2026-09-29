@@ -73,9 +73,9 @@ const generatedFlowTest = (kind: FlowKind, run: number, seed: number) => {
       try {
         const sampleIndex = kind === "random" ? run : RUNS + run;
         const shouldSave = sampleIndex < SAVE_SAMPLE;
-        const bytes = await runFlow(seed, STEPS, kind, { captureSaved: shouldSave });
-        if (shouldSave && bytes !== undefined) {
-          await saveSample(bytes, { seed, kind, fixture, mode });
+        const { saved } = await runFlow(seed, STEPS, kind, { captureSaved: shouldSave });
+        if (shouldSave && saved !== undefined) {
+          await saveSample(saved, { seed, kind, fixture, mode });
         }
       } catch (error) {
         reportScenarioFailure({
