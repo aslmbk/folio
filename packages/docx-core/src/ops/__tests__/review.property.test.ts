@@ -47,7 +47,7 @@ import { storyParagraphs } from "../blocks";
 import { contractViolation } from "../contract";
 import { IDENTITY_SPACES, identityKeysIn, idKey, paragraphIdsIn } from "../ids";
 import { gapAfterInserted } from "../inline";
-import { compareGaps, defaultInsertionGap, type Gap, leafSpans } from "../leaves";
+import { compareGaps, defaultInsertionGap, type Gap, isCommentAnchor, leafSpans } from "../leaves";
 import { paragraphLength, paragraphLogicalText } from "../offsets";
 import { planTrackedDeletion, revisionIdDemand } from "../plan";
 import { DOCUMENT_OP_REFUSAL_REASONS } from "../refusal";
@@ -843,7 +843,7 @@ describe("tracked operations and their resolution", () => {
               isTrackedWrapper(ancestor) &&
               ancestor.info.author === op.revision?.author,
           );
-          if (removed || !mine) continue;
+          if (removed || !mine || isCommentAnchor(span.node)) continue;
           const start = Math.max(span.before.offset, op.from.offset);
           const end = Math.min(span.after.offset, op.to.offset);
           for (let unit = start; unit < end; unit += 1) own.add(unit);
@@ -853,6 +853,11 @@ describe("tracked operations and their resolution", () => {
         ).join("");
         const after = paragraphById(applied.value.document, op.from.blockId);
         expect(after === undefined ? undefined : paragraphLogicalText(after)).toBe(expected);
+        const anchors = (items: Paragraph["content"]) =>
+          leafSpans(items)
+            .filter(({ node }) => isCommentAnchor(node))
+            .map(({ node }) => node);
+        expect(anchors(after?.content ?? [])).toStrictEqual(anchors(paragraph.content));
         // Rejecting what the plan recorded leaves only the retraction.
         const retracted = applyAll(
           document,
