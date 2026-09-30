@@ -380,5 +380,12 @@
       "note": "Pasted vertical span over nonempty cells stayed split and repeated its text on accept",
       "date": "2026-09-30"
     }
+  ],
+  "packages/core/src/prosemirror/commands/trackedStyleNumbering.property.test.ts::tracked property records and resolution preserve style numbering provenance": [
+    {
+      "seed": -18650713,
+      "note": "Style numbering provenance across tracked paragraph and list changes, resolution, and save/reopen.",
+      "date": "2026-09-30"
+    }
   ]
 }
