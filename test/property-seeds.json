@@ -194,6 +194,12 @@
       "path": "440:10:9:5:4:8:4:4:4:22:4:19:7:7:7:22:23:24:28:25:25:25:29:25:23:34:27:27:29:29:32:27:27:27:30:30:30:30",
       "note": "a batch edit filled a cell a vertical merge folds: applied directly, refused tracked (path at factor 5)",
       "date": "2026-09-30"
+    },
+    {
+      "seed": -1930932135,
+      "path": "101:7:9:12:12:8:8:8:35:36:36:36",
+      "note": "Retained merge continuations saved without a restart above after shared reader projection",
+      "date": "2026-09-30"
     }
   ],
   "packages/core/src/internal/revisionResolutionStep.integration.test.ts::bulk resolution JSON replay and undo match its cached result": [
@@ -314,6 +320,18 @@
       "date": "2026-09-28"
     },
     {
+      "seed": 541224950,
+      "path": "158:6:2:3:3:7:9:9:18:18:18:20:20:20:11:2:3:2:2:2:12:11:11:11:11:11:16:19:19:19",
+      "note": "Rejection restores paragraph properties when an insertion displaces a pending deleted break.",
+      "date": "2026-09-30"
+    },
+    {
+      "seed": -662344421,
+      "path": "38:4:4:2:3:3:3:12:12:2:2:11:19:19:26:26:26",
+      "note": "Final paragraph retirement crosses a wholly deleted table to match direct deletion without an extra empty paragraph.",
+      "date": "2026-09-30"
+    },
+    {
       "seed": 2055257210,
       "note": "#1159: moved from the test file's own seed list",
       "date": "2026-09-28"
@@ -378,6 +396,20 @@
       "seed": 118726139,
       "path": "0",
       "note": "Pasted vertical span over nonempty cells stayed split and repeated its text on accept",
+      "date": "2026-09-30"
+    },
+    {
+      "seed": 1109375221,
+      "path": "0",
+      "note": "Pasted vertical span over nonempty cells stayed split and repeated its text on accept; shared projection must establish its implicit origin before folding empty continuations",
+      "date": "2026-09-30"
+    }
+  ],
+  "packages/core/src/prosemirror/commands/verticalMergeResolution.property.test.ts::resolved vertical merges match the reader across content and row shapes": [
+    {
+      "seed": 381901026,
+      "path": "0:1:1:1:1:1",
+      "note": "Collapsed continuation chains transported shared revision metadata as an aliased hidden graph",
       "date": "2026-09-30"
     }
   ],
