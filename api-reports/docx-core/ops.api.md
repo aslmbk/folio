@@ -31,6 +31,15 @@ export type BlockInsertionPoint = {
 };
 
 // @public
+export type DeleteBlocksOp = {
+    type: typeof DOCUMENT_OP_TYPES.DELETE_BLOCKS;
+    story: OpStory;
+    blockIds: readonly string[];
+    revision?: RevisionStamp;
+    newIds?: NewIds;
+};
+
+// @public
 export type DeleteRangeOp = {
     type: typeof DOCUMENT_OP_TYPES.DELETE_RANGE;
     from: TextPosition;
@@ -89,10 +98,11 @@ export const DOCUMENT_OP_REFUSAL_REASONS: Readonly<{
 }>;
 
 // @public
-export const DOCUMENT_OP_SCHEMA_VERSION = 3;
+export const DOCUMENT_OP_SCHEMA_VERSION = 4;
 
 // @public
 export const DOCUMENT_OP_TYPES: Readonly<{
+    readonly DELETE_BLOCKS: "deleteBlocks";
     readonly INSERT_BLOCKS: "insertBlocks";
     readonly INSERT_TEXT: "insertText";
     readonly INSERT_CONTENT: "insertContent";
@@ -116,7 +126,7 @@ export const DOCUMENT_OP_TYPES: Readonly<{
 }>;
 
 // @public
-export type DocumentOp = InsertTableOp | DeleteTableOp | SetContainerBlocksOp | InsertBlocksOp | InsertTextOp | InsertContentOp | DeleteRangeOp | SplitInlineOp | JoinInlineOp | SetRunPropsOp | SetParagraphPropsOp | SplitBlockOp | JoinBlocksOp | ReplaceBlocksOp | SetParagraphReviewOp | ReplaceInlineOp | ResolveRevisionOp | InsertRowOp | DeleteRowOp | SetTableRowsOp;
+export type DocumentOp = DeleteBlocksOp | InsertTableOp | DeleteTableOp | SetContainerBlocksOp | InsertBlocksOp | InsertTextOp | InsertContentOp | DeleteRangeOp | SplitInlineOp | JoinInlineOp | SetRunPropsOp | SetParagraphPropsOp | SplitBlockOp | JoinBlocksOp | ReplaceBlocksOp | SetParagraphReviewOp | ReplaceInlineOp | ResolveRevisionOp | InsertRowOp | DeleteRowOp | SetTableRowsOp;
 
 // @public
 export type DocumentOpEnvelope = {
