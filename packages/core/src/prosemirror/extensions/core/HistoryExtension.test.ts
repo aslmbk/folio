@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { EditorState } from "prosemirror-state";
+import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 
 // The schema singleton builds a starter kit of its own. Loading it first
@@ -9,6 +9,8 @@ import "../../schema";
 import { ExtensionManager } from "../ExtensionManager";
 import { createStarterKit } from "../StarterKit";
 import type { HistoryShortcutOwner } from "./HistoryExtension";
+import { createSuggestionModePlugin } from "../../plugins/suggestionMode";
+import { resolveAllChangesInHeadlessState } from "../../commands/comments";
 
 // Read before the DOM is registered, as ProseMirror's keymap reads it at import.
 const MAC = /Mac|iP(?:hone|[oa]d)/u.test(globalThis.navigator?.platform ?? "");
@@ -20,7 +22,12 @@ const REDO_KEYS: readonly Press[] = [{ key: "y" }, { key: "Z", shift: true }];
 
 const views: EditorView[] = [];
 
-const createEditor = (historyShortcuts: HistoryShortcutOwner) => {
+type EditorOptions = { mode?: "editing" | "suggesting"; initialText?: string };
+
+const createEditor = (
+  historyShortcuts: HistoryShortcutOwner,
+  { mode = "editing", initialText = "" }: EditorOptions = {},
+) => {
   const manager = new ExtensionManager(createStarterKit({ historyShortcuts }));
   manager.buildSchema();
   manager.initializeRuntime();
@@ -30,8 +37,13 @@ const createEditor = (historyShortcuts: HistoryShortcutOwner) => {
   const view = new EditorView(mount, {
     state: EditorState.create({
       schema,
-      doc: schema.node("doc", null, [schema.node("paragraph")]),
-      plugins: manager.getPlugins(),
+      doc: schema.node("doc", null, [
+        schema.node("paragraph", null, initialText ? schema.text(initialText) : undefined),
+      ]),
+      plugins: [
+        createSuggestionModePlugin(mode === "suggesting", "Reviewer"),
+        ...manager.getPlugins(),
+      ],
     }),
   });
   views.push(view);
@@ -41,9 +53,8 @@ const createEditor = (historyShortcuts: HistoryShortcutOwner) => {
     text: () => view.state.doc.textContent,
     type: (text: string) => view.dispatch(view.state.tr.insertText(text)),
     /**
-     * Press a Mod chord in the editor. ProseMirror cancels Mod-y and Mod-z
-     * whatever binds them, to keep the browser's own undo out, so the document
-     * is what tells whether anything ran.
+     * Press a Mod chord in the editor and expose whether native history was
+     * cancelled as well as the resulting document.
      */
     press: ({ key, shift = false }: Press) => {
       const event = new KeyboardEvent("keydown", {
@@ -57,6 +68,7 @@ const createEditor = (historyShortcuts: HistoryShortcutOwner) => {
         cancelable: true,
       });
       view.dom.dispatchEvent(event);
+      return event;
     },
   };
 };
@@ -84,6 +96,78 @@ describe("HistoryExtension shortcuts", () => {
       editor.press(redo);
       expect(editor.text()).toBe("typed");
     }
+  });
+
+  for (const mode of ["editing", "suggesting"] as const) {
+    test(`${mode}: empty history shortcuts suppress native history after composition`, async () => {
+      for (const redo of REDO_KEYS) {
+        const editor = createEditor("editor", { mode });
+        editor.view.dom.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+        editor.view.dispatch(editor.view.state.tr.insertText("alpha").setMeta("composition", 1));
+        editor.view.dom.dispatchEvent(new Event("compositionend", { bubbles: true }));
+        await Promise.resolve();
+        const composed = editor.view.state.doc;
+        const caret = editor.view.state.selection;
+        expect(editor.press(redo).defaultPrevented).toBe(true);
+        expect(editor.view.state.doc.eq(composed)).toBe(true);
+        expect(editor.view.state.selection.eq(caret)).toBe(true);
+        editor.press(UNDO);
+        expect(editor.text()).toBe("");
+        expect(editor.press(UNDO).defaultPrevented).toBe(true);
+      }
+    });
+  }
+
+  test("composition replacement, empty redo, and delete have the same accepted result", async () => {
+    const results: string[] = [];
+    for (const mode of ["editing", "suggesting"] as const) {
+      const editor = createEditor("editor", { mode, initialText: "before target after" });
+      editor.view.dispatch(
+        editor.view.state.tr.setSelection(TextSelection.create(editor.view.state.doc, 8, 14)),
+      );
+      editor.view.dom.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      editor.view.dispatch(editor.view.state.tr.insertText("alpha").setMeta("composition", 2));
+      editor.view.dom.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await Promise.resolve();
+      const composed = editor.view.state.doc;
+      const caret = editor.view.state.selection;
+      expect(editor.press({ key: "Z", shift: true }).defaultPrevented).toBe(true);
+      expect(editor.view.state.doc.eq(composed)).toBe(true);
+      expect(editor.view.state.selection.eq(caret)).toBe(true);
+      const event = new KeyboardEvent("keydown", {
+        key: "Delete",
+        keyCode: 46,
+        bubbles: true,
+        cancelable: true,
+      });
+      editor.view.dom.dispatchEvent(event);
+      // Native editing performs the unhandled one-character deletion.
+      if (!event.defaultPrevented) {
+        const from = editor.view.state.selection.from;
+        editor.view.dispatch(editor.view.state.tr.delete(from, from + 1));
+      }
+      results.push(resolveAllChangesInHeadlessState(editor.view.state, "accept").doc.textContent);
+      editor.press(UNDO);
+      expect(editor.view.state.doc.eq(composed)).toBe(true);
+      editor.press(UNDO);
+      expect(editor.text()).toBe("before target after");
+      editor.press({ key: "Z", shift: true });
+      expect(editor.view.state.doc.eq(composed)).toBe(true);
+    }
+    expect(results).toEqual(["before alphaafter", "before alphaafter"]);
+  });
+
+  test("a native commit pending at compositionend stays in the same undo event", async () => {
+    const editor = createEditor("editor", { mode: "suggesting" });
+    editor.view.dom.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    editor.view.dom.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    editor.view.dispatch(editor.view.state.tr.insertText("alpha").setMeta("composition", 3));
+    await Promise.resolve();
+    const composed = editor.view.state.doc;
+    editor.press(UNDO);
+    expect(editor.text()).toBe("");
+    editor.press({ key: "Z", shift: true });
+    expect(editor.view.state.doc.eq(composed)).toBe(true);
   });
 
   test("a host that owns the history keys gets every press untouched", () => {
