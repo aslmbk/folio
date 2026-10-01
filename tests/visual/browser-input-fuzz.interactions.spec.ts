@@ -12,12 +12,20 @@ import {
 import type { DocxEditorRef } from "../../packages/react/src/components/DocxEditor.props";
 import {
   browserInputTraceArbitrary,
+  BROWSER_PASTE_PAYLOADS,
   browserSuggestionActionKinds,
   parseBrowserInputTraceConfig,
   type BrowserInputAction,
   type BrowserInputTrace,
   type BrowserDragTarget,
 } from "./browserInputTrace";
+import {
+  failureMarker,
+  failureRecord,
+  logFailureMarker,
+  writeFailureRecord,
+} from "../../test/consumer-scenarios/support/failure-fingerprints";
+import { clipboardHtmlProjection } from "./clipboardHtmlProjection";
 
 declare global {
   var __folioPlayground: { getEditorRef: () => DocxEditorRef | null } | undefined;
@@ -185,6 +193,7 @@ const selectTarget = async (page: Page, target: BrowserDragTarget) => {
 };
 
 const paste = async (page: Page, action: Extract<BrowserInputAction, { html: string }>) => {
+  const expectedHtml = await page.evaluate(clipboardHtmlProjection, action.html);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.evaluate(async ({ html, plain }) => {
     const parts: Record<string, Blob> = { "text/plain": new Blob([plain], { type: "text/plain" }) };
@@ -197,6 +206,8 @@ const paste = async (page: Page, action: Extract<BrowserInputAction, { html: str
         document.documentElement.dataset["fuzzPasteReceived"] = "seen";
         document.documentElement.dataset["fuzzPasteHtml"] =
           event.clipboardData?.getData("text/html") ?? "";
+        document.documentElement.dataset["fuzzPastePlain"] =
+          event.clipboardData?.getData("text/plain") ?? "";
       },
       { capture: true, once: true },
     );
@@ -206,8 +217,14 @@ const paste = async (page: Page, action: Extract<BrowserInputAction, { html: str
     .poll(() => page.locator("html").getAttribute("data-fuzz-paste-received"))
     .toBe("seen");
   await expect
-    .poll(() => page.locator("html").getAttribute("data-fuzz-paste-html"))
-    .toContain(action.html);
+    .poll(async () =>
+      page.evaluate(
+        clipboardHtmlProjection,
+        (await page.locator("html").getAttribute("data-fuzz-paste-html")) ?? "",
+      ),
+    )
+    .toBe(expectedHtml);
+  await expect(page.locator("html")).toHaveAttribute("data-fuzz-paste-plain", action.plain);
 };
 
 const drive = async (page: Page, action: BrowserInputAction) => {
@@ -234,13 +251,29 @@ const drive = async (page: Page, action: BrowserInputAction) => {
       return;
     case "imeReplacement": {
       const cdp = await page.context().newCDPSession(page);
-      await cdp.send("Input.imeSetComposition", {
-        text: action.text,
-        selectionStart: action.text.length,
-        selectionEnd: action.text.length,
-      });
-      await cdp.send("Input.insertText", { text: action.text });
-      await cdp.detach();
+      try {
+        for (const text of action.updates) {
+          await cdp.send("Input.imeSetComposition", {
+            text,
+            // CDP offsets count UTF-16 code units, including surrogate pairs.
+            selectionStart: text.length,
+            selectionEnd: text.length,
+          });
+        }
+        if (action.completion === "commit") {
+          const text = action.updates.at(-1);
+          if (text === undefined) throw new Error("IME lifecycle has no updates");
+          await cdp.send("Input.insertText", { text });
+        } else {
+          await cdp.send("Input.imeSetComposition", {
+            text: "",
+            selectionStart: 0,
+            selectionEnd: 0,
+          });
+        }
+      } finally {
+        await cdp.detach();
+      }
       return;
     }
     case "cut":
@@ -256,6 +289,11 @@ const drive = async (page: Page, action: BrowserInputAction) => {
       return;
     case "redo":
       await page.keyboard.press(`${MODIFIER}+Shift+z`);
+      return;
+    case "historyBurst":
+      for (const key of action.keys) {
+        await page.keyboard.press(key === "undo" ? `${MODIFIER}+z` : `${MODIFIER}+Shift+z`);
+      }
       return;
     case "selectionDrag":
       if (!(await selectTarget(page, action.target))) {
@@ -338,6 +376,47 @@ test("browser generator covers every declared suggestion input kind", () => {
   expect(new Set(browserSuggestionActionKinds)).toEqual(new Set(SUGGESTION_INPUT_KINDS));
 });
 
+test("clipboard oracle accepts HTML serialization and detects text, attribute and markup changes", async ({
+  page,
+}) => {
+  await page.goto("/");
+  for (const { html } of Object.values(BROWSER_PASTE_PAYLOADS)) {
+    const expected = await page.evaluate(clipboardHtmlProjection, html);
+    // Clipboard writers parse document wrappers before delivering a paste.
+    // Chromium adds the omitted head in the full-document fixture (seed 11).
+    expect(await page.evaluate(clipboardHtmlProjection, expected)).toBe(expected);
+    expect(await page.evaluate(clipboardHtmlProjection, "")).not.toBe(expected);
+    const mutations = await page.evaluate((source) => {
+      const textDocument = new DOMParser().parseFromString(source, "text/html");
+      const walker = textDocument.createTreeWalker(textDocument.body, NodeFilter.SHOW_TEXT);
+      const firstText = walker.nextNode();
+      if (!firstText) throw new Error("clipboard fixture has no text to mutate");
+      firstText.textContent = "lost clipboard text";
+      const attributeDocument = new DOMParser().parseFromString(source, "text/html");
+      const element = attributeDocument.body.firstElementChild;
+      if (!element) throw new Error("clipboard fixture has no element to mutate");
+      element.setAttribute("data-fuzz-mutated", "true");
+      const markupDocument = new DOMParser().parseFromString(source, "text/html");
+      const wrapper = markupDocument.body.firstElementChild;
+      if (!wrapper) throw new Error("clipboard fixture has no markup to mutate");
+      wrapper.replaceWith(...wrapper.childNodes);
+      return [
+        textDocument.documentElement.outerHTML,
+        attributeDocument.documentElement.outerHTML,
+        markupDocument.documentElement.outerHTML,
+      ];
+    }, html);
+    for (const mutation of mutations) {
+      expect(await page.evaluate(clipboardHtmlProjection, mutation)).not.toBe(expected);
+    }
+  }
+  const source = BROWSER_PASTE_PAYLOADS.pasteWordHtml.html;
+  const normalized = source.replace("<body>", "<head></head><body>");
+  expect(await page.evaluate(clipboardHtmlProjection, source)).toBe(
+    await page.evaluate(clipboardHtmlProjection, normalized),
+  );
+});
+
 for (const seed of config.seeds) {
   test(`seed ${seed}: browser input preserves readers, fresh render, and suggesting equivalence`, async ({
     page,
@@ -365,6 +444,22 @@ for (const seed of config.seeds) {
     );
     if (verdict.failed) {
       const failure = verdict.errorInstance;
+      const trace = verdict.counterexample?.at(0);
+      if (trace !== undefined && failure !== undefined && failure !== null) {
+        const marker = failureMarker({
+          test: "browser input preserves readers, fresh render, and suggesting equivalence",
+          seed,
+          path: verdict.counterexamplePath,
+          repro: `FOLIO_FUZZ_SEEDS=${seed} FOLIO_FUZZ_RUNS=${config.runs} bunx playwright test --project=browser-fuzzer tests/visual/browser-input-fuzz.interactions.spec.ts --workers=1`,
+          failure,
+          flow: `${trace.shape}: ${trace.actions.map(({ kind }) => kind).join(" → ")}`,
+        });
+        logFailureMarker(marker);
+        writeFailureRecord(
+          "test-results/browser-fuzz-failures",
+          failureRecord(marker, failure, { flow: trace }),
+        );
+      }
       const detail =
         failure instanceof Error ? (failure.stack ?? failure.message) : fc.stringify(failure);
       throw new Error(
