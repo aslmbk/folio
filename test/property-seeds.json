@@ -510,15 +510,11 @@
       "date": "2026-09-30"
     }
   ],
-  "test/canonical-session.fuzz.ts::canonical property flows preserve projection, exact history and saved content": [
+  "packages/docx-core/src/ops/__tests__/rangePlanning.property.test.ts::cross-paragraph deletion and replacement plans satisfy generated review laws": [
     {
-      "seed": -347416988,
-      "note": "Canonical generated fixtures require paragraph identities before serialization",
-      "date": "2026-10-01"
-    },
-    {
-      "seed": -965049575,
-      "note": "Canonical generated fixtures require paragraph identities before serialization",
+      "seed": 1580815063,
+      "path": "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0",
+      "note": "Cross-paragraph tracked plans must import the shared story lookup when comparing direct and tracked survivors",
       "date": "2026-10-01"
     }
   ],
@@ -623,6 +619,18 @@
       "seed": 1208866377,
       "note": "A late rejection must not duplicate or overwrite an earlier local refusal notice",
       "date": "2026-10-02"
+    }
+  ],
+  "test/canonical-session.fuzz.ts::canonical property flows preserve projection, exact history and saved content": [
+    {
+      "seed": -347416988,
+      "note": "Canonical generated fixtures require paragraph identities before serialization",
+      "date": "2026-10-01"
+    },
+    {
+      "seed": -965049575,
+      "note": "Canonical generated fixtures require paragraph identities before serialization",
+      "date": "2026-10-01"
     }
   ],
   "packages/core/src/controller/canonicalSession.test.ts::canonical input sequences keep the projection, inverse history and refusal atomic": [
