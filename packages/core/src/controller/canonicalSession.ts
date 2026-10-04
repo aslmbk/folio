@@ -790,6 +790,8 @@ class CanonicalSession {
           return intent.at.story;
         case "joinParagraphs":
           return intent.story;
+        case "table":
+          return intent.operation.story;
         case "setList": {
           const first = intent.items.at(0);
           if (first === undefined) panic("A list input must address a paragraph.");
