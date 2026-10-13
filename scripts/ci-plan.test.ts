@@ -678,6 +678,17 @@ describe("CI plan", () => {
       if (!file) throw new Error("Missing build input path");
       paths.add(file);
     }
+    const smoke = readFileSync(path.join(REPO_ROOT, "plugins/vscode/test/smoke/run.ts"), "utf8");
+    for (const match of smoke.matchAll(/path\.join\(repoRoot,\s*((?:"[^"]+"\s*,?\s*)+)\)/gu)) {
+      const argumentsText = match.at(1);
+      if (!argumentsText) throw new Error("Missing smoke fixture arguments");
+      const parts = [...argumentsText.matchAll(/"([^"]+)"/gu)].map((part) => {
+        const value = part.at(1);
+        if (!value) throw new Error("Missing smoke fixture path");
+        return value;
+      });
+      paths.add(path.posix.join(...parts));
+    }
     const packagingJobs = workflow["jobs"];
     if (
       !isRecord(packagingJobs) ||
@@ -744,6 +755,27 @@ describe("CI plan", () => {
       }
     });
   }
+
+  test("VS Code compatibility gates its selected area and exercises both API branches", () => {
+    const workflow = readWorkflow("vscode-extension.yml");
+    const triggers = workflow["on"];
+    if (!isRecord(triggers)) throw new Error("Missing VS Code workflow triggers");
+    expect(Object.keys(triggers).toSorted()).toEqual(["merge_group", "pull_request"]);
+    if (!isRecord(workflow["jobs"]) || !isRecord(workflow["jobs"]["package"]))
+      throw new Error("Missing VS Code package job");
+    const steps = workflow["jobs"]["package"]["steps"];
+    if (!Array.isArray(steps)) throw new Error("Missing VS Code test steps");
+    const smoke = steps.filter(
+      (step) => isRecord(step) && step["run"] === "xvfb-run -a bun run test:smoke",
+    );
+    expect(smoke.map((step) => step["env"])).toEqual([
+      { FOLIO_SMOKE_VSCODE_VERSION: "1.86.0", FOLIO_SMOKE_MCP: "unavailable" },
+      { FOLIO_SMOKE_VSCODE_VERSION: "stable", FOLIO_SMOKE_MCP: "registered" },
+    ]);
+    expect(
+      steps.filter((step) => isRecord(step) && step["run"] === "bun run package"),
+    ).toHaveLength(1);
+  });
 
   test("published API preflight is selected before queue entry and evaluated by CI result", () => {
     expect(planOutputs["api_required"]).toBe(
