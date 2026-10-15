@@ -2369,6 +2369,7 @@ type RotateAddedFinalBreaksOptions = {
   date: string;
   initials: string | undefined;
   styleResolver: ReturnType<typeof getDocumentStyleResolver>;
+  numbering: NumberingMap | null;
 };
 
 type RotatedAddedFinalBreaks = {
@@ -3188,7 +3189,10 @@ const withRotatedAddedFinalBreaks = ({
   date,
   initials,
   styleResolver,
+  numbering,
 }: RotateAddedFinalBreaksOptions): RotatedAddedFinalBreaks => {
+  let nextRevisionId = revisionSeed;
+  const synthesizedRevisions: RotatedAddedFinalBreaks["synthesizedRevisions"] = [];
   // A later insertion may land between a deleted break and the paragraph it
   // would join into. Move the old deletion to the new boundary so resolving
   // either revision keeps the inserted paragraph separate.
@@ -3263,6 +3267,31 @@ const withRotatedAddedFinalBreaks = ({
     }
     tr.setNodeAttribute(preceding, "pPrMark", precedingMark);
     tr.setNodeAttribute(inserted, "pPrMark", deletedMark);
+    if (insertionRevisionId === null) continue;
+    // The shifted deletion joins the insertion into the surviving paragraph
+    // on accept. Its mark must carry the inserted paragraph's properties too;
+    // otherwise the final carrier still renders like the old last survivor.
+    const source = tr.doc.nodeAt(inserted);
+    const survivor = paragraphLeftAfter({ doc: tr.doc, paragraphPos: inserted });
+    if (!source || survivor === null) continue;
+    const revisionId = nextRevisionId;
+    const carried = carryParagraphProperties({
+      tr,
+      position: survivor,
+      source,
+      styleResolver,
+      numbering,
+      revision: {
+        id: revisionId,
+        author,
+        date,
+        ...(initials ? { initials } : {}),
+      },
+    });
+    if (carried.tracked) {
+      nextRevisionId++;
+      synthesizedRevisions.push({ ownerRevisionId: insertionRevisionId, revisionId });
+    }
   }
 
   const paragraphTypeName = tr.doc.type.schema.nodes["paragraph"]?.name ?? "paragraph";
@@ -3279,8 +3308,6 @@ const withRotatedAddedFinalBreaks = ({
     .toSorted((left, right) => right.position - left.position);
 
   let next = tr;
-  let nextRevisionId = revisionSeed;
-  const synthesizedRevisions: RotatedAddedFinalBreaks["synthesizedRevisions"] = [];
   const retractedRevisionIds: number[] = [];
   // Attribute writes do not move anything, so the positions stay valid.
   for (const { position: finalPosition, node: final, mark: finalMark } of rotations) {
@@ -5980,6 +6007,7 @@ const applyFolioAIEditOperationsInternal = ({
       date,
       initials,
       styleResolver: styleResolver ?? null,
+      numbering,
     });
     tr = rotated.transaction;
     revisionSeed = rotated.nextRevisionId;
