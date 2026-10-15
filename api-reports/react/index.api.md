@@ -154,6 +154,8 @@ import { default as React_2 } from 'react';
 import { ReactNode } from 'react';
 import { RefAttributes } from 'react';
 import { RefObject } from 'react';
+import { ReplaceAllSummary } from '@stll/folio-core/utils/findReplace';
+import { ReplaceEligibility } from '@stll/folio-core/utils/findReplace';
 import { resetTemplateSlashQuery } from '@stll/folio-core/prosemirror/plugins/templateSlashMenu';
 import { ResolvedAnchor } from '@stll/folio-core/ai-suggestions/conflict';
 import { resolveSuggestionAnchor } from '@stll/folio-core/ai-suggestions/conflict';
@@ -373,6 +375,7 @@ export type DocxEditorHandle = EditorHandle & {
 
 // @public (undocumented)
 export type DocxEditorProps = {
+    onFindResultChange?: (result: FindResult | null) => void;
     documentBuffer?: DocxInput | null;
     password?: string | undefined;
     document?: Document_2 | null;
@@ -463,6 +466,11 @@ export type DocxEditorProps = {
 // @public
 export type DocxEditorRef = {
     getReadOnlyReason: () => EditorReadOnlyReason | null;
+    find: (searchText: string, options?: Partial<FindOptions>) => FindResult | null;
+    findNext: () => FindMatch | null;
+    findPrevious: () => FindMatch | null;
+    getFindResult: () => FindResult | null;
+    clearFind: () => void;
     getDocument: () => Document_2 | null;
     hasPendingChanges: () => boolean;
     getEditorRef: () => PagedEditorRef | null;
@@ -561,6 +569,10 @@ export { extractDocumentStyleSetFromDocx }
 
 export { ExtractDocumentStyleSetOptions }
 
+export { FindMatch }
+
+export { FindOptions }
+
 // @public
 export function FindReplaceDialog(props: FindReplaceDialogProps): React_2.ReactElement | null;
 
@@ -569,18 +581,25 @@ export type FindReplaceDialogProps = {
     isOpen: boolean;
     onClose: () => void;
     onFind: (searchText: string, options: FindOptions) => FindResult | null;
+    onQueryChange?: (searchText: string, options: FindOptions) => void;
     onFindNext: () => FindMatch | null;
     onFindPrevious: () => FindMatch | null;
     onReplace: (replaceText: string) => boolean;
-    onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => number;
+    onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => ReplaceAllSummary;
+    readOnly?: boolean;
     onHighlightMatches?: (matches: FindMatch[]) => void;
     onClearHighlights?: () => void;
     initialSearchText?: string;
     replaceMode?: boolean;
-    currentResult?: FindResult | null;
+    currentSearch?: {
+        queryKey: string;
+        result: FindResult;
+    } | null;
     className?: string;
     style?: CSSProperties;
 };
+
+export { FindResult }
 
 export { finishAutocompleteSuggestion }
 
@@ -929,6 +948,10 @@ export const renderAsync: (input: DocxInput, container: HTMLElement, options?: R
 export type RenderAsyncOptions = Omit<DocxEditorProps, "documentBuffer" | "document"> & {
     locale?: string;
 };
+
+export { ReplaceAllSummary }
+
+export { ReplaceEligibility }
 
 export { resetTemplateSlashQuery }
 

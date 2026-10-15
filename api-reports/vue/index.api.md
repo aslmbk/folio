@@ -81,6 +81,9 @@ import { extractDocumentStyleSet } from '@stll/folio-core/style-sets/extract';
 import { extractDocumentStyleSetFromDocx } from '@stll/folio-core/style-sets/extract';
 import { ExtractDocumentStyleSetOptions } from '@stll/folio-core/style-sets/extract';
 import { ExtractPropTypes } from 'vue';
+import { FindMatch } from '@stll/folio-core/utils/findReplace';
+import { FindOptions } from '@stll/folio-core/utils/findReplace';
+import { FindResult } from '@stll/folio-core/utils/findReplace';
 import { finishAutocompleteSuggestion } from '@stll/folio-core/prosemirror/plugins/autocompleteSuggestion';
 import { FolioAIBlock } from '@stll/folio-core/ai-edits';
 import { FolioAIBlockAnchor } from '@stll/folio-core/ai-edits';
@@ -150,6 +153,8 @@ import { PublicProps } from 'vue';
 import { Ref } from 'vue';
 import { RendererElement } from 'vue';
 import { RendererNode } from 'vue';
+import { ReplaceAllSummary } from '@stll/folio-core/utils/findReplace';
+import { ReplaceEligibility } from '@stll/folio-core/utils/findReplace';
 import { resetTemplateSlashQuery } from '@stll/folio-core/prosemirror/plugins/templateSlashMenu';
 import { ResolvedAnchor } from '@stll/folio-core/ai-suggestions/conflict';
 import { resolveSuggestionAnchor } from '@stll/folio-core/ai-suggestions/conflict';
@@ -169,6 +174,7 @@ import { SetContentControlValueInput } from '@stll/folio-core/content-controls';
 import { setDocumentWatermark } from '@stll/folio-core/watermark';
 import { setFocusedSuggestionMeta } from '@stll/folio-core/prosemirror/plugins/aiSuggestionDecorations';
 import { setTemplatePreviewValues } from '@stll/folio-core/prosemirror/plugins/templatePreviewValues';
+import { ShallowRef } from 'vue';
 import { shouldTriggerAutocomplete } from '@stll/folio-core/prosemirror/plugins/autocompleteSuggestion';
 import { startAutocompleteSuggestion } from '@stll/folio-core/prosemirror/plugins/autocompleteSuggestion';
 import { STELLA_STYLE_SET_NAME } from '@stll/folio-core/style-sets/stellaStyle';
@@ -441,6 +447,7 @@ export type DocxEditorProps = {
     onModeChange?: (mode: EditorMode) => void;
     onReadonlyEditAttempt?: (reason: EditorReadOnlyReason) => void;
     comments?: Comment_2[];
+    onFindResultChange?: (result: FindResult | null) => void;
     onCommentsChange?: (comments: Comment_2[]) => void;
     onCompatibilityChange?: (compatibility: DocxCompatibility) => void;
     onEditorViewReady?: (view: EditorView | null) => void;
@@ -486,6 +493,11 @@ export type DocxEditorRef = {
     openPrintPreview: () => void;
     print: () => void;
     openFind: () => void;
+    find: (searchText: string, options?: Partial<FindOptions>) => FindResult | null;
+    findNext: () => FindMatch | null;
+    findPrevious: () => FindMatch | null;
+    getFindResult: () => FindResult | null;
+    clearFind: () => void;
     openReplace: () => void;
     loadDocument: (doc: Document_2) => void;
     loadDocumentBuffer: (buffer: DocxInput) => Promise<void>;
@@ -567,8 +579,14 @@ export { extractDocumentStyleSetFromDocx }
 
 export { ExtractDocumentStyleSetOptions }
 
+export { FindMatch }
+
+export { FindOptions }
+
 // @public (undocumented)
 export const FindReplaceDialog: typeof __VLS_export_4;
+
+export { FindResult }
 
 export { finishAutocompleteSuggestion }
 
@@ -798,6 +816,10 @@ export type RenderAsyncOptions = Omit<DocxEditorProps, "documentBuffer" | "docum
     locale?: string;
     colorMode?: MaybeRefOrGetter<ColorMode>;
 };
+
+export { ReplaceAllSummary }
+
+export { ReplaceEligibility }
 
 export { resetTemplateSlashQuery }
 

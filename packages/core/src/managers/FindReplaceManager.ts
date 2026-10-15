@@ -5,14 +5,20 @@
  * Extracted from the React `useFindReplace` hook (the document-aware half).
  *
  * Owns the active find result (the matches plus the cursor index) and runs the
- * document-level replace operations. Matching itself (scanning a document for
- * hits) and the side effects (scroll-into-view, host selection, dialog state)
- * stay in the adapter. The manager is generic over the adapter's match shape
+ * document-level replace operations. The shared findReplace utility scans
+ * stories, and findMatchView projects view-only highlights. Adapters bind
+ * dialog state and document access. The manager is generic over the adapter's match shape
  * and only reads each match's paragraph-relative offsets via `FindMatchPosition`,
  * so a richer adapter match (content index, matched text) round-trips untouched.
  */
 
 import type { FindMatchPosition } from "../prosemirror/findReplaceSelection";
+import type { OpStory } from "@stll/docx-core/ops";
+import {
+  replaceEligibility,
+  type ReplaceEligibility,
+  type ReplaceAllSummary,
+} from "../utils/findReplace";
 import type { Document } from "../types/document";
 import { replaceTextInDocument } from "../utils/replaceText";
 
@@ -24,10 +30,7 @@ export type FindReplaceResult<TMatch> = {
   currentIndex: number;
 };
 
-export type ReplaceAllOutcome = {
-  document: Document;
-  replacedCount: number;
-};
+export type ReplaceAllOutcome = ReplaceAllSummary & { document: Document };
 
 /**
  * The cursor index after stepping `direction` over `totalCount` matches,
@@ -54,7 +57,14 @@ const toReplaceRange = (match: FindMatchPosition) => ({
   end: { paragraphIndex: match.paragraphIndex, offset: match.endOffset },
 });
 
-export class FindReplaceManager<TMatch extends FindMatchPosition> {
+type ReplaceableFindPosition = FindMatchPosition & {
+  story?: OpStory;
+  textBoxIndex?: number;
+  commentId?: number;
+  replacement: ReplaceEligibility;
+};
+
+export class FindReplaceManager<TMatch extends ReplaceableFindPosition> {
   private result: FindReplaceResult<TMatch> | null = null;
 
   /** The active find result, or null when there is no active search. */
@@ -72,8 +82,12 @@ export class FindReplaceManager<TMatch extends FindMatchPosition> {
    * first match. The result is kept even when `matches` is empty so callers can
    * surface a "no results" state.
    */
-  setMatches(matches: TMatch[]): FindReplaceResult<TMatch> {
-    this.result = { matches, totalCount: matches.length, currentIndex: 0 };
+  setMatches(matches: TMatch[], currentIndex = 0): FindReplaceResult<TMatch> {
+    this.result = {
+      matches,
+      totalCount: matches.length,
+      currentIndex: Math.max(0, Math.min(currentIndex, matches.length - 1)),
+    };
     return this.result;
   }
 
@@ -121,7 +135,7 @@ export class FindReplaceManager<TMatch extends FindMatchPosition> {
     }
 
     const match = result.matches[result.currentIndex];
-    if (!match) {
+    if (!match || replaceEligibility(match).status === "blocked") {
       return null;
     }
 
@@ -134,8 +148,8 @@ export class FindReplaceManager<TMatch extends FindMatchPosition> {
 
   /**
    * Replace every match. Matches are replaced from the end of the document
-   * backwards so earlier offsets stay valid as the text shifts. Clears the
-   * active result and returns the new document plus the match count, or null
+   * backwards so earlier offsets stay valid as the text shifts. Ineligible
+   * matches are skipped and counted. Clears the active result, or returns null
    * when there is nothing to replace.
    */
   replaceAll(
@@ -147,7 +161,12 @@ export class FindReplaceManager<TMatch extends FindMatchPosition> {
       return null;
     }
 
-    const sortedMatches = [...matches].toSorted((a, b) => {
+    const eligibleMatches = matches.filter(
+      (match) => replaceEligibility(match).status === "allowed",
+    );
+    let skippedCount = matches.length - eligibleMatches.length;
+    let replacedCount = 0;
+    const sortedMatches = [...eligibleMatches].toSorted((a, b) => {
       if (a.paragraphIndex !== b.paragraphIndex) {
         return b.paragraphIndex - a.paragraphIndex;
       }
@@ -158,12 +177,13 @@ export class FindReplaceManager<TMatch extends FindMatchPosition> {
     for (const match of sortedMatches) {
       try {
         nextDocument = replaceTextInDocument(nextDocument, toReplaceRange(match), replaceText);
+        replacedCount++;
       } catch {
-        continue;
+        skippedCount++;
       }
     }
 
-    this.result = null;
-    return { document: nextDocument, replacedCount: matches.length };
+    if (replacedCount > 0) this.result = null;
+    return { document: nextDocument, replacedCount, skippedCount };
   }
 }

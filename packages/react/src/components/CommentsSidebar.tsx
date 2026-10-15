@@ -23,29 +23,21 @@ import React, {
 import { CheckIcon, MoreVerticalIcon } from "lucide-react";
 import { useLocale, useTranslations } from "use-intl";
 
+import { getFindParagraphText } from "@stll/folio-core/utils/findReplace";
 import { scrollEditorTo } from "@stll/folio-core/paged-layout/editorScrollRoot";
 import { commentAnchorSelector } from "@stll/folio-core/render-dom/commentAnchorAttributes";
-import type { Comment, Paragraph } from "@stll/folio-core/types/content";
+import type { Comment } from "@stll/folio-core/types/content";
 import { closestHtmlElement, queryHtmlElement } from "@stll/folio-core/utils/domGuards";
 import { containedHandler } from "../utils/contained-handler";
 import { useDrawerFocus } from "./panelDrawer";
 import { PANEL_METRICS } from "@stll/folio-core/panel-layout";
 
-/** Extract plain text from a Comment's paragraph content */
-function getCommentText(paragraphs?: Paragraph[]): string {
-  if (!paragraphs?.length) {
-    return "";
-  }
-  return paragraphs
-    .flatMap((p) =>
-      p.content
-        .filter((c) => c.type === "run")
-        .flatMap((r) => ("content" in r ? r.content : []))
-        .filter((c) => c.type === "text")
-        .map((t) => ("text" in t ? t.text : "")),
-    )
-    .join("");
-}
+const renderCommentText = (comment: Comment) =>
+  comment.content.map((paragraph, index) => (
+    <span key={index} data-find-comment-id={comment.id} data-find-comment-paragraph={index}>
+      {getFindParagraphText(paragraph)}
+    </span>
+  ));
 
 function formatDate(dateStr: string | undefined, locale: string): string {
   if (!dateStr) {
@@ -115,8 +107,8 @@ export type TrackedChangeEntry = {
 
 export type CommentsSidebarProps = {
   comments: Comment[];
-  activeCommentId?: number | null;
-  onCommentClick?: (commentId: number | null) => void;
+  activeCommentId: number | null;
+  onCommentClick: (commentId: number | null) => void;
   onCommentReply?: (commentId: number, text: string) => void;
   onCommentResolve?: (commentId: number) => void;
   onCommentDelete?: (commentId: number) => void;
@@ -204,7 +196,7 @@ const CANCEL_BUTTON_STYLE: React.CSSProperties = {
 export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
   comments,
   onCommentClick,
-  activeCommentId = null,
+  activeCommentId,
   onCommentReply,
   onCommentResolve,
   onCommentDelete,
@@ -228,9 +220,7 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
   const [replyingTo, setReplyingTo] = useState<number | null>(null);
   const [replyText, setReplyText] = useState("");
   const [newCommentText, setNewCommentText] = useState("");
-  const [expandedCard, setExpandedCard] = useState<string | null>(
-    activeCommentId === null ? null : `comment-${activeCommentId}`,
-  );
+  const expandedCard = activeCommentId === null ? null : `comment-${activeCommentId}`;
   const [menuOpenFor, setMenuOpenFor] = useState<string | null>(null);
   const [{ positions: cardPositions, knownCards }, setCardGeometry] = useState(() => ({
     positions: new Map<string, number>(),
@@ -503,14 +493,13 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
       if (pagesEl.contains(target)) {
         const commentEl = closestHtmlElement(target, "[data-comment-id]");
         if (commentEl?.dataset["commentId"]) {
-          setExpandedCard(`comment-${commentEl.dataset["commentId"]}`);
-          onCommentClick?.(Number(commentEl.dataset["commentId"]));
+          onCommentClick(Number(commentEl.dataset["commentId"]));
           return;
         }
       }
 
       // Click on grey area or anywhere else outside sidebar/highlights → collapse
-      setExpandedCard(null);
+      onCommentClick(null);
       setMenuOpenFor(null);
     };
 
@@ -629,22 +618,11 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
     }
   };
 
-  const [previousActiveCommentId, setPreviousActiveCommentId] = useState(activeCommentId);
-  if (previousActiveCommentId !== activeCommentId) {
-    setPreviousActiveCommentId(activeCommentId);
-    if (activeCommentId !== null) setExpandedCard(`comment-${activeCommentId}`);
-  }
-
-  const handleCardClick = (cardId: string, commentId?: number) => {
+  const handleCardClick = (cardId: string, commentId: number) => {
     const nextExpandedCard = expandedCard === cardId ? null : cardId;
-    setExpandedCard(nextExpandedCard);
     setMenuOpenFor(null);
-    if (commentId !== undefined) {
-      onCommentClick?.(
-        nextExpandedCard === null && activeCommentId === commentId ? null : commentId,
-      );
-    }
-    if (isDrawer && commentId !== undefined && nextExpandedCard !== null) {
+    onCommentClick(nextExpandedCard === null ? null : commentId);
+    if (isDrawer && nextExpandedCard !== null) {
       revealAnchor(cardId);
     }
   };
@@ -802,7 +780,7 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
                   : {}),
               }}
             >
-              {getCommentText(reply.content)}
+              {renderCommentText(reply)}
             </div>
           </div>
         ))}
@@ -1080,7 +1058,7 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
             marginTop: 5,
           }}
         >
-          {getCommentText(comment.content)}
+          {renderCommentText(comment)}
         </div>
 
         {renderReplies(replies, isExpanded)}
@@ -1120,6 +1098,7 @@ export const CommentsSidebar: React.FC<CommentsSidebarProps> = ({
       {/* Cards container — relative for absolute card positioning; in a
           drawer, a list pinned to the viewport that scrolls on its own. */}
       <div
+        data-folio-scroll={isDrawer ? "" : undefined}
         style={
           isDrawer
             ? {

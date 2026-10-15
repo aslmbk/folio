@@ -202,7 +202,6 @@ import {
 } from "@stll/folio-core/prosemirror/extensions/features/ParagraphChangeTrackerExtension";
 // Extension system
 import { createStarterKit } from "@stll/folio-core/prosemirror/extensions/StarterKit";
-import { resolveFindMatchRange } from "@stll/folio-core/prosemirror/findReplaceSelection";
 import { createAICitationDecorationsPlugin } from "@stll/folio-core/prosemirror/plugins/aiCitationDecorations";
 import { createAISuggestionDecorationsPlugin } from "@stll/folio-core/prosemirror/plugins/aiSuggestionDecorations";
 import { createAnonymizationDecorationsPlugin } from "@stll/folio-core/prosemirror/plugins/anonymizationDecorations";
@@ -275,6 +274,7 @@ import { ContentControlWidgetsOverlay } from "./ContentControlWidgetsOverlay";
 // Dialog hooks and utilities (static imports — lightweight, no UI)
 import { readFindSelectionSeed } from "./dialogs/findReplaceSelectionSeed";
 import type { FindMatch } from "./dialogs/findReplaceUtils";
+import { createDefaultFindOptions } from "./dialogs/findReplaceUtils";
 import type { ImagePropertiesData } from "./dialogs/ImagePropertiesDialog";
 import { useFindReplace as useFindReplaceState } from "./dialogs/useFindReplace";
 import { DocumentOutline } from "./DocumentOutline";
@@ -552,6 +552,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onSave,
     author = "User",
     onChange,
+    onFindResultChange,
     onSelectionChange,
     onSelectionTextChange,
     onError,
@@ -1842,24 +1843,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onCommentsChange?.(structuredClone(nextComments));
   }, [canonicalComments, canonicalCommentsSerialized, onCommentsChange]);
 
-  const selectFindMatch = useCallback((match: FindMatch): boolean => {
-    const editor = pagedEditorRef.current;
-    const view = editor?.getView();
-    if (!editor || !view) {
+  const selectFindMatch = useCallback(
+    (match: FindMatch): boolean => {
+      if (match.commentId !== undefined) {
+        setVisibleCommentAuthors(null);
+        setShowCommentsSidebar(true);
+        setActiveCommentId(
+          commentsRef.current.find(({ id }) => id === match.commentId)?.parentId ?? match.commentId,
+        );
+        return true;
+      }
       return false;
-    }
-
-    const range = match.authoredRange ?? resolveFindMatchRange(view.state.doc, match);
-    if (!range) {
-      return false;
-    }
-
-    editor.setSelection(range.from, range.to);
-    requestAnimationFrame(() => {
-      editor.scrollToPosition(range.from);
-    });
-    return true;
+    },
+    [setActiveCommentId, setVisibleCommentAuthors, setShowCommentsSidebar, commentsRef],
+  );
+  const getFindEditorState = useCallback(() => {
+    pagedEditorRef.current?.ensureView({ focus: false });
+    return pagedEditorRef.current?.getView()?.state ?? null;
   }, []);
+  const getFindBodyDoc = useCallback(() => getFindEditorState()?.doc, [getFindEditorState]);
+  const getFindLayout = useCallback(() => pagedEditorRef.current?.getLayout() ?? null, []);
 
   const notifyReadonlyEditAttempt = useCallback(() => {
     if (readOnlyReason) onReadonlyEditAttempt?.(readOnlyReason);
@@ -1867,24 +1870,59 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // Find/Replace handlers (depends on handleDocumentChange)
   const {
-    currentResult: currentFindResult,
+    currentSearch: currentFindSearch,
     resetFindResult,
     handleFind,
+    handleQueryChange,
     handleFindNext,
     handleFindPrevious,
     handleReplace,
     handleReplaceAll,
+    getFindResult,
+    refreshFind,
   } = useFindReplace({
+    documentState: history.state,
     getDocumentState: buildCurrentDocument,
-    getEditorState: () => pagedEditorRef.current?.getView()?.state ?? null,
-    markupView: displayMode,
+    getEditorState: getFindEditorState,
     containerRef,
     handleDocumentChange,
     findReplace,
     selectMatch: selectFindMatch,
+    getBodyDoc: getFindBodyDoc,
+    getLayout: getFindLayout,
+    displayMode,
+    onFindResultChange,
     readOnlyReason,
     onReadonlyEditAttempt,
   });
+  const refreshFindRef = useRef(refreshFind);
+  useLayoutEffect(() => {
+    refreshFindRef.current = refreshFind;
+  }, [refreshFind]);
+  useEffect(() => {
+    if (bodyViewEpoch === 0) return;
+    const editor = pagedEditorRef.current?.getEditor();
+    if (!editor) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => refreshFindRef.current(), 200);
+    };
+    const unsubscribe = editor.on("docChange", schedule);
+    const unsubscribeLayout = editor.on("layoutComplete", schedule);
+    return () => {
+      unsubscribe();
+      unsubscribeLayout();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [bodyViewEpoch]);
+  useEffect(() => {
+    const snapshot = comments;
+    const timer = setTimeout(() => {
+      if (commentsRef.current === snapshot) refreshFindRef.current();
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [comments, commentsRef]);
 
   useLayoutEffect(() => {
     resetFindResultRef.current = resetFindResult;
@@ -3456,6 +3494,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => ({
       getReadOnlyReason: () => readOnlyReason,
       getDocument: () => buildCurrentDocument(),
+      find: (searchText, options) =>
+        handleFind(searchText, { ...createDefaultFindOptions(), ...options }),
+      findNext: handleFindNext,
+      findPrevious: handleFindPrevious,
+      getFindResult,
+      clearFind: resetFindResult,
       hasPendingChanges: () => {
         const view = pagedEditorRef.current?.getView();
         if (!view) {
@@ -4145,6 +4189,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       readOnlyReason,
       notifyReadonlyEditAttempt,
       scrollPageInfo,
+      handleFind,
+      handleFindNext,
+      handleFindPrevious,
+      getFindResult,
+      resetFindResult,
       handleSave,
       setZoomWithViewportAnchor,
       zoomRef,
@@ -4941,26 +4990,35 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => buildImagePropertiesData(state.pmImageContext),
     [state.pmImageContext],
   );
+  const { close: closeFindDialog } = findReplace;
   const findReplaceDialog = useMemo(
     () => ({
       state: findReplace.state,
-      onClose: findReplace.close,
+      onClose: () => {
+        closeFindDialog();
+        resetFindResult();
+      },
       onFind: handleFind,
+      onQueryChange: handleQueryChange,
       onFindNext: handleFindNext,
       onFindPrevious: handleFindPrevious,
       onReplace: handleReplace,
       onReplaceAll: handleReplaceAll,
-      currentResult: currentFindResult,
+      currentSearch: currentFindSearch,
+      readOnly,
     }),
     [
-      currentFindResult,
-      findReplace.close,
+      currentFindSearch,
+      readOnly,
+      closeFindDialog,
       findReplace.state,
       handleFind,
+      handleQueryChange,
       handleFindNext,
       handleFindPrevious,
       handleReplace,
       handleReplaceAll,
+      resetFindResult,
     ],
   );
   const tablePropertiesDialog = useMemo(() => {
@@ -5043,6 +5101,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // Container styles - using overflow: auto so sticky toolbar works
   const containerStyle: CSSProperties = {
+    position: "relative",
     display: "flex",
     flexDirection: "column",
     height: "100%",

@@ -14,6 +14,9 @@ import type { CSSProperties, KeyboardEvent, ChangeEvent } from "react";
 
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon, XIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
+import { replaceEligibility } from "@stll/folio-core/utils/findReplace";
+import type { ReplaceAllSummary } from "@stll/folio-core/utils/findReplace";
+import { createFindQueryKey } from "@stll/folio-core/utils/findSearchKey";
 
 import { useFolioUI } from "../../ui/folio-ui";
 import { getFindReplaceOverlayStyle } from "./findReplaceDialogLayout";
@@ -54,6 +57,8 @@ export type FindReplaceDialogProps = {
   onClose: () => void;
   /** Callback when searching for text */
   onFind: (searchText: string, options: FindOptions) => FindResult | null;
+  /** Publish edits immediately, before the delayed search. */
+  onQueryChange?: (searchText: string, options: FindOptions) => void;
   /** Callback when navigating to next match */
   onFindNext: () => FindMatch | null;
   /** Callback when navigating to previous match */
@@ -61,7 +66,12 @@ export type FindReplaceDialogProps = {
   /** Callback when replacing current match */
   onReplace: (replaceText: string) => boolean;
   /** Callback when replacing all matches */
-  onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => number;
+  onReplaceAll: (
+    searchText: string,
+    replaceText: string,
+    options: FindOptions,
+  ) => ReplaceAllSummary;
+  readOnly?: boolean;
   /** Callback to highlight matches in document */
   onHighlightMatches?: (matches: FindMatch[]) => void;
   /** Callback to clear highlights */
@@ -70,8 +80,8 @@ export type FindReplaceDialogProps = {
   initialSearchText?: string;
   /** Whether to start in replace mode */
   replaceMode?: boolean;
-  /** Current match result (from external state) */
-  currentResult?: FindResult | null;
+  /** External result paired with the query that produced it. */
+  currentSearch?: { queryKey: string; result: FindResult } | null;
   /** Additional CSS class */
   className?: string;
   /** Additional inline styles */
@@ -121,9 +131,6 @@ type FindDialogResultState =
   | { status: "cleared" }
   | { status: "ready"; queryKey: string; result: FindResult };
 
-const getFindQueryKey = (text: string, { matchCase, matchWholeWord }: FindOptions) =>
-  JSON.stringify([text, matchCase, matchWholeWord]);
-
 const getQueryResult = (state: FindDialogResultState, queryKey: string): FindResult | null => {
   switch (state.status) {
     case "cleared":
@@ -141,12 +148,17 @@ function FindReplaceDialogForm({
   isOpen,
   onClose,
   onFind,
+  onQueryChange,
   onFindNext,
   onFindPrevious,
+  onReplace,
+  onReplaceAll,
+  replaceMode = false,
+  readOnly = false,
   onHighlightMatches,
   onClearHighlights,
   initialSearchText = "",
-  currentResult,
+  currentSearch,
   className,
   style,
   matchCase,
@@ -159,7 +171,11 @@ function FindReplaceDialogForm({
   const { Button, Input, Checkbox } = useFolioUI();
   // State
   const [searchText, setSearchText] = useState(initialSearchText);
-  const queryKey = getFindQueryKey(searchText, { matchCase, matchWholeWord });
+  const [replaceText, setReplaceText] = useState("");
+  const [replacementSummary, setReplacementSummary] = useState<ReplaceAllSummary | null>(null);
+  const currentResult = currentSearch === null ? null : currentSearch?.result;
+  const currentQueryKey = currentSearch?.queryKey;
+  const queryKey = createFindQueryKey(searchText, { matchCase, matchWholeWord });
   const [findResult, setFindResult] = useState<FindDialogResultState>({ status: "cleared" });
   const [previousCurrentResult, setPreviousCurrentResult] = useState(currentResult);
   if (currentResult !== previousCurrentResult) {
@@ -169,6 +185,7 @@ function FindReplaceDialogForm({
     if (
       findResult.status === "ready" &&
       findResult.queryKey === queryKey &&
+      currentQueryKey === queryKey &&
       currentResult !== undefined
     ) {
       setFindResult(
@@ -178,7 +195,14 @@ function FindReplaceDialogForm({
       );
     }
   }
-  const result = getQueryResult(findResult, queryKey);
+  const result =
+    currentResult !== undefined && currentQueryKey !== queryKey
+      ? null
+      : getQueryResult(findResult, queryKey);
+
+  useLayoutEffect(() => {
+    onQueryChange?.(searchText, { matchCase, matchWholeWord });
+  }, [onQueryChange, searchText, matchCase, matchWholeWord]);
 
   // Refs
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -202,7 +226,7 @@ function FindReplaceDialogForm({
         searchResult
           ? {
               status: "ready",
-              queryKey: getFindQueryKey(text, options),
+              queryKey: createFindQueryKey(text, options),
               result: searchResult,
             }
           : { status: "cleared" },
@@ -247,30 +271,36 @@ function FindReplaceDialogForm({
 
   const handleMatchCaseChange = useCallback(
     (value: boolean) => {
+      setReplacementSummary(null);
       setFindResult({ status: "cleared" });
+      onQueryChange?.(searchText, { matchCase: value, matchWholeWord });
       onMatchCaseChange(value);
     },
-    [onMatchCaseChange, setFindResult],
+    [onMatchCaseChange, onQueryChange, searchText, matchWholeWord, setFindResult],
   );
   const handleMatchWholeWordChange = useCallback(
     (value: boolean) => {
+      setReplacementSummary(null);
       setFindResult({ status: "cleared" });
+      onQueryChange?.(searchText, { matchCase, matchWholeWord: value });
       onMatchWholeWordChange(value);
     },
-    [onMatchWholeWordChange, setFindResult],
+    [onMatchWholeWordChange, onQueryChange, searchText, matchCase, setFindResult],
   );
 
   const handleSearchChange = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
       const text = e.target.value;
+      setReplacementSummary(null);
       setSearchText(text);
       setFindResult({ status: "cleared" });
+      onQueryChange?.(text, { matchCase, matchWholeWord });
       if (!text.trim()) {
         onFind(text, { matchCase, matchWholeWord });
         onClearHighlights?.();
       }
     },
-    [onFind, matchCase, matchWholeWord, onClearHighlights, setFindResult],
+    [onFind, onQueryChange, matchCase, matchWholeWord, onClearHighlights, setFindResult],
   );
 
   const handleFindNext = useCallback(() => {
@@ -360,6 +390,20 @@ function FindReplaceDialogForm({
     }
   }, []);
 
+  const handleReplacementChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setReplaceText(event.target.value);
+    setReplacementSummary(null);
+  }, []);
+  const handleReplaceCurrent = useCallback(() => {
+    setReplacementSummary(null);
+    if (onReplace(replaceText)) performSearch();
+  }, [onReplace, replaceText, performSearch]);
+  const handleReplaceAll = useCallback(() => {
+    const summary = onReplaceAll(searchText, replaceText, { matchCase, matchWholeWord });
+    performSearch();
+    setReplacementSummary(summary);
+  }, [onReplaceAll, searchText, replaceText, matchCase, matchWholeWord, performSearch]);
+
   const handleDialogKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === "Escape") {
@@ -375,6 +419,11 @@ function FindReplaceDialogForm({
 
   const hasMatches = result && result.totalCount > 0;
   const noMatches = result && result.totalCount === 0 && searchText.trim();
+  const currentMatch = result?.matches.at(result.currentIndex);
+  const canReplaceCurrent =
+    !readOnly &&
+    currentMatch !== undefined &&
+    replaceEligibility(currentMatch).status === "allowed";
   const overlayStyle = getFindReplaceOverlayStyle(style);
   const titleId = `${id}-find-replace-dialog-title`;
   const findTextId = `${id}-find-text`;
@@ -464,6 +513,34 @@ function FindReplaceDialogForm({
           )}
           {noMatches && (
             <div className="text-destructive ms-20 text-xs">{t("findReplace.noResults")}</div>
+          )}
+
+          {replaceMode && (
+            <div className="ms-20 flex flex-col gap-2">
+              <Input
+                value={replaceText}
+                onChange={handleReplacementChange}
+                aria-label={t("findReplace.replaceText")}
+                placeholder={t("findReplace.replacePlaceholder")}
+                disabled={readOnly}
+              />
+              <div className="flex gap-2">
+                <Button disabled={!canReplaceCurrent} onClick={handleReplaceCurrent}>
+                  {t("findReplace.replaceCurrent")}
+                </Button>
+                <Button disabled={readOnly || !hasMatches} onClick={handleReplaceAll}>
+                  {t("findReplace.replaceAll")}
+                </Button>
+              </div>
+              {replacementSummary && (
+                <div role="status" aria-live="polite" className="text-muted-foreground text-xs">
+                  {t("findReplace.replaceAllSummary", {
+                    replacedCount: String(replacementSummary.replacedCount),
+                    skippedCount: String(replacementSummary.skippedCount),
+                  })}
+                </div>
+              )}
+            </div>
           )}
 
           <div className="ms-20 flex flex-wrap items-center gap-x-4 gap-y-2">

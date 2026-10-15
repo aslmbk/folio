@@ -269,5 +269,12 @@ export {
   type MarkdownResult,
 } from "@stll/folio-core/markdown";
 
+export type {
+  FindMatch,
+  FindOptions,
+  FindResult,
+  ReplaceEligibility,
+  ReplaceAllSummary,
+} from "@stll/folio-core/utils/findReplace";
 export type { ReviewDisplayMode } from "@stll/folio-core/managers/reviewDisplayMode";
 export type { EditorReadOnlyReason } from "@stll/folio-core/managers/EditorModeManager";

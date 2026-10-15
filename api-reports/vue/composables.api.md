@@ -20,7 +20,9 @@ import { EditorReadOnlyReason } from '@stll/folio-core/managers/EditorModeManage
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
 import { extractTrackedChanges } from '@stll/folio-core/prosemirror/utils/extractTrackedChanges';
+import { FindMatch } from '@stll/folio-core/utils/findReplace';
 import { FindOptions } from '@stll/folio-core/utils/findReplace';
+import { FindResult } from '@stll/folio-core/utils/findReplace';
 import { FlowBlock } from '@stll/folio-core/layout-engine/types';
 import { FolioEditor } from '@stll/folio-core/controller/folioEditor';
 import { FolioSelectiveSaveFlags } from '@stll/folio-core/docx/selectiveSaveFlags';
@@ -30,6 +32,7 @@ import { HiddenProseMirrorCollaboration } from '@stll/folio-core/controller/hidd
 import { HiddenProseMirrorRemoteSelection } from '@stll/folio-core/controller/hiddenEditorManager';
 import { HistoryShortcutOwner } from '@stll/folio-core/prosemirror/extensions/core/HistoryExtension';
 import { Layout } from '@stll/folio-core/layout-engine/types';
+import { Layout as Layout_2 } from '@stll/folio-core/layout-engine';
 import { LayoutSelectionGate } from '@stll/folio-core/paged-layout/LayoutSelectionGate';
 import { MaybeRefOrGetter } from 'vue';
 import { Measure } from '@stll/folio-core/layout-engine/types';
@@ -37,8 +40,8 @@ import { NoteStoryKey } from '@stll/folio-core/controller/noteEditorManager';
 import { PageRendererName } from '@stll/folio-core/display-list/editor/pageRenderer';
 import { ParsedClipboardContent } from '@stll/folio-core/utils/clipboard';
 import { Plugin as Plugin_2 } from 'prosemirror-state';
-import { ProseMirrorFindMatch } from '@stll/folio-core/prosemirror/findReplaceSelection';
 import { Ref } from 'vue';
+import { ReplaceAllSummary } from '@stll/folio-core/utils/findReplace';
 import { runsToClipboardContent } from '@stll/folio-core/utils/clipboard';
 import { ShallowRef } from 'vue';
 import { TemplateSlashMenuKeyAction } from '@stll/folio-core/prosemirror/plugins/templateSlashMenu';
@@ -202,33 +205,49 @@ export type UseDragAutoScrollReturn = {
 };
 
 // @public (undocumented)
-export function useFindReplace(input: UseFindReplaceOptions): UseFindReplaceReturn;
+export function useFindReplace(input: UseFindReplaceOptions): {
+    searchText: Ref<string, string>;
+    replaceText: Ref<string, string>;
+    options: {
+        matchCase: boolean;
+        matchWholeWord: boolean;
+        useRegex?: boolean;
+        displayMode?: DisplayMode;
+        includeComments?: boolean;
+    };
+    matches: ShallowRef<FindMatch[], FindMatch[]>;
+    currentIndex: Ref<number, number>;
+    currentMatch: ComputedRef<FindMatch | null>;
+    canReplaceCurrent: ComputedRef<boolean>;
+    replacementRefusal: ComputedRef<EditorReadOnlyReason | null>;
+    performSearch: (cause?: "query" | "refresh") => FindMatch[];
+    scheduleSearch: () => void;
+    find: (text: string, nextOptions?: Partial<FindOptions>) => FindResult | null;
+    getFindResult: () => FindResult | null;
+    goToMatch: (index: number) => boolean;
+    findNext: () => FindMatch | null;
+    findPrevious: () => FindMatch | null;
+    replaceCurrent: () => boolean;
+    replaceAll: () => ReplaceAllSummary;
+    clear: () => void;
+};
 
 // @public (undocumented)
 export type UseFindReplaceOptions = {
     editorView: Readonly<Ref<EditorView | null>>;
-    markupView?: Readonly<Ref<DisplayMode>>;
-    readOnly?: Readonly<Ref<boolean>>;
+    pagesRef: Readonly<Ref<HTMLElement | null>>;
+    getDocument: () => Document_2 | null;
+    layout: Readonly<Ref<Layout_2 | null>>;
+    commentRoot?: Readonly<Ref<HTMLElement | null>>;
+    revealComment?: (commentId: number) => void;
+    displayMode: Readonly<Ref<DisplayMode>>;
+    readOnly: Readonly<Ref<boolean>>;
     onReadonlyEditAttempt?: (reason: EditorReadOnlyReason) => void;
-    scrollVisiblePositionIntoView?: (pmPos: number) => void;
+    onResultChange: (result: FindResult | null) => void;
 };
 
 // @public (undocumented)
-export type UseFindReplaceReturn = {
-    searchText: Ref<string>;
-    replaceText: Ref<string>;
-    options: FindOptions;
-    matches: ShallowRef<ProseMirrorFindMatch[]>;
-    currentIndex: Ref<number>;
-    currentMatch: ComputedRef<ProseMirrorFindMatch | null>;
-    performSearch: () => ProseMirrorFindMatch[];
-    goToMatch: (index: number) => boolean;
-    findNext: () => ProseMirrorFindMatch | null;
-    findPrevious: () => ProseMirrorFindMatch | null;
-    replaceCurrent: () => boolean;
-    replaceAll: () => number;
-    clear: () => void;
-};
+export type UseFindReplaceReturn = ReturnType<typeof useFindReplace>;
 
 // @public (undocumented)
 export function useFixedDropdown(input: UseFixedDropdownOptions): UseFixedDropdownReturn;

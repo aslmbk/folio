@@ -14,11 +14,7 @@
 <template>
   <FindReplaceDialog
     :is-open="showFindReplace"
-    :view="view"
-    :markup-view="markupView"
-    :read-only="readOnly"
-    :on-readonly-edit-attempt="notifyReadonlyEditAttempt"
-    :scroll-visible-position-into-view="scrollVisiblePositionIntoView"
+    :search="search"
     @close="emit('update:showFindReplace', false)"
   />
 
@@ -74,10 +70,7 @@
 
 <script setup lang="ts">
 import type { EditorView } from "prosemirror-view";
-import type {
-  DisplayMode,
-  EditorReadOnlyReason,
-} from "@stll/folio-core/managers/EditorModeManager";
+import type { UseFindReplaceReturn } from "../../composables/useFindReplace";
 
 import type { TablePropertiesCommand } from "@stll/folio-core/utils/tableOperations";
 import type { SectionProperties } from "@stll/folio-core/types/document";
@@ -104,33 +97,23 @@ type HyperlinkSubmitPayload = {
   tooltip: string;
 };
 
-const props = withDefaults(
-  defineProps<{
-    view: EditorView | null;
-    markupView?: DisplayMode;
-    readOnly?: boolean;
-    onReadonlyEditAttempt?: (reason: EditorReadOnlyReason) => void;
-    bookmarks: BookmarkOption[];
-    selectedImagePmPos: number | null;
-    sectionProperties: SectionProperties | null;
-    scrollVisiblePositionIntoView: (pmPos: number) => void;
-    showFindReplace: boolean;
-    showHyperlink: boolean;
-    showInsertSymbol: boolean;
-    showImageProperties: boolean;
-    showPageSetup: boolean;
-    showTableProperties: boolean;
-    showWatermark: boolean;
-    showNumberingValue: boolean;
-    currentWatermark: Watermark | undefined;
-    tableProperties: TablePropertiesCommand;
-  }>(),
-  { markupView: "all-markup", readOnly: false },
-);
-
-function notifyReadonlyEditAttempt(reason: EditorReadOnlyReason): void {
-  props.onReadonlyEditAttempt?.(reason);
-}
+defineProps<{
+  search: UseFindReplaceReturn;
+  view: EditorView | null;
+  bookmarks: BookmarkOption[];
+  selectedImagePmPos: number | null;
+  sectionProperties: SectionProperties | null;
+  showFindReplace: boolean;
+  showHyperlink: boolean;
+  showInsertSymbol: boolean;
+  showImageProperties: boolean;
+  showPageSetup: boolean;
+  showTableProperties: boolean;
+  showWatermark: boolean;
+  showNumberingValue: boolean;
+  currentWatermark: Watermark | undefined;
+  tableProperties: TablePropertiesCommand;
+}>();
 
 const emit = defineEmits<{
   (e: "update:showFindReplace", value: boolean): void;

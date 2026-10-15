@@ -38,7 +38,7 @@
           :placeholder="t('findReplace.findPlaceholder')"
           :aria-label="t('findReplace.findText')"
           @keydown="handleSearchKeyDown"
-          @input="performSearch"
+          @input="scheduleSearch"
         />
         <span class="find-replace-dialog__count">{{ matchCountText }}</span>
         <FolioButton
@@ -110,6 +110,7 @@
         <FolioButton
           variant="ghost"
           size="xs"
+          :disabled="!canReplaceCurrent"
           data-testid="replace-current"
           :title="t('findReplace.replaceCurrent')"
           @mousedown.prevent="handleReplace"
@@ -126,21 +127,24 @@
           {{ t("findReplace.replaceAll") }}
         </FolioButton>
       </div>
+      <p
+        v-if="replacementSummary"
+        role="status"
+        aria-live="polite"
+        class="find-replace-dialog__summary"
+      >
+        {{ t("findReplace.replaceAllSummary", replacementSummary) }}
+      </p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref, toRef, watch } from "vue";
-import type { EditorView } from "prosemirror-view";
-import type {
-  DisplayMode,
-  EditorReadOnlyReason,
-} from "@stll/folio-core/managers/EditorModeManager";
-import { getReviewViewReadOnlyReason } from "@stll/folio-core/managers/EditorModeManager";
 import { useTranslation } from "../../i18n";
 import { useFolioUI } from "../../ui/folio-ui";
-import { useFindReplace } from "../../composables/useFindReplace";
+import type { ReplaceAllSummary } from "@stll/folio-core/utils/findReplace";
+import type { UseFindReplaceReturn } from "../../composables/useFindReplace";
 
 const { t } = useTranslation();
 
@@ -149,17 +153,10 @@ const { t } = useTranslation();
 // floating panel, not a modal, so it does not use the Dialog primitive).
 const { Button: FolioButton, Input: FolioInput, Checkbox: FolioCheckbox } = useFolioUI();
 
-const props = withDefaults(
-  defineProps<{
-    isOpen: boolean;
-    view: EditorView | null;
-    markupView?: DisplayMode;
-    readOnly?: boolean;
-    onReadonlyEditAttempt?: (reason: EditorReadOnlyReason) => void;
-    scrollVisiblePositionIntoView?: (pmPos: number) => void;
-  }>(),
-  { markupView: "all-markup", readOnly: false },
-);
+const props = defineProps<{
+  isOpen: boolean;
+  search: UseFindReplaceReturn;
+}>();
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -167,30 +164,28 @@ const emit = defineEmits<{
 
 const searchInputRef = ref<HTMLInputElement | null>(null);
 const replaceMode = ref(false);
-const replacementReadOnly = computed(
-  () =>
-    props.readOnly ||
-    getReviewViewReadOnlyReason(props.markupView) !== null ||
-    props.view?.editable === false,
-);
+const replacementSummary = ref<ReplaceAllSummary | null>(null);
+const replacementReadOnly = computed(() => props.search.replacementRefusal.value !== null);
 const {
   searchText,
   replaceText,
   options,
   matches,
   currentIndex,
+  canReplaceCurrent,
   performSearch,
+  scheduleSearch,
   findNext,
   findPrevious,
   replaceCurrent: handleReplace,
-  replaceAll: handleReplaceAll,
+  replaceAll,
   clear: clearHighlights,
-} = useFindReplace({
-  editorView: toRef(props, "view"),
-  markupView: toRef(props, "markupView"),
-  readOnly: toRef(props, "readOnly"),
-  onReadonlyEditAttempt: (reason) => props.onReadonlyEditAttempt?.(reason),
-  scrollVisiblePositionIntoView: (pmPos) => props.scrollVisiblePositionIntoView?.(pmPos),
+} = props.search;
+const handleReplaceAll = () => {
+  replacementSummary.value = replaceAll();
+};
+watch([searchText, () => options.matchCase, () => options.matchWholeWord], () => {
+  replacementSummary.value = null;
 });
 const matchCase = toRef(options, "matchCase");
 const matchWholeWord = toRef(options, "matchWholeWord");
@@ -222,6 +217,7 @@ watch(
 );
 
 function close() {
+  replacementSummary.value = null;
   clearHighlights();
   emit("close");
 }

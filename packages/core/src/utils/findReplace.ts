@@ -1,4 +1,8 @@
+import { parseFieldType } from "../docx/fieldParser";
 import { panic } from "better-result";
+import { documentStories, sameStory, storyBody, type OpStory } from "@stll/docx-core/ops";
+import type { DisplayMode } from "../managers/EditorModeManager";
+import { isTableCellRetainedInReviewView } from "../prosemirror/tableCellRevisionVisibility";
 
 import type {
   BlockContent,
@@ -6,32 +10,98 @@ import type {
   Paragraph,
   ParagraphContent,
   Run,
+  Shape,
   Table,
   TableCell,
   TableRow,
 } from "../types/content";
 import type { Document } from "../types/document";
+import { decodeOoxmlSymbolCharacter } from "./ooxmlSymbol";
+import { HYPHEN_TEXT_CARRIERS } from "../prosemirror/conversion/hyphenTextCarriers";
 
-export type FindMatch = {
+export type ReplaceEligibility =
+  | { status: "allowed" }
+  | {
+      status: "blocked";
+      reason: "field-result" | "atomic-content" | "hidden-content" | "non-body-story";
+    };
+
+export type ReplaceAllSummary = { replacedCount: number; skippedCount: number };
+
+type ParagraphFindMatch = {
   paragraphIndex: number;
   contentIndex: number;
+  replacement: ReplaceEligibility;
   startOffset: number;
   endOffset: number;
   text: string;
   /** Authored editor range when the match was found in a resolved markup view. */
-  authoredRange?: { from: number; to: number };
+  authoredRange?: {
+    from: number;
+    to: number;
+    /** Navigation anchors inside the logical match, excluded from decorations. */
+    excludedRanges?: { from: number; to: number }[];
+    /** Character subranges inside source atoms, whose text exceeds their editor size. */
+    atomicTextRanges?: { from: number; to: number; startOffset: number; endOffset: number }[];
+  };
+};
+
+export type FindMatch = ParagraphFindMatch &
+  (
+    | {
+        /** Package story; omitted only by paragraph-local search. */
+        story?: OpStory;
+        textBoxIndex?: never;
+        anchorParagraphIndex?: never;
+        commentId?: never;
+      }
+    | {
+        story: OpStory;
+        /** Zero-based authored shape text-body index within the package story. */
+        textBoxIndex: number;
+        /** Parent-story paragraph containing the outer shape anchor. */
+        anchorParagraphIndex: number;
+        commentId?: never;
+      }
+    | {
+        story: "main";
+        /** Comment sidebar address; present only for opt-in comment searching. */
+        commentId: number;
+        textBoxIndex?: never;
+        anchorParagraphIndex?: never;
+      }
+  );
+
+/** One replacement policy for every host; searchability does not imply editability. */
+export const replaceEligibility = (
+  match: Pick<FindMatch, "story" | "textBoxIndex" | "commentId" | "replacement">,
+): ReplaceEligibility => {
+  if (
+    (match.story !== undefined && match.story !== "main") ||
+    match.textBoxIndex !== undefined ||
+    match.commentId !== undefined
+  )
+    return { status: "blocked", reason: "non-body-story" };
+  return match.replacement;
 };
 
 export type FindOptions = {
   matchCase: boolean;
   matchWholeWord: boolean;
   useRegex?: boolean;
+  displayMode?: DisplayMode;
+  includeComments?: boolean;
 };
 
 export type FindResult = {
   matches: FindMatch[];
   totalCount: number;
   currentIndex: number;
+};
+
+/** Rendering eligibility supplied by the view; matching remains owned here. */
+export type FindSearchContext = {
+  renderedStories?: readonly OpStory[];
 };
 
 export const createDefaultFindOptions = (): FindOptions => ({
@@ -50,7 +120,7 @@ export const createSearchPattern = (searchText: string, options: FindOptions): R
 
   try {
     const source = options.useRegex ? searchText : escapeRegexString(searchText);
-    const pattern = options.matchWholeWord ? `\\b${source}\\b` : source;
+    const pattern = options.matchWholeWord ? `\\b(?:${source})\\b` : source;
     return new RegExp(pattern, options.matchCase ? "gu" : "giu");
   } catch {
     return null;
@@ -65,20 +135,18 @@ export const findAllMatches = (
   if (!content || !searchText) {
     return [];
   }
-  const searchFor = options.matchCase ? searchText : searchText.toLowerCase();
-  const source = escapeRegexString(searchFor);
-  const pattern = new RegExp(
-    options.matchWholeWord ? `\\b${source}\\b` : source,
-    options.matchCase ? "gu" : "giu",
-  );
+  const pattern = createSearchPattern(searchText, options);
+  if (!pattern) return [];
 
   const matches: Array<{ start: number; end: number }> = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(content)) !== null) {
-    matches.push({ start: match.index, end: match.index + match[0].length });
     if (match[0].length === 0) {
-      pattern.lastIndex++;
+      const codePoint = content.codePointAt(pattern.lastIndex);
+      pattern.lastIndex += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+      continue;
     }
+    matches.push({ start: match.index, end: match.index + match[0].length });
   }
   return matches;
 };
@@ -87,7 +155,8 @@ export const findInDocument = (
   document: Document | null | undefined,
   searchText: string,
   options: FindOptions,
-): FindMatch[] => {
+  context?: FindSearchContext,
+): Array<FindMatch & { story: OpStory }> => {
   if (!document || !searchText) {
     return [];
   }
@@ -96,20 +165,242 @@ export const findInDocument = (
     return [];
   }
 
-  const matches: FindMatch[] = [];
-  forEachParagraph(body.content, (paragraph, paragraphIndex) => {
-    matches.push(...findInParagraph(paragraph, searchText, options, paragraphIndex));
-  });
+  const matches: Array<FindMatch & { story: OpStory }> = [];
+  // One package part contributes one story, even when rendered on many pages.
+  // Main, headers, footers, footnotes, endnotes, then opt-in comments;
+  // variants follow section references default/first/even. Shape text follows
+  // its anchor paragraph, tables use row/cell order.
+  for (const story of orderedSearchStories(document)) {
+    if (
+      story !== "main" &&
+      (story.kind === "header" || story.kind === "footer") &&
+      context?.renderedStories &&
+      !context.renderedStories.some((rendered) => sameStory(rendered, story))
+    )
+      continue;
+    const blocks = storyBody(document, story).content;
+    if (story !== "main" && (story.kind === "footnote" || story.kind === "endnote")) {
+      const notes =
+        story.kind === "footnote" ? document.package.footnotes : document.package.endnotes;
+      const noteType = notes?.find(({ id }) => id === story.id)?.noteType;
+      if (noteType && noteType !== "normal") continue;
+    }
+    let textBoxIndex = 0;
+    const searchBlocks = (
+      items: readonly BlockContent[],
+      shapeAddress?: {
+        textBoxIndex: number;
+        anchorParagraphIndex: number;
+      },
+      visible = true,
+    ): void => {
+      forEachParagraph(
+        items,
+        (paragraph, paragraphIndex, structureVisible) => {
+          const paragraphVisible = visible && structureVisible;
+          if (paragraphVisible) {
+            for (const match of findInParagraph(paragraph, searchText, options, paragraphIndex)) {
+              if (shapeAddress) {
+                matches.push({
+                  ...match,
+                  story,
+                  textBoxIndex: shapeAddress.textBoxIndex,
+                  anchorParagraphIndex: shapeAddress.anchorParagraphIndex,
+                });
+              } else {
+                matches.push({ ...match, story });
+              }
+            }
+          }
+          for (const { shape, visible: shapeVisible } of paragraphShapes(
+            paragraph.content,
+            options.displayMode,
+          )) {
+            if (!shape.textBody) continue;
+            searchBlocks(
+              shape.textBody.content,
+              {
+                textBoxIndex: textBoxIndex++,
+                anchorParagraphIndex: shapeAddress?.anchorParagraphIndex ?? paragraphIndex,
+              },
+              paragraphVisible && shapeVisible,
+            );
+          }
+        },
+        options.displayMode,
+      );
+    };
+    searchBlocks(blocks);
+  }
+  if (options.includeComments) {
+    for (const comment of document.package.document.comments ?? []) {
+      forEachParagraph(comment.content, (paragraph, paragraphIndex, visible) => {
+        if (!visible) return;
+        for (const match of findInParagraph(
+          paragraph,
+          searchText,
+          { ...options, displayMode: "all-markup" },
+          paragraphIndex,
+        )) {
+          matches.push({ ...match, story: "main", commentId: comment.id });
+        }
+      });
+    }
+  }
+  for (const match of matches) match.replacement = replaceEligibility(match);
   return matches;
 };
+
+const orderedSearchStories = (document: Document): OpStory[] => {
+  const stories = documentStories(document);
+  const ordered: OpStory[] = ["main"];
+  const seen = new Set<string>();
+  for (const kind of ["header", "footer"] as const) {
+    const add = (rId: string): void => {
+      const key = `${kind}:${rId}`;
+      const parts = kind === "header" ? document.package.headers : document.package.footers;
+      if (seen.has(key) || !parts?.has(rId)) return;
+      seen.add(key);
+      ordered.push({ kind, rId });
+    };
+    for (const section of document.package.document.sections ?? []) {
+      const refs =
+        kind === "header"
+          ? section.properties.headerReferences
+          : section.properties.footerReferences;
+      for (const variant of ["default", "first", "even"] as const) {
+        for (const ref of refs ?? []) {
+          if (ref.type === variant) add(ref.rId);
+        }
+      }
+    }
+    for (const story of stories) {
+      if (story !== "main" && story.kind === kind) add(story.rId);
+    }
+  }
+  for (const story of stories) {
+    if (story !== "main" && (story.kind === "footnote" || story.kind === "endnote"))
+      ordered.push(story);
+  }
+  return ordered;
+};
+
+const isHiddenRevision = (
+  type: ParagraphContent["type"],
+  mode: DisplayMode | undefined,
+): boolean => {
+  if (mode === "original") return type === "insertion" || type === "moveTo";
+  if (mode === "no-markup" || mode === "simple-markup")
+    return type === "deletion" || type === "moveFrom";
+  return false;
+};
+
+const paragraphShapes = (content: readonly ParagraphContent[], mode: DisplayMode | undefined) => {
+  const shapes: Array<{ shape: Shape; visible: boolean }> = [];
+  const visit = (items: readonly ParagraphContent[], visible = true): void => {
+    for (const item of items) {
+      const itemVisible = visible && !isHiddenRevision(item.type, mode);
+      if (item.type === "run") {
+        for (const child of item.content) {
+          if (child.type === "shape") shapes.push({ shape: child.shape, visible: itemVisible });
+        }
+      } else if (item.type === "hyperlink") {
+        visit(item.children, itemVisible);
+      } else if (item.type === "complexField") {
+        visit(item.fieldResult, itemVisible);
+      } else if ("content" in item) {
+        visit(item.content, itemVisible);
+      }
+    }
+  };
+  visit(content);
+  return shapes;
+};
+
+/** Visible characters retain offsets in the authored paragraph, including hidden revisions. */
+const getVisibleParagraphProjection = (paragraph: Paragraph, mode: DisplayMode | undefined) => {
+  if (mode === undefined || mode === "all-markup") {
+    const projection = joinSearchProjections(
+      paragraph.content.map(getParagraphContentSearchProjection),
+    );
+    return { ...projection, offsets: [], hiddenContentBarriers: [] };
+  }
+  let text = "";
+  let authoredOffset = 0;
+  const offsets: number[] = [];
+  const hiddenContentBarriers: number[] = [];
+  const replacementBarriers: number[] = [];
+  const atomicContentRanges: { start: number; end: number }[] = [];
+  const fieldTextRanges: { start: number; end: number }[] = [];
+  const excludedTextRanges: { start: number; end: number }[] = [];
+  const pageBreakOffsets: number[] = [];
+  const visit = (items: readonly ParagraphContent[]): void => {
+    for (const item of items) {
+      if (isHiddenRevision(item.type, mode)) {
+        // Hidden source can carry anchors without a searchable character. Its
+        // boundary must survive even when authored text offsets stay adjacent.
+        hiddenContentBarriers.push(text.length);
+        authoredOffset += getParagraphContentSearchProjection(item).text.length;
+        continue;
+      }
+      if (item.type === "hyperlink") {
+        visit(item.children);
+        continue;
+      }
+      if (item.type === "complexField" || item.type === "simpleField") {
+        const start = text.length;
+        visit(item.type === "complexField" ? item.fieldResult : item.content);
+        fieldTextRanges.push({ start, end: text.length });
+        if (isPageDependentSearchField(item.instruction))
+          excludedTextRanges.push({ start, end: text.length });
+        continue;
+      }
+      if (item.type !== "run" && "content" in item) {
+        visit(item.content);
+        continue;
+      }
+      const part = getParagraphContentSearchProjection(item);
+      for (const offset of part.replacementBarriers ?? [])
+        replacementBarriers.push(text.length + offset);
+      for (const range of part.atomicContentRanges ?? [])
+        atomicContentRanges.push({
+          start: text.length + range.start,
+          end: text.length + range.end,
+        });
+      for (const range of part.fieldTextRanges ?? [])
+        fieldTextRanges.push({ start: text.length + range.start, end: text.length + range.end });
+      for (const range of part.excludedTextRanges ?? [])
+        excludedTextRanges.push({ start: text.length + range.start, end: text.length + range.end });
+      for (const offset of part.pageBreakOffsets) pageBreakOffsets.push(text.length + offset);
+      for (let index = 0; index < part.text.length; index++) offsets.push(authoredOffset + index);
+      text += part.text;
+      authoredOffset += part.text.length;
+    }
+  };
+  visit(paragraph.content);
+  return {
+    text,
+    offsets,
+    hiddenContentBarriers,
+    pageBreakOffsets,
+    excludedTextRanges,
+    fieldTextRanges,
+    atomicContentRanges,
+    replacementBarriers,
+  };
+};
+
+/** Authored paragraph text displayed by comment UI, using the search owner. */
+export const getFindParagraphText = (paragraph: Paragraph): string =>
+  getVisibleParagraphProjection(paragraph, undefined).text;
 
 export const findInParagraph = (
   paragraph: Paragraph,
   searchText: string,
   options: FindOptions,
   paragraphIndex: number,
-): FindMatch[] => {
-  const projection = getParagraphSearchProjection(paragraph);
+): ParagraphFindMatch[] => {
+  const projection = getVisibleParagraphProjection(paragraph, options.displayMode);
   if (!projection.text) {
     return [];
   }
@@ -117,46 +408,89 @@ export const findInParagraph = (
   return findAllMatches(projection.text, searchText, options)
     .filter(
       ({ start, end }) =>
-        !projection.pageBreakOffsets.some((offset) => offset > start && offset < end),
+        !projection.pageBreakOffsets.some((offset) => offset > start && offset < end) &&
+        !(projection.excludedTextRanges ?? []).some(
+          (range) => range.start < end && range.end > start,
+        ),
     )
     .map(({ start, end }) => ({
       paragraphIndex,
-      contentIndex: findContentIndexAtOffset(paragraph, start),
-      startOffset: start,
-      endOffset: end,
+      replacement: replacementForProjection({ projection, start, end }),
+      contentIndex: findContentIndexAtOffset(paragraph, projection.offsets.at(start) ?? start),
+      startOffset: projection.offsets.at(start) ?? start,
+      endOffset: (projection.offsets.at(end - 1) ?? end - 1) + 1,
       text: projection.text.slice(start, end),
     }));
 };
 
-type ParagraphVisitor = (paragraph: Paragraph, paragraphIndex: number) => void;
+type ReplacementProjectionOptions = {
+  projection: SearchProjection & { offsets: number[]; hiddenContentBarriers: number[] };
+  start: number;
+  end: number;
+};
+const replacementForProjection = ({
+  projection,
+  start,
+  end,
+}: ReplacementProjectionOptions): ReplaceEligibility => {
+  if (projection.hiddenContentBarriers.some((offset) => offset > start && offset < end))
+    return { status: "blocked", reason: "hidden-content" };
+  if ((projection.fieldTextRanges ?? []).some((range) => range.start < end && range.end > start))
+    return { status: "blocked", reason: "field-result" };
+  if (
+    (projection.atomicContentRanges ?? []).some((range) => range.start < end && range.end > start)
+  )
+    return { status: "blocked", reason: "atomic-content" };
+  if ((projection.replacementBarriers ?? []).some((offset) => offset > start && offset < end))
+    return { status: "blocked", reason: "atomic-content" };
+  for (let offset = start + 1; offset < end; offset++) {
+    if (
+      (projection.offsets.at(offset) ?? offset) !==
+      (projection.offsets.at(offset - 1) ?? offset - 1) + 1
+    )
+      return { status: "blocked", reason: "hidden-content" };
+  }
+  return { status: "allowed" };
+};
 
-const forEachParagraph = (blocks: readonly BlockContent[], visit: ParagraphVisitor): void => {
+type ParagraphVisitor = (paragraph: Paragraph, paragraphIndex: number, visible: boolean) => void;
+
+const forEachParagraph = (
+  blocks: readonly BlockContent[],
+  visit: ParagraphVisitor,
+  displayMode?: DisplayMode,
+): void => {
   let paragraphIndex = 0;
-  const walkBlocks = (items: readonly BlockContent[]): void => {
+  const walkBlocks = (items: readonly BlockContent[], visible = true): void => {
     for (const block of items) {
       if (isParagraph(block)) {
-        visit(block, paragraphIndex);
+        visit(block, paragraphIndex, visible);
         paragraphIndex++;
         continue;
       }
       if (isTable(block)) {
-        walkTable(block);
+        walkTable(block, visible);
         continue;
       }
       if (isBlockContainer(block)) {
-        walkBlocks(block.content);
+        walkBlocks(block.content, visible);
       }
     }
   };
 
-  const walkTable = (table: Table): void => {
+  const walkTable = (table: Table, visible: boolean): void => {
     for (const row of table.rows) {
       if (!isTableRow(row)) {
         continue;
       }
       for (const cell of row.cells) {
         if (isTableCell(cell)) {
-          walkBlocks(cell.content);
+          walkBlocks(
+            cell.content,
+            visible &&
+              isVisibleStructure(row.structuralChange, displayMode) &&
+              isVisibleStructure(cell.structuralChange, displayMode),
+          );
         }
       }
     }
@@ -165,58 +499,142 @@ const forEachParagraph = (blocks: readonly BlockContent[], visit: ParagraphVisit
   walkBlocks(blocks);
 };
 
+const isVisibleStructure = (
+  change: TableRow["structuralChange"],
+  mode: DisplayMode | undefined,
+): boolean => {
+  if (mode === undefined || mode === "all-markup" || !change) return true;
+  let kind: "ins" | "del" | "merge";
+  switch (change.type) {
+    case "tableRowInsertion":
+    case "tableCellInsertion":
+      kind = "ins";
+      break;
+    case "tableRowDeletion":
+    case "tableCellDeletion":
+      kind = "del";
+      break;
+    case "tableCellMerge":
+      kind = "merge";
+      break;
+    default: {
+      const exhaustive: never = change;
+      return exhaustive;
+    }
+  }
+  return isTableCellRetainedInReviewView(kind, mode === "original" ? "original" : "final");
+};
+
+// Pagination-derived results vary by rendered occurrence or become stale when
+// layout changes. They cannot participate in count-once search of shared parts.
+const PAGE_DEPENDENT_SEARCH_FIELDS = new Set(["PAGE", "NUMPAGES", "SECTIONPAGES", "PAGEREF"]);
+
+export const isPageDependentSearchField = (instruction: string): boolean =>
+  PAGE_DEPENDENT_SEARCH_FIELDS.has(parseFieldType(instruction));
+
 type SearchProjection = {
   text: string;
   pageBreakOffsets: number[];
+  excludedTextRanges?: { start: number; end: number }[];
+  fieldTextRanges?: { start: number; end: number }[];
+  atomicContentRanges?: { start: number; end: number }[];
+  replacementBarriers?: number[];
 };
 
 const joinSearchProjections = (parts: readonly SearchProjection[]): SearchProjection => {
   let text = "";
   const pageBreakOffsets: number[] = [];
+  const replacementBarriers: number[] = [];
+  const atomicContentRanges: { start: number; end: number }[] = [];
+  const fieldTextRanges: { start: number; end: number }[] = [];
+  const excludedTextRanges: { start: number; end: number }[] = [];
   for (const part of parts) {
     const baseOffset = text.length;
     text += part.text;
+    for (const offset of part.replacementBarriers ?? [])
+      replacementBarriers.push(baseOffset + offset);
+    for (const range of part.atomicContentRanges ?? [])
+      atomicContentRanges.push({ start: baseOffset + range.start, end: baseOffset + range.end });
+    for (const range of part.fieldTextRanges ?? [])
+      fieldTextRanges.push({ start: baseOffset + range.start, end: baseOffset + range.end });
+    for (const range of part.excludedTextRanges ?? [])
+      excludedTextRanges.push({ start: baseOffset + range.start, end: baseOffset + range.end });
     for (const offset of part.pageBreakOffsets) {
       pageBreakOffsets.push(baseOffset + offset);
     }
   }
-  return { text, pageBreakOffsets };
+  return {
+    text,
+    pageBreakOffsets,
+    excludedTextRanges,
+    fieldTextRanges,
+    atomicContentRanges,
+    replacementBarriers,
+  };
 };
 
 const getRunSearchProjection = (run: Run): SearchProjection => {
   let text = "";
   const pageBreakOffsets: number[] = [];
+  const replacementBarriers: number[] = [];
+  const atomicContentRanges: { start: number; end: number }[] = [];
   for (const item of run.content) {
-    if (item.type === "text") {
-      text += item.text;
-    } else if (item.type === "tab") {
-      text += "\t";
-    } else if (
-      item.type === "break" &&
-      (item.breakType === undefined || item.breakType === "textWrapping")
-    ) {
-      text += "\n";
-    } else if (item.type === "break" && item.breakType === "page") {
-      pageBreakOffsets.push(text.length);
+    switch (item.type) {
+      case "preservedXml":
+        if (!item.text) replacementBarriers.push(text.length);
+        atomicContentRanges.push({ start: text.length, end: text.length + item.text.length });
+        text += item.text;
+        break;
+      case "text":
+        text += item.text;
+        break;
+      case "symbol": {
+        const character = decodeOoxmlSymbolCharacter(item.char);
+        if (character) text += character;
+        else replacementBarriers.push(text.length);
+        break;
+      }
+      case "tab":
+        text += "\t";
+        break;
+      case "softHyphen":
+      case "noBreakHyphen":
+        text += HYPHEN_TEXT_CARRIERS[item.type];
+        break;
+      case "break":
+        if (item.breakType === "page") pageBreakOffsets.push(text.length);
+        else text += "\n";
+        break;
+      case "footnoteRef":
+      case "endnoteRef":
+      case "drawing":
+      case "shape":
+      case "noteMarker":
+      case "fieldChar":
+      case "instrText":
+      case "renderedPageBreak":
+        replacementBarriers.push(text.length);
+        break;
+      default: {
+        const unprojected: never = item;
+        panic(`Unsupported run content: ${JSON.stringify(unprojected)}`);
+      }
     }
   }
-  return { text, pageBreakOffsets };
+  return { text, pageBreakOffsets, atomicContentRanges, replacementBarriers };
 };
 
 // A transparent wrapper inside the link is read through: the text it holds is
 // the link's text, and the editor puts it on the line.
 const getHyperlinkSearchProjection = (hyperlink: Hyperlink): SearchProjection =>
-  joinSearchProjections(
-    hyperlink.children.flatMap((child) => {
-      if (child.type === "run") {
-        return [getRunSearchProjection(child)];
-      }
-      return child.type === "inlineWrapper" ? [getParagraphContentSearchProjection(child)] : [];
-    }),
-  );
+  joinSearchProjections(hyperlink.children.map(getParagraphContentSearchProjection));
 
 /** Nothing on the line: a marker, or markup with no text under it. */
-const noSearchText = (): SearchProjection => ({ text: "", pageBreakOffsets: [] });
+const noSearchText = (): SearchProjection => ({
+  text: "",
+  pageBreakOffsets: [],
+  replacementBarriers: [0],
+});
 
 /**
  * The text one paragraph content item puts on the line, for searching.
@@ -246,15 +664,32 @@ const getParagraphContentSearchProjection = (content: ParagraphContent): SearchP
     // it: a narrowing per type would be a mirror of the union that drifts the
     // next time the union grows.
     case "inlineSdt":
-    case "simpleField":
     case "inlineWrapper":
     case "insertion":
     case "deletion":
     case "moveFrom":
     case "moveTo":
       return joinSearchProjections(content.content.map(getParagraphContentSearchProjection));
-    case "complexField":
-      return joinSearchProjections(content.fieldResult.map(getRunSearchProjection));
+    case "simpleField":
+    case "complexField": {
+      const projection = joinSearchProjections(
+        content.type === "simpleField"
+          ? content.content.map(getParagraphContentSearchProjection)
+          : content.fieldResult.map(getRunSearchProjection),
+      );
+      // Field results are searchable, but replacement cannot edit their source
+      // atom safely. Keep all field edits outside this search replacement API.
+      const part = { ...projection, fieldTextRanges: [{ start: 0, end: projection.text.length }] };
+      return isPageDependentSearchField(content.instruction)
+        ? { ...part, excludedTextRanges: [{ start: 0, end: part.text.length }] }
+        : part;
+    }
+    case "preservedInline":
+      return {
+        text: content.text,
+        pageBreakOffsets: [],
+        atomicContentRanges: [{ start: 0, end: content.text.length }],
+      };
     case "bookmarkStart":
     case "bookmarkEnd":
     case "commentRangeStart":
@@ -265,7 +700,6 @@ const getParagraphContentSearchProjection = (content: ParagraphContent): SearchP
     case "moveToRangeStart":
     case "moveToRangeEnd":
     case "mathEquation":
-    case "preservedInline":
       return noSearchText();
     default: {
       const unprojected: never = content;
@@ -273,9 +707,6 @@ const getParagraphContentSearchProjection = (content: ParagraphContent): SearchP
     }
   }
 };
-
-const getParagraphSearchProjection = (paragraph: Paragraph): SearchProjection =>
-  joinSearchProjections(paragraph.content.map(getParagraphContentSearchProjection));
 
 const findContentIndexAtOffset = (paragraph: Paragraph, offset: number): number => {
   let currentOffset = 0;

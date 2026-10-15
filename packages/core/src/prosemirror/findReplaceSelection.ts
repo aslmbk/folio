@@ -1,13 +1,24 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import type { EditorState } from "prosemirror-state";
+import {
+  getInlineDisplayText,
+  getInlineDisplayToken,
+  isNoteReferenceText,
+} from "./inlineDisplayText";
 
 import type { DisplayMode } from "../managers/EditorModeManager";
-import { decodeOoxmlSymbolCharacter } from "../utils/ooxmlSymbol";
-import { expectSymbolAttrs } from "./attrs";
+import type { Document } from "../types/document";
+import { expectFieldAttrs } from "./attrs";
 import { projectMarkupView } from "./markupViewProjection";
+import type { MarkupViewProjection } from "./markupViewProjection";
 
-import { findAllMatches } from "../utils/findReplace";
-import type { FindOptions } from "../utils/findReplace";
+import { findAllMatches, findInDocument, isPageDependentSearchField } from "../utils/findReplace";
+import type {
+  FindMatch,
+  FindOptions,
+  FindSearchContext,
+  ReplaceEligibility,
+} from "../utils/findReplace";
 
 /**
  * Positional fields of a document search match that the range resolver needs.
@@ -29,6 +40,10 @@ export type FindMatchPosition = {
 export type FindMatchRange = {
   from: number;
   to: number;
+  /** Navigation anchors inside a logical match are excluded from decorations. */
+  excludedRanges?: { from: number; to: number }[];
+  /** Character subranges inside source atoms, whose text exceeds their PM size. */
+  atomicTextRanges?: { from: number; to: number; startOffset: number; endOffset: number }[];
 };
 
 export type ProseMirrorFindMatch = FindMatchPosition &
@@ -57,6 +72,22 @@ export function resolveFindMatchRange(
   return resolved;
 }
 
+/** Resolve a result set in one paragraph traversal, preserving result order. */
+export const resolveFindMatchRanges = (
+  doc: ProseMirrorNode,
+  matches: readonly FindMatchPosition[],
+): (FindMatchRange | null)[] => {
+  const paragraphs = new Map<number, { paragraph: ProseMirrorNode; paragraphPos: number }>();
+  forEachSearchParagraph(doc, (paragraph, paragraphPos, paragraphIndex) => {
+    paragraphs.set(paragraphIndex, { paragraph, paragraphPos });
+    return true;
+  });
+  return matches.map((match) => {
+    const paragraph = paragraphs.get(match.paragraphIndex);
+    return paragraph ? resolveTextRangeInParagraph({ ...paragraph, ...match }) : null;
+  });
+};
+
 export function findInProseMirrorDocument(
   doc: ProseMirrorNode,
   searchText: string,
@@ -68,7 +99,7 @@ export function findInProseMirrorDocument(
 
   const matches: ProseMirrorFindMatch[] = [];
   forEachSearchParagraph(doc, (paragraph, paragraphPos, paragraphIndex) => {
-    const text = getSearchableParagraphText(paragraph);
+    const text = getInlineDisplayText(paragraph);
     for (const { start, end } of findAllMatches(text, searchText, options)) {
       const range = resolveTextRangeInParagraph({
         paragraph,
@@ -109,14 +140,149 @@ export const findInMarkupView = ({
   if (projection.type === "authored") {
     return findInProseMirrorDocument(state.doc, searchText, options);
   }
-  return findInProseMirrorDocument(projection.doc, searchText, options).map((match) => ({
+  return findInProseMirrorDocument(projection.doc, searchText, options).map((match) =>
+    toAuthoredFindMatch(projection, match),
+  );
+};
+
+type PositionRange = { from: number; to: number };
+
+/** Every view-document position a match carries, mapped to the authored editor document. */
+const toAuthoredFindMatch = (
+  projection: Extract<MarkupViewProjection, { type: "resolved" }>,
+  match: ProseMirrorFindMatch,
+): ProseMirrorFindMatch => {
+  const toEditorRange = ({ from, to }: PositionRange): PositionRange => ({
+    from: projection.toEditor(from, 1),
+    to: projection.toEditor(to, -1),
+  });
+  return {
     paragraphIndex: match.paragraphIndex,
     startOffset: match.startOffset,
     endOffset: match.endOffset,
     text: match.text,
-    from: projection.toEditor(match.from, 1),
-    to: projection.toEditor(match.to, -1),
-  }));
+    ...toEditorRange(match),
+    ...(match.excludedRanges && { excludedRanges: match.excludedRanges.map(toEditorRange) }),
+    ...(match.atomicTextRanges && {
+      atomicTextRanges: match.atomicTextRanges.map((atom) => ({
+        ...toEditorRange(atom),
+        startOffset: atom.startOffset,
+        endOffset: atom.endOffset,
+      })),
+    }),
+  };
+};
+
+type FindInDisplayedDocumentOptions = {
+  document: Document;
+  /**
+   * Live body editor state. A review view reads its body from this state's
+   * projection, so null defers that search until the body editor mounts.
+   * Hosts without an editor state omit it and search the package model.
+   */
+  state?: EditorState | null | undefined;
+  searchText: string;
+  options: FindOptions;
+  context?: FindSearchContext | undefined;
+};
+
+/** Replacement policy for a projected body match, in the shared eligibility vocabulary. */
+const projectedReplacement = (
+  state: EditorState,
+  viewMatch: PositionRange,
+  authored: ProseMirrorFindMatch,
+): ReplaceEligibility => {
+  const atom = authored.atomicTextRanges?.at(0);
+  if (atom) {
+    return {
+      status: "blocked",
+      reason:
+        state.doc.nodeAt(atom.from)?.type.name === "field" ? "field-result" : "atomic-content",
+    };
+  }
+  // Authored text the view does not show widens the authored range.
+  return authored.to - authored.from === viewMatch.to - viewMatch.from
+    ? { status: "allowed" }
+    : { status: "blocked", reason: "hidden-content" };
+};
+
+/**
+ * Search every story a display mode shows. All Markup searches the package
+ * stories. A resolved review view searches its body through the projection the
+ * layout paints, so body ranges address the authored editor document; anchored
+ * shapes, headers, footers, notes and comments keep the package search owner
+ * with the same display mode. Returns null while a review view has no body
+ * editor state to project.
+ */
+export const findInDisplayedDocument = ({
+  document,
+  state,
+  searchText,
+  options,
+  context,
+}: FindInDisplayedDocumentOptions): FindMatch[] | null => {
+  const displayMode = options.displayMode ?? "all-markup";
+  if (displayMode === "all-markup" || state === undefined) {
+    return findInDocument(document, searchText, options, context);
+  }
+  if (state === null) return null;
+  const packageMatches = findInDocument(document, searchText, options, context);
+  const projection = projectMarkupView(state, displayMode);
+  if (projection.type === "authored" || !searchText) return packageMatches;
+  const bodyMatches = findInProseMirrorDocument(projection.doc, searchText, options).map(
+    (viewMatch): FindMatch => {
+      const authored = toAuthoredFindMatch(projection, viewMatch);
+      const { from, to, excludedRanges, atomicTextRanges } = authored;
+      return {
+        paragraphIndex: authored.paragraphIndex,
+        contentIndex: 0,
+        startOffset: authored.startOffset,
+        endOffset: authored.endOffset,
+        text: authored.text,
+        story: "main",
+        replacement: projectedReplacement(state, viewMatch, authored),
+        authoredRange: {
+          from,
+          to,
+          ...(excludedRanges && { excludedRanges }),
+          ...(atomicTextRanges && { atomicTextRanges }),
+        },
+      };
+    },
+  );
+  // Body shape text follows its anchor paragraph, as in the package search.
+  const anchorEnds: number[] = [];
+  forEachSearchParagraph(state.doc, (paragraph, paragraphPos, paragraphIndex) => {
+    anchorEnds[paragraphIndex] = paragraphPos + paragraph.nodeSize;
+    return true;
+  });
+  const bodyShapeMatches = packageMatches.filter(
+    (match) => match.story === "main" && match.textBoxIndex !== undefined,
+  );
+  const orderedBody: FindMatch[] = [];
+  let shapeIndex = 0;
+  const shapeAnchorEnd = (match: FindMatch): number =>
+    (match.anchorParagraphIndex !== undefined && anchorEnds[match.anchorParagraphIndex]) ||
+    Number.POSITIVE_INFINITY;
+  for (const bodyMatch of bodyMatches) {
+    const from = bodyMatch.authoredRange?.from ?? 0;
+    while (shapeIndex < bodyShapeMatches.length) {
+      const shapeMatch = bodyShapeMatches[shapeIndex];
+      if (!shapeMatch || shapeAnchorEnd(shapeMatch) > from) break;
+      orderedBody.push(shapeMatch);
+      shapeIndex++;
+    }
+    orderedBody.push(bodyMatch);
+  }
+  orderedBody.push(...bodyShapeMatches.slice(shapeIndex));
+  return [
+    ...orderedBody,
+    ...packageMatches.filter(
+      (match) =>
+        match.story !== "main" ||
+        (match.textBoxIndex === undefined && match.commentId !== undefined),
+    ),
+  ];
 };
 
 type SearchParagraphVisitor = (
@@ -196,11 +362,28 @@ function resolveTextRangeInParagraph({
   let textOffset = 0;
   const range = { from: null as number | null, to: null as number | null };
   const pageBreakOffsets: number[] = [];
+  const excludedTextRanges: { start: number; end: number }[] = [];
+  const excludedRanges: { from: number; to: number }[] = [];
+  const atomicTextRanges: NonNullable<FindMatchRange["atomicTextRanges"]> = [];
 
   paragraph.descendants((node, pos) => {
+    if (
+      (node.type.name === "field" || node.type.name === "structuredField") &&
+      isPageDependentSearchField(expectFieldAttrs(node).instruction)
+    ) {
+      const length =
+        node.type.name === "field"
+          ? expectFieldAttrs(node).displayText.length
+          : getInlineDisplayText(node).length;
+      excludedTextRanges.push({ start: textOffset, end: textOffset + length });
+    }
     if (node.type.name === "pageBreakRun") {
       pageBreakOffsets.push(textOffset);
       return false;
+    }
+    if (isNoteReferenceText(node)) {
+      const from = paragraphPos + 1 + pos;
+      excludedRanges.push({ from, to: from + node.nodeSize });
     }
     const tokenLength = getSearchTextTokenLength(node);
     if (tokenLength === 0) {
@@ -210,12 +393,26 @@ function resolveTextRangeInParagraph({
     const textStart = textOffset;
     const textEnd = textStart + tokenLength;
     const nodeStart = paragraphPos + 1 + pos;
+    const atomic = node.type.name === "field" || node.type.name === "preservedXml";
+
+    if (atomic && textStart < endOffset && textEnd > startOffset) {
+      atomicTextRanges.push({
+        from: nodeStart,
+        to: nodeStart + node.nodeSize,
+        startOffset: Math.max(0, startOffset - textStart),
+        endOffset: Math.min(tokenLength, endOffset - textStart),
+      });
+    }
 
     if (range.from === null && startOffset >= textStart && startOffset < textEnd) {
-      range.from = nodeStart + Math.min(startOffset - textStart, node.nodeSize);
+      range.from = atomic
+        ? nodeStart
+        : nodeStart + Math.min(startOffset - textStart, node.nodeSize);
     }
     if (range.to === null && endOffset > textStart && endOffset <= textEnd) {
-      range.to = nodeStart + Math.min(endOffset - textStart, node.nodeSize);
+      range.to = atomic
+        ? nodeStart + node.nodeSize
+        : nodeStart + Math.min(endOffset - textStart, node.nodeSize);
     }
 
     textOffset = textEnd;
@@ -226,46 +423,24 @@ function resolveTextRangeInParagraph({
     range.from === null ||
     range.to === null ||
     range.from >= range.to ||
-    pageBreakOffsets.some((offset) => offset > startOffset && offset < endOffset)
+    pageBreakOffsets.some((offset) => offset > startOffset && offset < endOffset) ||
+    excludedTextRanges.some(({ start, end }) => start < endOffset && end > startOffset)
   ) {
     return null;
   }
 
-  return { from: range.from, to: range.to };
+  const from = range.from;
+  const to = range.to;
+  const visibleExcludedRanges = excludedRanges.filter(
+    (anchor) => anchor.from < to && anchor.to > from,
+  );
+  return {
+    from,
+    to,
+    ...(atomicTextRanges.length > 0 && { atomicTextRanges }),
+    ...(visibleExcludedRanges.length > 0 && { excludedRanges: visibleExcludedRanges }),
+  };
 }
 
-function getSearchTextTokenLength(node: ProseMirrorNode): number {
-  if (node.isText) {
-    return node.text?.length ?? 0;
-  }
-
-  if (node.type.name === "tab" || node.type.name === "hardBreak" || node.type.name === "symbol") {
-    return 1;
-  }
-
-  return 0;
-}
-
-function getSearchableParagraphText(paragraph: ProseMirrorNode): string {
-  let text = "";
-  paragraph.descendants((node) => {
-    if (node.isText) {
-      text += node.text ?? "";
-      return false;
-    }
-    if (node.type.name === "tab") {
-      text += "\t";
-      return false;
-    }
-    if (node.type.name === "hardBreak") {
-      text += "\n";
-      return false;
-    }
-    if (node.type.name === "symbol") {
-      text += decodeOoxmlSymbolCharacter(expectSymbolAttrs(node).char) ?? "";
-      return false;
-    }
-    return true;
-  });
-  return text;
-}
+const getSearchTextTokenLength = (node: ProseMirrorNode): number =>
+  getInlineDisplayToken(node)?.length ?? 0;

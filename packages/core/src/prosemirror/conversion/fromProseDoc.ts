@@ -1,3 +1,4 @@
+import { getFindParagraphText } from "../../utils/findReplace";
 import {
   paragraphNumberingSourcesFromBoundary,
   effectiveParagraphNumbering,
@@ -4576,7 +4577,7 @@ const synchronizeFieldDisplayText = (
   displayText: string,
   fallbackRun: Run,
 ): SimpleField["content"] => {
-  let currentText = "";
+  const currentText = getFindParagraphText({ type: "paragraph", content });
   // A transparent wrapper is stepped through rather than stopped at: the runs
   // it holds carry the field's cached display, so a field whose result was
   // authored inside a `w:bdo` must not read as holding no text at all.
@@ -4601,13 +4602,6 @@ const synchronizeFieldDisplayText = (
   const visitRuns = (visit: (run: Run) => void): void => {
     visitRunsIn(content, visit);
   };
-  visitRuns((run) => {
-    for (const runContent of run.content) {
-      if (runContent.type === "text") {
-        currentText += runContent.text;
-      }
-    }
-  });
   if (currentText === displayText) {
     return content;
   }

@@ -5,6 +5,7 @@ import type {
   FootnoteProperties,
   SectionProperties,
 } from "@stll/folio-core/types/document";
+import type { ReplaceAllSummary } from "@stll/folio-core/utils/findReplace";
 import type { FindMatch, FindOptions, FindResult } from "./dialogs/findReplaceUtils";
 import type { ImagePositionData } from "./dialogs/ImagePositionDialog";
 import type { ImagePropertiesData } from "./dialogs/ImagePropertiesDialog";
@@ -56,11 +57,17 @@ export type FindReplaceMount = {
   state: UseFindReplaceReturn["state"];
   onClose: () => void;
   onFind: (searchText: string, options: FindOptions) => FindResult | null;
+  onQueryChange: (searchText: string, options: FindOptions) => void;
   onFindNext: () => FindMatch | null;
   onFindPrevious: () => FindMatch | null;
   onReplace: (replaceText: string) => boolean;
-  onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => number;
-  currentResult: FindResult | null;
+  onReplaceAll: (
+    searchText: string,
+    replaceText: string,
+    options: FindOptions,
+  ) => ReplaceAllSummary;
+  currentSearch: { queryKey: string; result: FindResult } | null;
+  readOnly: boolean;
 };
 
 export type TablePropertiesMount = {
@@ -138,12 +145,15 @@ export function DocxEditorDialogs({
           isOpen={true}
           onClose={findReplace.onClose}
           onFind={findReplace.onFind}
+          onQueryChange={findReplace.onQueryChange}
           onFindNext={findReplace.onFindNext}
           onFindPrevious={findReplace.onFindPrevious}
           onReplace={findReplace.onReplace}
           onReplaceAll={findReplace.onReplaceAll}
           initialSearchText={findReplace.state.searchText}
-          currentResult={findReplace.currentResult}
+          currentSearch={findReplace.currentSearch}
+          readOnly={findReplace.readOnly}
+          replaceMode={findReplace.state.dialog.mode === "replace"}
         />
       )}
       {tableProperties.isOpen && (
