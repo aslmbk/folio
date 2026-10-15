@@ -23,6 +23,7 @@ import { assertHostPeersExternal } from "./host-peer-policy";
 export const repoRoot = path.resolve(import.meta.dir, "..");
 export const prepareScript = path.join(repoRoot, "scripts", "prepare-publish.ts");
 export const docxCoreDir = path.join(repoRoot, "packages", "docx-core");
+export const utf8BoundariesDir = path.join(repoRoot, "packages", "utf8-boundaries");
 export const coreDir = path.join(repoRoot, "packages", "core");
 export const reactDir = path.join(repoRoot, "packages", "react");
 export const consumerSrc = path.join(repoRoot, "test", "packaged-consumer");
@@ -105,6 +106,7 @@ type WriteConsumerPackageJsonOptions = {
   consumerDir: string;
   coreTarball: string;
   docxCoreTarball: string;
+  utf8BoundariesTarball: string;
 };
 
 // Write the clean-room consumer's package.json. The `overrides` entries pin
@@ -113,6 +115,7 @@ export const writeConsumerPackageJson = async ({
   consumerDir,
   coreTarball,
   docxCoreTarball,
+  utf8BoundariesTarball,
 }: WriteConsumerPackageJsonOptions): Promise<void> => {
   const consumerPkg = {
     name: "folio-packaged-consumer",
@@ -122,6 +125,7 @@ export const writeConsumerPackageJson = async ({
     overrides: {
       "@stll/docx-core": docxCoreTarball,
       "@stll/folio-core": coreTarball,
+      "@stll/utf8-boundaries": utf8BoundariesTarball,
     },
   };
   await writeFile(

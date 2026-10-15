@@ -1,3 +1,4 @@
+import { sliceText } from "../utils/sliceText";
 import {
   isEmptyRunPropertiesAttribute,
   retainsEmptyRunProperties,
@@ -115,7 +116,9 @@ import { parsePropertyChangeInfo } from "./trackedChangeInfo";
 const MAX_LANGUAGE_TAG_LENGTH = 35;
 
 const truncateLanguageTag = (value: string | undefined): string | undefined =>
-  value === undefined ? undefined : value.slice(0, MAX_LANGUAGE_TAG_LENGTH);
+  value === undefined
+    ? undefined
+    : sliceText({ text: value, units: "codeUnits", end: MAX_LANGUAGE_TAG_LENGTH });
 
 /**
  * Parse color value from attributes
