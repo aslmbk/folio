@@ -516,7 +516,11 @@ export type Model = {
   /** Paragraph style ids the saved package must define. */
   styles: Set<string>;
   /** Comments that must exist, with their anchored text when it is known. */
-  comments: { text: string; anchor?: () => string | undefined }[];
+  comments: {
+    text: string;
+    anchor?: () => string | undefined;
+    removed?: () => boolean;
+  }[];
   /** Operations the oracle has no expectation for; the check notes them. */
   unmodelled: string[];
   /** Blocks that are paragraphs of a text box drawn in the block before them. */
@@ -1030,12 +1034,26 @@ const addComment = (
   model: Model,
   operation: Operation,
   anchor?: () => string | undefined,
+  removed?: () => boolean,
 ): void => {
   const comment = operation["comment"] as { text?: string } | undefined;
   if (typeof comment?.text === "string") {
-    model.comments.push({ text: comment.text, ...(anchor === undefined ? {} : { anchor }) });
+    model.comments.push({
+      text: comment.text,
+      ...(anchor === undefined ? {} : { anchor }),
+      ...(removed === undefined ? {} : { removed }),
+    });
   }
 };
+
+const coveredRangeWasRemoved = (row: ModelRow, start: number, end: number): boolean =>
+  start < end &&
+  Array.from({ length: end - start }, (_, index) => start + index).every((offset) =>
+    row.edits.some(
+      ({ start: cutStart, end: cutEnd, replace }) =>
+        replace === "" && cutStart <= offset && offset < cutEnd,
+    ),
+  );
 
 /** Whether the row's text is still the pre-state's, so offsets into it hold. */
 const untouchedText = (row: ModelRow): boolean =>
@@ -1171,16 +1189,24 @@ export const EXPECTATIONS = {
   commentOnRange: (model, operation) => {
     const { blockId, start, end } = rangeOf(operation);
     const row = target(model, blockId);
-    addComment(model, operation, () =>
-      untouchedText(row) && !row.removed ? row.text.slice(start, end) : undefined,
+    addComment(
+      model,
+      operation,
+      () => (untouchedText(row) && !row.removed ? row.text.slice(start, end) : undefined),
+      () => coveredRangeWasRemoved(row, start, end),
     );
   },
   commentOnBlock: (model, operation) => {
     const row = target(model, operation["blockId"]);
     const quote = operation["quote"];
     const anchored = typeof quote === "string" ? quote : undefined;
-    addComment(model, operation, () =>
-      untouchedText(row) && !row.removed ? (anchored ?? row.text) : undefined,
+    const start = anchored === undefined ? 0 : row.text.indexOf(anchored);
+    const end = start + (anchored?.length ?? row.text.length);
+    addComment(
+      model,
+      operation,
+      () => (untouchedText(row) && !row.removed ? (anchored ?? row.text) : undefined),
+      () => start >= 0 && coveredRangeWasRemoved(row, start, end),
     );
   },
   insertAfterBlock: insertBlock("after"),
@@ -1696,6 +1722,7 @@ export const compareComments = (
   }
   const beforeIds = new Set(before.map(({ id }) => id));
   for (const comment of model.comments) {
+    if (comment.removed?.()) continue;
     const anchor = comment.anchor?.();
     const index = remaining.findIndex(
       (candidate) =>
@@ -1709,6 +1736,22 @@ export const compareComments = (
       );
     } else {
       remaining.splice(index, 1);
+    }
+  }
+  // A new comment the model removed must not survive among the unclaimed ones.
+  for (const comment of model.comments) {
+    if (!comment.removed?.()) continue;
+    const anchor = comment.anchor?.();
+    const stale = remaining.find(
+      (candidate) =>
+        !beforeIds.has(candidate.id) &&
+        candidate.text === comment.text &&
+        (anchor === undefined || candidate.anchor === anchor),
+    );
+    if (stale !== undefined) {
+      problems.push(
+        `removed comment ${JSON.stringify({ text: comment.text, anchor })} remains among ${JSON.stringify(after)}`,
+      );
     }
   }
   // Only what no expectation claimed can be the removed comment itself.

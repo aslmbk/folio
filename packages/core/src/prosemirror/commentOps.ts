@@ -23,6 +23,7 @@ export function createComment(
 ): Comment {
   return {
     id: allocator.next(),
+    ...(parentId === undefined && { anchorKind: "range" }),
     author: authorName,
     date: new Date().toISOString(),
     content: [commentTextParagraph(text)],
